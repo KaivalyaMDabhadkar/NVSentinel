@@ -26,6 +26,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/metrics"
 	"golang.org/x/exp/maps"
 	"k8s.io/klog/v2"
 )
@@ -54,14 +55,18 @@ func NewSlidingWindowBreaker(ctx context.Context, cfg Config) (CircuitBreaker, e
 		b.indexToNodes[i] = make(map[string]bool)
 	}
 
-	err := cfg.EnsureConfigMap(ctx, StateClosed)
+	err := cfg.K8sClient.EnsureCircuitBreakerConfigMap(ctx, cfg.ConfigMapName, cfg.ConfigMapNamespace, string(StateClosed))
 	if err != nil {
 		klog.Errorf("Error ensuring circuit breaker config map: %v", err)
 		return nil, fmt.Errorf("error ensuring circuit breaker config map: %w", err)
 	}
 
-	if s, err := cfg.ReadStateFn(ctx); err == nil && (s == StateClosed || s == StateTripped) {
-		b.state = s
+	stateStr, err := cfg.K8sClient.ReadCircuitBreakerState(ctx, cfg.ConfigMapName, cfg.ConfigMapNamespace)
+	if err == nil {
+		s := State(stateStr)
+		if s == StateClosed || s == StateTripped {
+			b.state = s
+		}
 	}
 
 	return b, nil
@@ -199,7 +204,7 @@ func (b *slidingWindowBreaker) IsTripped(ctx context.Context) (bool, error) {
 	klog.Infof("Recent Total Cordoned Nodes: %d, Total Nodes: %d, TripPercentage: %f",
 		recentCordonedNodes, totalNodes, b.cfg.TripPercentage)
 
-	SetFaultQuarantineBreakerUtilization(float64(recentCordonedNodes) / float64(totalNodes))
+	metrics.SetFaultQuarantineBreakerUtilization(float64(recentCordonedNodes) / float64(totalNodes))
 	b.mu.Unlock()
 
 	if shouldTrip {
@@ -209,12 +214,12 @@ func (b *slidingWindowBreaker) IsTripped(ctx context.Context) (bool, error) {
 			return true, fmt.Errorf("error forcing circuit breaker state to TRIPPED: %w", err)
 		}
 
-		SetFaultQuarantineBreakerState(StateTripped)
+		metrics.SetFaultQuarantineBreakerState(string(StateTripped))
 
 		return true, nil
 	}
 
-	SetFaultQuarantineBreakerState(StateClosed)
+	metrics.SetFaultQuarantineBreakerState(string(StateClosed))
 
 	return false, nil
 }
@@ -227,7 +232,9 @@ func (b *slidingWindowBreaker) ForceState(ctx context.Context, s State) error {
 	b.state = s
 	b.mu.Unlock()
 
-	if err := b.cfg.WriteStateFn(ctx, s); err != nil {
+	err := b.cfg.K8sClient.WriteCircuitBreakerState(
+		ctx, b.cfg.ConfigMapName, b.cfg.ConfigMapNamespace, string(s))
+	if err != nil {
 		klog.Errorf("Error writing circuit breaker state: %v", err)
 		return err
 	}
@@ -257,10 +264,10 @@ func (b *slidingWindowBreaker) getTotalNodesWithRetry(ctx context.Context) (int,
 
 	defer func() {
 		duration := time.Since(startTime).Seconds()
-		faultQuarantineGetTotalNodesDuration.WithLabelValues(result).Observe(duration)
+		metrics.FaultQuarantineGetTotalNodesDuration.WithLabelValues(result).Observe(duration)
 
 		if errorType != "" {
-			faultQuarantineGetTotalNodesErrors.WithLabelValues(errorType).Inc()
+			metrics.FaultQuarantineGetTotalNodesErrors.WithLabelValues(errorType).Inc()
 		}
 	}()
 
@@ -269,7 +276,7 @@ func (b *slidingWindowBreaker) getTotalNodesWithRetry(ctx context.Context) (int,
 	var lastErr error
 
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		totalNodes, err := b.cfg.GetTotalNodes(ctx)
+		totalNodes, err := b.cfg.K8sClient.GetTotalNodes(ctx)
 
 		if err != nil {
 			result = resultError
@@ -281,7 +288,7 @@ func (b *slidingWindowBreaker) getTotalNodesWithRetry(ctx context.Context) (int,
 		if totalNodes > 0 {
 			result = "success"
 
-			faultQuarantineGetTotalNodesRetryAttempts.Observe(float64(attempt))
+			metrics.FaultQuarantineGetTotalNodesRetryAttempts.Observe(float64(attempt))
 
 			return b.handleSuccessfulNodeCount(totalNodes, attempt)
 		}
@@ -395,9 +402,8 @@ func (b *slidingWindowBreaker) calculateBackoffDelay(attempt int,
 
 // logRetriesExhausted logs a summary when all retries are exhausted and crashes the pod
 func (b *slidingWindowBreaker) logRetriesExhausted(maxRetries int, initialDelay, maxDelay time.Duration) {
-	// Get the actual node count from the last attempt to provide accurate error context
 	ctx := context.Background()
-	actualNodes, err := b.cfg.GetTotalNodes(ctx)
+	actualNodes, err := b.cfg.K8sClient.GetTotalNodes(ctx)
 
 	if err != nil {
 		klog.Fatalf("Circuit breaker: All %d retry attempts exhausted. "+
@@ -411,10 +417,9 @@ func (b *slidingWindowBreaker) logRetriesExhausted(maxRetries int, initialDelay,
 	}
 
 	klog.Fatalf("Circuit breaker: All %d retry attempts exhausted. "+
-		"Found %d total cluster nodes but 0 GPU nodes with required NVIDIA labels. "+
+		"Found %d total nodes but GetTotalNodes still returning 0. "+
 		"Retry config: initial_delay=%v, max_delay=%v. "+
-		"Expected nodes with labels: nvidia.com/gpu.present=true, nvidia.com/gpu.deploy.dcgm=true. "+
-		"Install NVIDIA GPU Operator to enable GPU health monitoring. "+
+		"This indicates NodeInformer cache sync issues. "+
 		"Pod will restart.",
 		maxRetries, actualNodes, initialDelay, maxDelay)
 }

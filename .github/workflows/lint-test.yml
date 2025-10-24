@@ -153,6 +153,7 @@ jobs:
           - platform-connectors
           - store-client-sdk
           - statemanager
+          - configmanager
           - health-events-analyzer
           - fault-quarantine-module
           - labeler-module

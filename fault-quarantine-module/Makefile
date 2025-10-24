@@ -27,6 +27,11 @@ HAS_DOCKER := 1
 CLEAN_EXTRA_FILES := fault-quarantine-module
 DOCKER_EXTRA_ARGS :=
 
+# Test setup commands for kubebuilder envtest
+TEST_SETUP_COMMANDS := \
+	go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest && \
+	eval $$(setup-envtest use --use-env -p env) &&
+
 # =============================================================================
 # INCLUDE SHARED DEFINITIONS
 # =============================================================================

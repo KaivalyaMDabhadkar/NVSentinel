@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package reconciler
+package metrics
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
@@ -21,25 +21,25 @@ import (
 
 var (
 	// Event Processing Metrics
-	totalEventsReceived = promauto.NewCounter(
+	TotalEventsReceived = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_events_received_total",
 			Help: "Total number of events received from the watcher.",
 		},
 	)
-	totalEventsSuccessfullyProcessed = promauto.NewCounter(
+	TotalEventsSuccessfullyProcessed = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_events_successfully_processed_total",
 			Help: "Total number of events successfully processed.",
 		},
 	)
-	totalEventsSkipped = promauto.NewCounter(
+	TotalEventsSkipped = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_events_skipped_total",
 			Help: "Total number of events received on already cordoned node",
 		},
 	)
-	processingErrors = promauto.NewCounterVec(
+	ProcessingErrors = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_processing_errors_total",
 			Help: "Total number of errors encountered during event processing.",
@@ -48,21 +48,21 @@ var (
 	)
 
 	// Node Quarantine Metrics
-	totalNodesQuarantined = promauto.NewCounterVec(
+	TotalNodesQuarantined = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_nodes_quarantined_total",
 			Help: "Total number of nodes quarantined.",
 		},
 		[]string{"node"},
 	)
-	totalNodesUnquarantined = promauto.NewCounterVec(
+	TotalNodesUnquarantined = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_nodes_unquarantined_total",
 			Help: "Total number of nodes unquarantined.",
 		},
 		[]string{"node"},
 	)
-	currentQuarantinedNodes = promauto.NewGaugeVec(
+	CurrentQuarantinedNodes = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "fault_quarantine_current_quarantined_nodes",
 			Help: "Current number of quarantined nodes.",
@@ -71,27 +71,27 @@ var (
 	)
 
 	// Taint and Cordon Metrics
-	taintsApplied = promauto.NewCounterVec(
+	TaintsApplied = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_taints_applied_total",
 			Help: "Total number of taints applied to nodes.",
 		},
 		[]string{"taint_key", "taint_effect"},
 	)
-	taintsRemoved = promauto.NewCounterVec(
+	TaintsRemoved = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_taints_removed_total",
 			Help: "Total number of taints removed from nodes.",
 		},
 		[]string{"taint_key", "taint_effect"},
 	)
-	cordonsApplied = promauto.NewCounter(
+	CordonsApplied = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_cordons_applied_total",
 			Help: "Total number of cordons applied to nodes.",
 		},
 	)
-	cordonsRemoved = promauto.NewCounter(
+	CordonsRemoved = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_cordons_removed_total",
 			Help: "Total number of cordons removed from nodes.",
@@ -99,21 +99,21 @@ var (
 	)
 
 	// Ruleset Evaluation Metrics
-	rulesetEvaluations = promauto.NewCounterVec(
+	RulesetEvaluations = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_ruleset_evaluations_total",
 			Help: "Total number of ruleset evaluations.",
 		},
 		[]string{"ruleset"},
 	)
-	rulesetPassed = promauto.NewCounterVec(
+	RulesetPassed = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_ruleset_passed_total",
 			Help: "Total number of ruleset evaluations that passed.",
 		},
 		[]string{"ruleset"},
 	)
-	rulesetFailed = promauto.NewCounterVec(
+	RulesetFailed = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_ruleset_failed_total",
 			Help: "Total number of ruleset evaluations that failed.",
@@ -122,7 +122,7 @@ var (
 	)
 
 	// Performance Metrics
-	eventHandlingDuration = promauto.NewHistogram(
+	EventHandlingDuration = promauto.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:    "fault_quarantine_event_handling_duration_seconds",
 			Help:    "Histogram of event handling durations.",
@@ -137,4 +137,50 @@ var (
 			Help: "Number of health events which fault quarantine is yet to process.",
 		},
 	)
+
+	// Circuit Breaker Metrics
+	FaultQuarantineBreakerState = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "fault_quarantine_breaker_state",
+			Help: "State of the fault quarantine breaker.",
+		},
+		[]string{"state"},
+	)
+	FaultQuarantineBreakerUtilization = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "fault_quarantine_breaker_utilization",
+			Help: "Utilization of the fault quarantine breaker.",
+		},
+	)
+	FaultQuarantineGetTotalNodesDuration = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "fault_quarantine_get_total_nodes_duration_seconds",
+			Help:    "Duration of getTotalNodesWithRetry calls in seconds.",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"result"},
+	)
+	FaultQuarantineGetTotalNodesErrors = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fault_quarantine_get_total_nodes_errors_total",
+			Help: "Total number of errors from getTotalNodesWithRetry.",
+		},
+		[]string{"error_type"},
+	)
+	FaultQuarantineGetTotalNodesRetryAttempts = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "fault_quarantine_get_total_nodes_retry_attempts",
+			Help:    "Number of retry attempts needed for getTotalNodesWithRetry.",
+			Buckets: []float64{0, 1, 2, 3, 5, 10},
+		},
+	)
 )
+
+func SetFaultQuarantineBreakerUtilization(utilization float64) {
+	FaultQuarantineBreakerUtilization.Set(utilization)
+}
+
+func SetFaultQuarantineBreakerState(state string) {
+	FaultQuarantineBreakerState.Reset()
+	FaultQuarantineBreakerState.WithLabelValues(state).Set(1)
+}

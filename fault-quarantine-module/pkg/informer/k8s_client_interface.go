@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package reconciler
+package informer
 
 import (
 	"context"
@@ -23,17 +23,17 @@ import (
 
 // K8sClientInterface defines the methods used by Reconciler from k8sClient
 type K8sClientInterface interface {
-	GetNodeAnnotations(ctx context.Context, nodeName string) (map[string]string, error)
-	GetNodesWithAnnotation(ctx context.Context, annotationKey string) ([]string, error)
 	TaintAndCordonNodeAndSetAnnotations(ctx context.Context, nodeName string,
 		taints []config.Taint, isCordon bool, annotations map[string]string, labelMap map[string]string) error
 	UnTaintAndUnCordonNodeAndRemoveAnnotations(ctx context.Context, nodeName string,
 		taints []config.Taint, isUncordon bool, annotationKeys []string, labelsToRemove []string,
 		labelMap map[string]string) error
 	UpdateNodeAnnotations(ctx context.Context, nodeName string, annotations map[string]string) error
+	HandleManualUncordonCleanup(ctx context.Context, nodeName string, taintsToRemove []config.Taint,
+		annotationsToRemove []string, annotationsToAdd map[string]string, labelsToRemove []string) error
 	GetK8sClient() kubernetes.Interface
 	EnsureCircuitBreakerConfigMap(ctx context.Context, name, namespace string, initialStatus string) error
 	ReadCircuitBreakerState(ctx context.Context, name, namespace string) (string, error)
 	WriteCircuitBreakerState(ctx context.Context, name, namespace, status string) error
-	GetTotalGpuNodes(ctx context.Context) (int, error)
+	GetTotalNodes(ctx context.Context) (int, error)
 }

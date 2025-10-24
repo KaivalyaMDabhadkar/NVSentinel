@@ -88,19 +88,19 @@ func (he *HealthEventRuleEvaluator) Evaluate(
 	event *platformconnectorprotos.HealthEvent) (common.RuleEvaluationResult, error) {
 	obj, err := RoundTrip(event)
 	if err != nil {
-		return common.RuleEvaluationErroredOut, fmt.Errorf("error roundtripping event: %w", err)
+		return common.RuleEvaluationFailed, fmt.Errorf("error roundtripping event: %w", err)
 	}
 
 	out, _, err := he.program.Eval(map[string]interface{}{
 		eventObjKey: obj,
 	})
 	if err != nil {
-		return common.RuleEvaluationErroredOut, fmt.Errorf("failed to evaluate expression: %w", err)
+		return common.RuleEvaluationFailed, fmt.Errorf("failed to evaluate expression: %w", err)
 	}
 
 	result, ok := out.Value().(bool)
 	if !ok {
-		return common.RuleEvaluationErroredOut, fmt.Errorf("expression did not return a boolean: %v", out)
+		return common.RuleEvaluationFailed, fmt.Errorf("expression did not return a boolean: %v", out)
 	}
 
 	if result {
@@ -151,21 +151,19 @@ func NewNodeRuleEvaluator(expression string, nodeLister corelisters.NodeLister) 
 func (nm *NodeRuleEvaluator) Evaluate(event *platformconnectorprotos.HealthEvent) (common.RuleEvaluationResult, error) {
 	klog.Infof("Evaluating NodeRuleEvaluator for node %s", event.NodeName)
 
-	// Get node metadata
 	nodeInfo, err := nm.getNode(event.NodeName)
 	if err != nil {
-		return common.RuleEvaluationErroredOut, fmt.Errorf("failed to get node metadata: %w", err)
+		return common.RuleEvaluationFailed, fmt.Errorf("failed to get node metadata: %w", err)
 	}
 
-	// Evaluate the expression
 	out, _, err := nm.program.Eval(nodeInfo)
 	if err != nil {
-		return common.RuleEvaluationErroredOut, fmt.Errorf("failed to evaluate expression: %w", err)
+		return common.RuleEvaluationFailed, fmt.Errorf("failed to evaluate expression: %w", err)
 	}
 
 	result, ok := out.Value().(bool)
 	if !ok {
-		return common.RuleEvaluationErroredOut, fmt.Errorf("expression did not return a boolean: %v", out)
+		return common.RuleEvaluationFailed, fmt.Errorf("expression did not return a boolean: %v", out)
 	}
 
 	if result {
@@ -192,77 +190,57 @@ func (nm *NodeRuleEvaluator) getNode(nodeName string) (map[string]interface{}, e
 	}, nil
 }
 
+var primitiveKinds = map[reflect.Kind]bool{
+	reflect.Bool:       true,
+	reflect.Int:        true,
+	reflect.Int8:       true,
+	reflect.Int16:      true,
+	reflect.Int32:      true,
+	reflect.Int64:      true,
+	reflect.Uint:       true,
+	reflect.Uint8:      true,
+	reflect.Uint16:     true,
+	reflect.Uint32:     true,
+	reflect.Uint64:     true,
+	reflect.Uintptr:    true,
+	reflect.Float32:    true,
+	reflect.Float64:    true,
+	reflect.Complex64:  true,
+	reflect.Complex128: true,
+	reflect.String:     true,
+}
+
 // recursively converts any Go value into a JSON-compatible structure
 // with all fields present. Structs become map[string]interface{}, slices become []interface{},
 // maps become map[string]interface{}. Zero-values or nil pointers appear as null in the final map
-// nolint: cyclop, gocognit //fix this as part of NGCC-21793
 func structToInterface(v reflect.Value) interface{} {
 	if !v.IsValid() {
 		return nil
 	}
 
-	switch v.Kind() {
+	kind := v.Kind()
+
+	if primitiveKinds[kind] {
+		return v.Interface()
+	}
+
+	return handleComplexType(v, kind)
+}
+
+func handleComplexType(v reflect.Value, kind reflect.Kind) interface{} {
+	switch kind {
 	case reflect.Ptr:
-		if v.IsNil() {
-			return nil
-		}
-
-		return structToInterface(v.Elem())
-
+		return handlePointer(v)
 	case reflect.Struct:
-		result := make(map[string]interface{})
-		typ := v.Type()
-
-		for i := 0; i < typ.NumField(); i++ {
-			field := typ.Field(i)
-			// unexported
-			if field.PkgPath != "" {
-				continue
-			}
-
-			jsonTag := field.Tag.Get("json")
-			if jsonTag == "" {
-				continue
-			}
-
-			name := jsonTag
-			if idx := strings.Index(name, ","); idx != -1 {
-				name = name[:idx]
-			}
-
-			if name == "" {
-				name = field.Name
-			}
-
-			fieldVal := structToInterface(v.Field(i))
-			result[name] = fieldVal
-		}
-
-		return result
+		return handleStruct(v)
 	case reflect.Slice, reflect.Array:
-		if v.IsNil() {
-			return nil
-		}
-
-		sliceResult := make([]interface{}, v.Len())
-
-		for i := 0; i < v.Len(); i++ {
-			sliceResult[i] = structToInterface(v.Index(i))
-		}
-
-		return sliceResult
+		return handleSliceOrArray(v)
 	case reflect.Map:
-		if v.IsNil() {
-			return nil
-		}
-
-		mapResult := make(map[string]interface{})
-
-		for _, key := range v.MapKeys() {
-			mapResult[key.String()] = structToInterface(v.MapIndex(key))
-		}
-
-		return mapResult
+		return handleMap(v)
+	case reflect.Interface:
+		return handleInterface(v)
+	case reflect.Invalid, reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return nil
 	case reflect.Bool,
 		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
 		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
@@ -270,19 +248,90 @@ func structToInterface(v reflect.Value) interface{} {
 		reflect.Complex64, reflect.Complex128,
 		reflect.String:
 		return v.Interface()
-	case reflect.Invalid:
-		return nil
-	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
-		return nil
-	case reflect.Interface:
-		if v.IsNil() {
-			return nil
-		}
-
-		return structToInterface(v.Elem())
 	default:
 		return v.Interface()
 	}
+}
+
+func handlePointer(v reflect.Value) interface{} {
+	if v.IsNil() {
+		return nil
+	}
+
+	return structToInterface(v.Elem())
+}
+
+func handleStruct(v reflect.Value) interface{} {
+	result := make(map[string]interface{})
+	typ := v.Type()
+
+	for i := 0; i < typ.NumField(); i++ {
+		field := typ.Field(i)
+		if field.PkgPath != "" {
+			continue
+		}
+
+		jsonTag := field.Tag.Get("json")
+		if jsonTag == "" {
+			continue
+		}
+
+		name := extractJSONFieldName(jsonTag, field.Name)
+
+		fieldVal := structToInterface(v.Field(i))
+		result[name] = fieldVal
+	}
+
+	return result
+}
+
+func extractJSONFieldName(jsonTag, fieldName string) string {
+	name := jsonTag
+	if idx := strings.Index(name, ","); idx != -1 {
+		name = name[:idx]
+	}
+
+	if name == "" {
+		name = fieldName
+	}
+
+	return name
+}
+
+func handleSliceOrArray(v reflect.Value) interface{} {
+	if v.IsNil() {
+		return nil
+	}
+
+	sliceResult := make([]interface{}, v.Len())
+
+	for i := 0; i < v.Len(); i++ {
+		sliceResult[i] = structToInterface(v.Index(i))
+	}
+
+	return sliceResult
+}
+
+func handleMap(v reflect.Value) interface{} {
+	if v.IsNil() {
+		return nil
+	}
+
+	mapResult := make(map[string]interface{})
+
+	for _, key := range v.MapKeys() {
+		mapResult[key.String()] = structToInterface(v.MapIndex(key))
+	}
+
+	return mapResult
+}
+
+func handleInterface(v reflect.Value) interface{} {
+	if v.IsNil() {
+		return nil
+	}
+
+	return structToInterface(v.Elem())
 }
 
 // uses structToInterface for recursive processing

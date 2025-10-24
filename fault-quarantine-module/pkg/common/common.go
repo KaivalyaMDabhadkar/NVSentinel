@@ -20,9 +20,6 @@ type RuleEvaluationResult int
 const (
 	RuleEvaluationSuccess RuleEvaluationResult = iota
 	RuleEvaluationFailed
-	RuleEvaluationErroredOut
-	RuleEvaluationNotApplicable
-	RuleEvaluationRetryAgainInFuture
 )
 
 const (

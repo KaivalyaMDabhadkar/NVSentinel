@@ -21,6 +21,22 @@ import (
 	"time"
 )
 
+// K8sClientOperations defines the minimal interface needed by the circuit breaker
+type K8sClientOperations interface {
+	GetTotalNodes(ctx context.Context) (int, error)
+	EnsureCircuitBreakerConfigMap(ctx context.Context, name, namespace string, initialStatus string) error
+	ReadCircuitBreakerState(ctx context.Context, name, namespace string) (string, error)
+	WriteCircuitBreakerState(ctx context.Context, name, namespace, status string) error
+}
+
+// CircuitBreakerConfig holds the Kubernetes-specific configuration for the circuit breaker
+type CircuitBreakerConfig struct {
+	Namespace  string
+	Name       string
+	Percentage int
+	Duration   time.Duration
+}
+
 // State represents the current state of the circuit breaker
 type State string
 
@@ -43,7 +59,7 @@ type CircuitBreaker interface {
 }
 
 // Config holds the configuration parameters for the sliding window circuit breaker.
-// It defines the time window, trip threshold, and optional persistence hooks.
+// It defines the time window, trip threshold, and K8s client for state persistence.
 type Config struct {
 	// Window defines the sliding time window over which cordon events are counted.
 	// Default: 5 minutes. Events older than this window are automatically discarded.
@@ -54,10 +70,14 @@ type Config struct {
 	// Default: 50 (50% of nodes).
 	TripPercentage float64
 
-	// GetTotalNodes returns the current total number of nodes in the cluster.
-	// Used to compute the dynamic trip threshold as total_nodes * TripPercentage.
-	// This allows the threshold to adapt to cluster scaling events.
-	GetTotalNodes func(ctx context.Context) (int, error)
+	// K8sClient provides operations for node counts and ConfigMap state persistence
+	K8sClient K8sClientOperations
+
+	// ConfigMapName is the name of the ConfigMap used for state persistence
+	ConfigMapName string
+
+	// ConfigMapNamespace is the namespace of the ConfigMap
+	ConfigMapNamespace string
 
 	// MaxRetries is the maximum number of retry attempts when GetTotalNodes returns 0
 	// Default: 10 retries (allows ~30 seconds for cache sync with exponential backoff)
@@ -70,13 +90,6 @@ type Config struct {
 	// MaxRetryDelay caps the maximum delay between retry attempts
 	// Default: 5 seconds (prevents excessive delays)
 	MaxRetryDelay time.Duration
-
-	// EnsureConfigMap creates/initializes the ConfigMap for state persistence
-	EnsureConfigMap func(ctx context.Context, initial State) error
-	// ReadStateFn reads the persisted breaker state from ConfigMap
-	ReadStateFn func(ctx context.Context) (State, error)
-	// WriteStateFn persists the current breaker state to ConfigMap
-	WriteStateFn func(ctx context.Context, s State) error
 }
 
 // slidingWindowBreaker implements CircuitBreaker using a ring buffer approach.

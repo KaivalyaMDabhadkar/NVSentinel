@@ -44,7 +44,7 @@ func (anyEval *AnyRuleSetEvaluator) Evaluate(
 	}
 
 	if errs.ErrorOrNil() != nil {
-		return common.RuleEvaluationErroredOut, errs
+		return common.RuleEvaluationFailed, errs
 	}
 
 	return common.RuleEvaluationFailed, nil

@@ -14,10 +14,6 @@
 
 package config
 
-import (
-	"github.com/BurntSushi/toml"
-)
-
 type Rule struct {
 	Kind       string `toml:"kind"`
 	Expression string `toml:"expression"`
@@ -50,13 +46,4 @@ type RuleSet struct {
 type TomlConfig struct {
 	LabelPrefix string    `toml:"label-prefix"`
 	RuleSets    []RuleSet `toml:"rule-sets"`
-}
-
-func LoadTomlConfig(path string) (*TomlConfig, error) {
-	var config TomlConfig
-	if _, err := toml.DecodeFile(path, &config); err != nil {
-		return nil, err
-	}
-
-	return &config, nil
 }

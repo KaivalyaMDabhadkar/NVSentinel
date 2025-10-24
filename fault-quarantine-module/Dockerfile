@@ -27,6 +27,7 @@ WORKDIR /go/src
 COPY fault-quarantine-module ./fault-quarantine-module
 COPY platform-connectors ./platform-connectors
 COPY statemanager ./statemanager
+COPY configmanager ./configmanager
 COPY store-client-sdk/ ./store-client-sdk/
 
 WORKDIR /go/src/fault-quarantine-module

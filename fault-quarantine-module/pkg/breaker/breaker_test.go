@@ -21,23 +21,48 @@ import (
 	"time"
 )
 
+type mockK8sClientOps struct {
+	totalNodes   int
+	callsEnsure  int
+	callsWrite   int
+	initialState State
+	readStateFn  func(context.Context, string, string) (string, error)
+}
+
+func (m *mockK8sClientOps) GetTotalNodes(context.Context) (int, error) {
+	return m.totalNodes, nil
+}
+
+func (m *mockK8sClientOps) EnsureCircuitBreakerConfigMap(context.Context, string, string, string) error {
+	m.callsEnsure++
+	return nil
+}
+
+func (m *mockK8sClientOps) ReadCircuitBreakerState(ctx context.Context, name, namespace string) (string, error) {
+	if m.readStateFn != nil {
+		return m.readStateFn(ctx, name, namespace)
+	}
+	if m.initialState != "" {
+		return string(m.initialState), nil
+	}
+	return string(StateClosed), nil
+}
+
+func (m *mockK8sClientOps) WriteCircuitBreakerState(context.Context, string, string, string) error {
+	m.callsWrite++
+	return nil
+}
+
 func newTestBreaker(t *testing.T, totalNodes int, tripPercentage float64, window time.Duration, opts ...func(*Config)) CircuitBreaker {
 	t.Helper()
 	ctx := context.Background()
-	callsEnsure := 0
-	callsWrite := 0
+	mockClient := &mockK8sClientOps{totalNodes: totalNodes}
 	cfg := Config{
-		Window:         window,
-		TripPercentage: tripPercentage,
-		GetTotalNodes: func(context.Context) (int, error) {
-			return totalNodes, nil
-		},
-		EnsureConfigMap: func(context.Context, State) error {
-			callsEnsure++
-			return nil
-		},
-		ReadStateFn:  func(context.Context) (State, error) { return StateClosed, nil },
-		WriteStateFn: func(context.Context, State) error { callsWrite++; return nil },
+		Window:             window,
+		TripPercentage:     tripPercentage,
+		K8sClient:          mockClient,
+		ConfigMapName:      "test-breaker",
+		ConfigMapNamespace: "default",
 	}
 	for _, opt := range opts {
 		opt(&cfg)
@@ -47,11 +72,9 @@ func newTestBreaker(t *testing.T, totalNodes int, tripPercentage float64, window
 		t.Fatalf("failed to create breaker: %v", err)
 	}
 	// Ensure constructor hook was called once
-	if callsEnsure != 1 {
-		t.Fatalf("expected EnsureConfigMap to be called once, got %d", callsEnsure)
+	if mockClient.callsEnsure != 1 {
+		t.Fatalf("expected EnsureConfigMap to be called once, got %d", mockClient.callsEnsure)
 	}
-	// Use callsWrite to avoid unused warning via ForceState in tests
-	_ = callsWrite
 	return b
 }
 
@@ -136,15 +159,17 @@ func TestWindowExpiryResetsCounts(t *testing.T) {
 func TestInitializeFromReadState(t *testing.T) {
 	ctx := context.Background()
 	// Start with TRIPPED in persisted state
+	mockClient := &mockK8sClientOps{
+		totalNodes:   10,
+		initialState: StateTripped,
+	}
+
 	b, err := NewSlidingWindowBreaker(ctx, Config{
-		Window:         1 * time.Second,
-		TripPercentage: 50,
-		GetTotalNodes: func(context.Context) (int, error) {
-			return 10, nil
-		},
-		EnsureConfigMap: func(context.Context, State) error { return nil },
-		ReadStateFn:     func(context.Context) (State, error) { return StateTripped, nil },
-		WriteStateFn:    func(context.Context, State) error { return nil },
+		Window:             1 * time.Second,
+		TripPercentage:     50,
+		K8sClient:          mockClient,
+		ConfigMapName:      "test-breaker",
+		ConfigMapNamespace: "default",
 	})
 	if err != nil {
 		t.Fatalf("failed to create breaker: %v", err)
@@ -155,8 +180,6 @@ func TestInitializeFromReadState(t *testing.T) {
 		t.Fatalf("breaker should trip when above threshold")
 	}
 	if got := b.CurrentState(); got != StateTripped {
-		t.Fatalf("expected initial state TRIPPED, got %s", got)
-	} else if got != StateTripped {
 		t.Fatalf("expected initial state TRIPPED, got %s", got)
 	}
 }

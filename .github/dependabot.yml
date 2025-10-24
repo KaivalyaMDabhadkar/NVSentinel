@@ -66,6 +66,13 @@ updates:
       interval: "weekly"
     labels: ["dependencies"]
 
+  - package-ecosystem: "gomod"
+    directory: "/configmanager"
+    target-branch: "main"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+
   # Fault Management
   - package-ecosystem: "gomod"
     directory: "/fault-quarantine-module"
