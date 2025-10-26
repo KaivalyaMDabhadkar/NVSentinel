@@ -6,6 +6,8 @@ toolchain go1.24.8
 
 require (
 	github.com/golang/protobuf v1.5.4
+	github.com/nvidia/nvsentinel/commons v0.0.0
+	github.com/nvidia/nvsentinel/data-models v0.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
 	go.mongodb.org/mongo-driver v1.17.4
@@ -14,7 +16,6 @@ require (
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1
 	k8s.io/client-go v0.34.1
-	k8s.io/klog/v2 v2.130.1
 	sigs.k8s.io/controller-runtime v0.22.3
 )
 
@@ -65,8 +66,8 @@ require (
 	github.com/xdg-go/scram v1.1.2 // indirect
 	github.com/xdg-go/stringprep v1.0.4 // indirect
 	github.com/youmark/pkcs8 v0.0.0-20240726163527-a2c0da244d78 // indirect
-	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
-	go.opentelemetry.io/otel v1.38.0 // indirect
+	go.opentelemetry.io/otel/metric v1.38.0 // indirect
+	go.opentelemetry.io/otel/trace v1.38.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
@@ -83,6 +84,7 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/apiextensions-apiserver v0.34.1 // indirect
+	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
@@ -98,7 +100,7 @@ replace github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor => ../he
 
 replace github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor => ../health-monitors/syslog-health-monitor
 
-replace github.com/nvidia/nvsentinel/platform-connectors => ../platform-connectors
+replace github.com/nvidia/nvsentinel/data-models => ../data-models
 
 replace github.com/nvidia/nvsentinel/store-client-sdk => ../store-client-sdk
 
@@ -113,3 +115,5 @@ replace github.com/nvidia/nvsentinel/labeler-module => ../labeler-module
 replace github.com/nvidia/nvsentinel/node-drainer-module => ../node-drainer-module
 
 replace github.com/nvidia/nvsentinel/fault-remediation-module => ../fault-remediation-module
+
+replace github.com/nvidia/nvsentinel/commons => ../commons

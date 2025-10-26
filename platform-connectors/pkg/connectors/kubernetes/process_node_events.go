@@ -19,21 +19,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"slices"
 	"strings"
 	"syscall"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 
-	"k8s.io/client-go/util/retry"
-	"k8s.io/klog/v2"
-
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -90,8 +89,8 @@ func (r *K8sConnector) updateNodeConditions(ctx context.Context, healthEvents []
 	}, func() error {
 		node, err := r.clientset.CoreV1().Nodes().Get(ctx, healthEvents[0].NodeName, metav1.GetOptions{})
 		if err != nil {
-			klog.Errorf("Error getting node: %s", err)
-			return err
+			slog.Error("Error getting node", "error", err)
+			return fmt.Errorf("failed to get node %s: %w", healthEvents[0].NodeName, err)
 		}
 
 		for conditionType, events := range conditionToHealthEventsMap {
@@ -168,11 +167,13 @@ func (r *K8sConnector) updateNodeConditions(ctx context.Context, healthEvents []
 		_, err = r.clientset.CoreV1().Nodes().UpdateStatus(ctx, node, metav1.UpdateOptions{})
 		if err != nil {
 			for conditionType := range conditionToHealthEventsMap {
-				klog.Infof("Node condition %s update failed with error: %v", conditionType, err)
+				slog.Info("Node condition update failed", "conditionType", conditionType, "error", err)
 			}
+
+			return fmt.Errorf("failed to update node %s status: %w", node.Name, err)
 		}
 
-		return err
+		return nil
 	})
 
 	return err
@@ -238,7 +239,7 @@ func (r *K8sConnector) writeNodeEvent(ctx context.Context, event *corev1.Event, 
 			FieldSelector: fmt.Sprintf("involvedObject.name=%s", nodeName),
 		})
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to list events for node %s: %w", nodeName, err)
 		}
 
 		// Check if any event matches the new event
@@ -253,11 +254,12 @@ func (r *K8sConnector) writeNodeEvent(ctx context.Context, event *corev1.Event, 
 				_, err = r.clientset.CoreV1().Events(DefaultNamespace).Update(ctx, &existingEvent, metav1.UpdateOptions{})
 				if err != nil {
 					nodeEventUpdateFailureCounter.WithLabelValues(nodeName).Inc()
+					return fmt.Errorf("failed to update event for node %s: %w", nodeName, err)
 				} else {
 					nodeEventUpdateSuccessCounter.WithLabelValues(nodeName).Inc()
 				}
 
-				return err
+				return nil
 			}
 		}
 
@@ -267,11 +269,12 @@ func (r *K8sConnector) writeNodeEvent(ctx context.Context, event *corev1.Event, 
 		_, err = r.clientset.CoreV1().Events(DefaultNamespace).Create(ctx, event, metav1.CreateOptions{})
 		if err != nil {
 			nodeEventCreationFailureCounter.WithLabelValues(nodeName).Inc()
+			return fmt.Errorf("failed to create event for node %s: %w", nodeName, err)
 		} else {
 			nodeEventCreationSuccessCounter.WithLabelValues(nodeName).Inc()
 		}
 
-		return err
+		return nil
 	})
 
 	return err
@@ -346,7 +349,7 @@ func (r *K8sConnector) processHealthEvents(ctx context.Context, healthEvents *pl
 
 		if err != nil {
 			nodeConditionUpdateFailureCounter.Inc()
-			return err
+			return fmt.Errorf("failed to update node conditions: %w", err)
 		}
 
 		nodeConditionUpdateSuccessCounter.Inc()
@@ -384,7 +387,7 @@ func (r *K8sConnector) processHealthEvents(ctx context.Context, healthEvents *pl
 			nodeEventUpdateCreateDuration.Observe(duration)
 
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to write node event for %s: %w", healthEvent.NodeName, err)
 			}
 		}
 	}

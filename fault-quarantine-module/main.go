@@ -17,14 +17,16 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
+	"log/slog"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/nvidia/nvsentinel/configmanager"
+	"github.com/nvidia/nvsentinel/commons/pkg/configmanager"
+	"github.com/nvidia/nvsentinel/commons/pkg/logger"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/initializer"
-	"k8s.io/klog/v2"
-	"k8s.io/klog/v2/textlogger"
 )
 
 var (
@@ -35,48 +37,25 @@ var (
 )
 
 func main() {
-	// Initialize klog flags to allow command-line control (e.g., -v=3)
-	klog.InitFlags(nil)
+	logger.SetDefaultStructuredLogger("fault-quarantine-module", version)
+	slog.Info("Starting fault-quarantine-module", "version", version, "commit", commit, "date", date)
 
-	// Create a context that gets cancelled on OS interrupt signals
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop() // Ensure the signal listener is cleaned up
+	if err := run(); err != nil {
+		slog.Error("Application encountered a fatal error", "error", err)
+		os.Exit(1)
+	}
+}
 
-	var metricsPort = flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
-
-	var mongoClientCertMountPath = flag.String("mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
-		"path where the mongodb client cert is mounted")
-
-	var kubeconfigPath = flag.String("kubeconfig-path", "", "path to kubeconfig file")
-
-	var tomlConfigPath = flag.String("config-path", "/etc/config/config.toml",
-		"path where the fault quarantine config file is present")
-
-	var dryRun = flag.Bool("dry-run", false, "flag to run fault quarantine module in dry-run mode")
-
-	var circuitBreakerPercentage = flag.Int("circuit-breaker-percentage",
-		50, "percentage of nodes to cordon before tripping the circuit breaker")
-
-	var circuitBreakerDuration = flag.Duration("circuit-breaker-duration",
-		5*time.Minute, "duration of the circuit breaker window")
-
-	var circuitBreakerEnabled = flag.Bool("circuit-breaker-enabled", true,
-		"enable or disable fault quarantine circuit breaker")
-
-	flag.Parse()
-
-	logger := textlogger.NewLogger(textlogger.NewConfig()).WithValues(
-		"version", version,
-		"module", "fault-quarantine-module",
-	)
-
-	klog.SetLogger(logger)
-	klog.InfoS("Starting fault-quarantine-module", "version", version, "commit", commit, "date", date)
-	defer klog.Flush()
+func run() error {
+	metricsPort, mongoClientCertMountPath, kubeconfigPath, dryRun, circuitBreakerEnabled,
+		circuitBreakerPercentage, circuitBreakerDuration, tomlConfigPath := parseFlags()
 
 	if _, err := configmanager.GetEnvVar[string]("POD_NAMESPACE"); err != nil {
-		klog.Fatalf("Failed to get POD_NAMESPACE: %v", err)
+		return fmt.Errorf("failed to get POD_NAMESPACE: %w", err)
 	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	params := initializer.InitializationParams{
 		MongoClientCertMountPath: *mongoClientCertMountPath,
@@ -91,17 +70,47 @@ func main() {
 
 	components, err := initializer.InitializeAll(ctx, params)
 	if err != nil {
-		klog.Fatalf("Initialization failed: %v", err)
+		return fmt.Errorf("initialization failed: %w", err)
 	}
 
-	klog.Info("Starting node informer")
+	slog.Info("Starting node informer")
 
 	if err := components.Informer.Run(ctx.Done()); err != nil {
-		klog.Fatalf("Failed to start node informer: %v", err)
+		return fmt.Errorf("failed to start node informer: %w", err)
 	}
 
-	klog.Info("Node informer started and synced")
+	slog.Info("Node informer started and synced")
 
-	klog.Info("Starting fault quarantine reconciler")
+	slog.Info("Starting fault quarantine reconciler")
 	components.Reconciler.Start(ctx)
+
+	return nil
+}
+
+func parseFlags() (metricsPort, mongoClientCertMountPath, kubeconfigPath *string, dryRun, circuitBreakerEnabled *bool,
+	circuitBreakerPercentage *int, circuitBreakerDuration *time.Duration, tomlConfigPath *string) {
+	metricsPort = flag.String("metrics-port", "2112", "port to expose Prometheus metrics on")
+
+	mongoClientCertMountPath = flag.String("mongo-client-cert-mount-path", "/etc/ssl/mongo-client",
+		"path where the mongodb client cert is mounted")
+
+	kubeconfigPath = flag.String("kubeconfig-path", "", "path to kubeconfig file")
+
+	tomlConfigPath = flag.String("config-path", "/etc/config/config.toml",
+		"path where the fault quarantine config file is present")
+
+	dryRun = flag.Bool("dry-run", false, "flag to run fault quarantine module in dry-run mode")
+
+	circuitBreakerPercentage = flag.Int("circuit-breaker-percentage",
+		50, "percentage of nodes to cordon before tripping the circuit breaker")
+
+	circuitBreakerDuration = flag.Duration("circuit-breaker-duration",
+		5*time.Minute, "duration of the circuit breaker window")
+
+	circuitBreakerEnabled = flag.Bool("circuit-breaker-enabled", true,
+		"enable or disable fault quarantine circuit breaker")
+
+	flag.Parse()
+
+	return
 }

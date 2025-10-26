@@ -19,14 +19,16 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"text/template"
 	"time"
 
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/crstatus"
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+
 	batchv1 "k8s.io/api/batch/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -190,7 +192,7 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	// Execute the template
 	var buf bytes.Buffer
 	if err := c.template.Execute(&buf, c.templateData); err != nil {
-		log.Fatalf("Failed to execute template: %v", err)
+		slog.Error("Failed to execute maintenance template", "error", err)
 		return false, ""
 	}
 
@@ -199,7 +201,7 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	// Convert YAML to unstructured
 	var obj map[string]any
 	if err := yaml.Unmarshal(buf.Bytes(), &obj); err != nil {
-		log.Fatalf("Failed to unmarshal YAML: %v", err)
+		slog.Error("Failed to unmarshal YAML", "error", err)
 		return false, ""
 	}
 
@@ -211,7 +213,7 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	// Convert GVK to GVR using RESTMapper
 	mapping, err := c.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
-		log.Fatalf("Failed to get REST mapping for %s: %v", gvk, err)
+		slog.Error("Failed to get REST mapping", "error", err, "gvk", gvk)
 		return false, ""
 	}
 
@@ -231,8 +233,8 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	if group != "" && c.annotationManager != nil {
 		if err := c.annotationManager.UpdateRemediationState(ctx, healthEvent.NodeName,
 			group, actualCRName); err != nil {
-			// Continue even if annotation update fails
-			log.Printf("Warning: Failed to update node annotation for %s: %v", healthEvent.NodeName, err)
+			slog.Warn("Failed to update node annotation", "node", healthEvent.NodeName,
+				"error", err)
 		}
 	}
 
@@ -256,7 +258,8 @@ func (c *FaultRemediationClient) handleCreateCRError(
 		if group != "" && c.annotationManager != nil {
 			if err := c.annotationManager.UpdateRemediationState(ctx, healthEvent.NodeName,
 				group, crName); err != nil {
-				log.Printf("Warning: Failed to update node annotation for %s: %v", healthEvent.NodeName, err)
+				slog.Warn("Failed to update node annotation", "node", healthEvent.NodeName,
+					"error", err)
 			}
 		}
 

@@ -28,6 +28,7 @@ PROTOBUF_VERSION := v27.1
 PROTOC_GEN_GO_VERSION := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.3.0
 GRPCIO_TOOLS_VERSION := 1.75.1
+BLACK_VERSION:= '25.9.0'
 SHELLCHECK_VERSION := v0.11.0
 ADDLICENSE_VERSION := latest
 DOCKER_BUILDX_VERSION := latest
@@ -47,6 +48,7 @@ PROTOBUF_VERSION := $(shell $(YQ) '.protobuf.protobuf' .versions.yaml)
 PROTOC_GEN_GO_GRPC_VERSION := $(shell $(YQ) '.protobuf.protoc_gen_go_grpc' .versions.yaml)
 PROTOC_GEN_GO_VERSION := $(shell $(YQ) '.protobuf.protoc_gen_go' .versions.yaml)
 PYTHON_VERSION := $(shell $(YQ) '.languages.python' .versions.yaml)
+BLACK_VERSION := $(shell $(YQ) '.linting.black' .versions.yaml)
 SHELLCHECK_VERSION := $(shell $(YQ) '.linting.shellcheck' .versions.yaml)
 endif
 
@@ -60,9 +62,11 @@ GO_MODULES := \
 	labeler-module \
 	node-drainer-module \
 	fault-remediation-module \
+	janitor \
 	store-client-sdk \
 	statemanager \
-	configmanager
+	commons
+
 
 # Python modules
 PYTHON_MODULES := \
@@ -79,7 +83,8 @@ PRIVATE_MODULES := \
 	fault-quarantine-module \
 	labeler-module \
 	node-drainer-module \
-	fault-remediation-module
+	fault-remediation-module \
+	janitor
 
 # Modules requiring kubebuilder for tests
 KUBEBUILDER_MODULES := \
@@ -113,6 +118,7 @@ show-versions: ## Display all tool versions loaded from .versions.yaml
 	@echo "  grpcio-tools:           $(GRPCIO_TOOLS_VERSION)"
 	@echo ""
 	@echo "Linting:"
+	@echo "  black:                  $(BLACK_VERSION)"
 	@echo "  shellcheck:             $(SHELLCHECK_VERSION)"
 	@echo "  addlicense:             $(ADDLICENSE_VERSION)"
 	@echo ""
@@ -280,26 +286,27 @@ health-monitors-lint-test-all:
 # Generate protobuf files
 .PHONY: protos-generate
 protos-generate: protos-clean ## Generate protobuf files from .proto sources
-	@echo "Generating protobuf files..."
+	@echo "Generating protobuf files in data-models (Go) and gpu-health-monitor (Python)..."
 	@echo "=== Tool Versions ==="
 	@echo "Go: $$(go version)"
 	@echo "protoc: $$(protoc --version)"
 	@echo "protoc-gen-go: $$(protoc-gen-go --version)"
 	@echo "protoc-gen-go-grpc: $$(protoc-gen-go-grpc --version)"
-	@echo "========================"
-	protoc -I protobufs/ --go_out=platform-connectors/pkg/protos/ --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --go-grpc_out=platform-connectors/pkg/protos/ protobufs/platformconnector.proto
-	protoc -I protobufs/ --go_out=health-monitors/syslog-health-monitor/pkg/protos/ --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --go-grpc_out=health-monitors/syslog-health-monitor/pkg/protos/ protobufs/platformconnector.proto
-	protoc -I protobufs/ --go_out=health-events-analyzer/pkg/protos/ --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --go-grpc_out=health-events-analyzer/pkg/protos/ protobufs/platformconnector.proto
-	protoc -I protobufs/ --go_out=tilt/simple-health-client/protos/ --go_opt=paths=source_relative --go-grpc_opt=paths=source_relative --go-grpc_out=tilt/simple-health-client/protos/ protobufs/platformconnector.proto
-	python3 -m grpc_tools.protoc -Iprotobufs/ --python_out=health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos --pyi_out=health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos --grpc_python_out=health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos protobufs/platformconnector.proto
-	@# Fix Python import paths for relative imports
-	@if command -v gsed >/dev/null 2>&1; then \
-		gsed -i 's/^import platformconnector_pb2 as platformconnector__pb2$$/from . import platformconnector_pb2 as platformconnector__pb2/' health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos/platformconnector_pb2_grpc.py; \
-	elif sed --version 2>&1 | grep -q GNU; then \
-		sed -i 's/^import platformconnector_pb2 as platformconnector__pb2$$/from . import platformconnector_pb2 as platformconnector__pb2/' health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos/platformconnector_pb2_grpc.py; \
-	else \
-		sed -i '' 's/^import platformconnector_pb2 as platformconnector__pb2$$/from . import platformconnector_pb2 as platformconnector__pb2/' health-monitors/gpu-health-monitor/gpu_health_monitor/platform_connector/protos/platformconnector_pb2_grpc.py; \
+	@if command -v python3 >/dev/null 2>&1; then \
+		grpcio_tools_version=$$(python3 -c "import importlib.metadata; print('grpcio-tools', importlib.metadata.version('grpcio-tools'))" 2>/dev/null || echo "grpcio-tools: not installed"); \
+		echo "$$grpcio_tools_version"; \
 	fi
+	@if command -v black >/dev/null 2>&1; then \
+		black_version=$$(black --version 2>/dev/null | head -1 || echo "black: not available"); \
+		echo "$$black_version"; \
+	else \
+		echo "black: not found"; \
+	fi
+	@echo "========================"
+	# Generate Go protobuf files in data-models (shared by all Go modules)
+	$(MAKE) -C data-models protos-generate
+	# Generate Python protobuf files for gpu-health-monitor
+	$(MAKE) -C health-monitors/gpu-health-monitor protos-generate
 
 # Check protobuf files
 .PHONY: protos-lint
@@ -432,6 +439,11 @@ lint-test-fault-remediation-module:
 	@echo "Linting and testing fault-remediation-module (using standardized Makefile)..."
 	$(MAKE) -C fault-remediation-module lint-test
 
+.PHONY: lint-test-janitor
+lint-test-janitor:
+	@echo "Linting and testing janitor (using standardized Makefile)..."
+	$(MAKE) -C janitor lint-test
+
 .PHONY: lint-test-store-client-sdk
 lint-test-store-client-sdk:
 	@echo "Linting and testing store-client-sdk..."
@@ -442,10 +454,10 @@ lint-test-statemanager:
 	@echo "Linting and testing statemanager..."
 	$(MAKE) -C statemanager lint-test
 
-.PHONY: lint-test-configmanager
-lint-test-configmanager:
-	@echo "Linting and testing configmanager..."
-	$(MAKE) -C configmanager lint-test
+.PHONY: lint-test-commons
+lint-test-commons:
+	@echo "Linting and testing commons..."
+	$(MAKE) -C commons lint-test
 
 # Python module lint-test targets (non-health-monitors)
 # Currently no non-health-monitor Python modules
@@ -612,6 +624,10 @@ docker-node-drainer-module:
 .PHONY: docker-fault-remediation-module
 docker-fault-remediation-module:
 	$(MAKE) -C docker build-fault-remediation-module
+
+.PHONY: docker-janitor
+docker-janitor:
+	$(MAKE) -C docker build-janitor
 
 .PHONY: docker-log-collector
 docker-log-collector:

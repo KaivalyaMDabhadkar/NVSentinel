@@ -21,7 +21,7 @@ import (
 	"testing"
 	"time"
 
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
@@ -119,12 +119,13 @@ func TestFetchAndProcessHealthMetric(t *testing.T) {
 
 		go connector.FetchAndProcessHealthMetric(ctx)
 
-		time.Sleep(100 * time.Millisecond)
-
-		// check that the event has been dequeued
-		require.Equal(t, 0, ringBuffer.CurrentLength())
+		// Wait for the event to be processed
+		require.Eventually(t, func() bool {
+			return ringBuffer.CurrentLength() == 0
+		}, 1*time.Second, 10*time.Millisecond, "event should be dequeued")
 
 		cancel()
+		// Note: mtest framework handles MongoDB client cleanup
 	})
 
 	mt.Run("process health metrics when insert fails", func(mt *mtest.T) {
@@ -163,12 +164,13 @@ func TestFetchAndProcessHealthMetric(t *testing.T) {
 
 		go connector.FetchAndProcessHealthMetric(ctx)
 
-		time.Sleep(100 * time.Millisecond)
-
-		// check that the event has been dequeued
-		require.Equal(t, 0, ringBuffer.CurrentLength())
+		// Wait for the event to be processed
+		require.Eventually(t, func() bool {
+			return ringBuffer.CurrentLength() == 0
+		}, 1*time.Second, 10*time.Millisecond, "event should be dequeued")
 
 		cancel()
+		// Note: mtest framework handles MongoDB client cleanup
 	})
 }
 

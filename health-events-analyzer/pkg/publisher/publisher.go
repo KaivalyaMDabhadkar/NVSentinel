@@ -16,13 +16,15 @@ package publisher
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 	"time"
 
-	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -60,27 +62,27 @@ func (p *PublisherConfig) sendHealthEventWithRetry(ctx context.Context, healthEv
 		_, err := p.platformConnectorClient.HealthEventOccuredV1(ctx, healthEvents)
 
 		if err == nil {
-			klog.V(2).Infof("Successfully sent health events: %+v", healthEvents)
+			slog.Debug("Successfully sent health events", "events", healthEvents)
 
 			return true, nil
 		}
 
 		if isRetryableError(err) {
-			klog.Errorf("Retryable error occurred: %v", err)
+			slog.Error("Retryable error occurred", "error", err)
 			FatalEventPublishingError.WithLabelValues("retryable_error").Inc()
 
 			return false, nil
 		}
 
-		klog.Errorf("Non-retryable error occurred: %v", err)
+		slog.Error("Non-retryable error occurred", "error", err)
 		FatalEventPublishingError.WithLabelValues("non_retryable_error").Inc()
 
-		return false, err
+		return false, fmt.Errorf("non-retryable error publishing health event: %w", err)
 	})
 
 	if err != nil {
-		klog.Errorf("All retry attempts to send health event failed: %v", err)
-		return err
+		slog.Error("All retry attempts to send health event failed", "error", err)
+		return fmt.Errorf("failed to publish health event after retries: %w", err)
 	}
 
 	return nil

@@ -19,21 +19,21 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/sxid"
+	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/types"
+	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/xid"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/klog/v2"
-
-	pb "github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/protos"
-	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/sxid"
-	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/types"
-	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/xid"
 )
 
 // NewSyslogMonitor creates a new SyslogMonitor instance
@@ -61,7 +61,7 @@ func NewSyslogMonitorWithFactory(nodeName string, checks []CheckDefinition, pcCl
 	// Get current boot ID
 	currentBootID, err := fetchCurrentBootID()
 	if err != nil {
-		klog.Warningf("Failed to get current boot ID: %v", err)
+		slog.Warn("Failed to get current boot ID", "error", err)
 
 		currentBootID = ""
 	}
@@ -87,8 +87,8 @@ func NewSyslogMonitorWithFactory(nodeName string, checks []CheckDefinition, pcCl
 			xidHandler, err := xid.NewXIDHandler(nodeName,
 				defaultAgentName, defaultComponentClass, check.Name, xidAnalyserEndpoint)
 			if err != nil {
-				klog.Errorf("error initializing xid handler: %v", err.Error())
-				return nil, err
+				slog.Error("Error initializing XID handler", "error", err.Error())
+				return nil, fmt.Errorf("failed to initialize XID handler: %w", err)
 			}
 
 			sm.checkToHandlerMap[check.Name] = xidHandler
@@ -97,14 +97,14 @@ func NewSyslogMonitorWithFactory(nodeName string, checks []CheckDefinition, pcCl
 			sxidHandler, err := sxid.NewSXIDHandler(
 				nodeName, defaultAgentName, defaultComponentClass, check.Name)
 			if err != nil {
-				klog.Errorf("error initializing sxid handler: %v", err.Error())
-				return nil, err
+				slog.Error("Error initializing SXID handler", "error", err.Error())
+				return nil, fmt.Errorf("failed to initialize SXID handler: %w", err)
 			}
 
 			sm.checkToHandlerMap[check.Name] = sxidHandler
 
 		default:
-			klog.Errorf("unsupported check: %s", check.Name)
+			slog.Error("Unsupported check", "check", check.Name)
 		}
 	}
 
@@ -113,7 +113,7 @@ func NewSyslogMonitorWithFactory(nodeName string, checks []CheckDefinition, pcCl
 		return nil, fmt.Errorf("failed to handle boot ID change: %w", err)
 	}
 
-	klog.Info("SyslogMonitor initialized with persistent state. Each check will resume from last processed cursor.")
+	slog.Info("SyslogMonitor initialized with persistent state. Each check will resume from last processed cursor.")
 
 	return sm, nil
 }
@@ -122,12 +122,10 @@ func NewSyslogMonitorWithFactory(nodeName string, checks []CheckDefinition, pcCl
 func (sm *SyslogMonitor) Run() error {
 	var jointError error = nil
 
-	klog.Infof("Starting syslog monitor run cycle.")
-
 	for _, check := range sm.checks {
 		err := sm.executeCheck(check)
 		if err != nil {
-			klog.Errorf("Check '%s' failed during execution: %v", check.Name, err)
+			slog.Error("Check '%s' failed during execution: %v", check.Name, err)
 			jointError = errors.Join(jointError, err)
 		}
 	}
@@ -136,7 +134,7 @@ func (sm *SyslogMonitor) Run() error {
 		return jointError
 	}
 
-	klog.Infof("Syslog monitor run cycle completed successfully.")
+	slog.Info("Syslog monitor run cycle completed successfully.")
 
 	return nil
 }
@@ -145,7 +143,7 @@ func (sm *SyslogMonitor) Run() error {
 func saveState(stateFilePath string, state syslogMonitorState) error {
 	data, err := json.Marshal(state)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal syslog monitor state: %w", err)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(stateFilePath), 0755); err != nil {
@@ -181,7 +179,8 @@ func loadState(stateFilePath string) (syslogMonitorState, error) {
 
 	// Check if file is empty
 	if len(data) == 0 {
-		klog.Warningf("State file %s exists but is empty, treating as non-existent", stateFilePath)
+		slog.Warn("State file exists but is empty, treating as non-existent",
+			"stateFile", stateFilePath)
 
 		return syslogMonitorState{
 			Version:          stateFileVersion,
@@ -191,7 +190,9 @@ func loadState(stateFilePath string) (syslogMonitorState, error) {
 	}
 
 	if err := json.Unmarshal(data, &state); err != nil {
-		klog.Warningf("State file %s is corrupted: %v, resetting to default state", stateFilePath, err)
+		slog.Warn("State file is corrupted, resetting to default",
+			"stateFile", stateFilePath,
+			"error", err)
 
 		return syslogMonitorState{
 			Version:          stateFileVersion,
@@ -202,8 +203,9 @@ func loadState(stateFilePath string) (syslogMonitorState, error) {
 
 	if state.Version != 0 && state.Version != stateFileVersion {
 		if verifyStateFields(state) {
-			klog.Infof("state file version mismatch: expected %d, got %d, but the old state file version is compatible",
-				stateFileVersion, state.Version)
+			slog.Info("State file version mismatch but compatible",
+				"expected", stateFileVersion,
+				"actual", state.Version)
 			// update the state version to latest current version
 			state.Version = stateFileVersion
 
@@ -244,7 +246,7 @@ func fetchCurrentBootID() (string, error) {
 // handleBootIDChange handles system reboot detection and cursor reset
 func (sm *SyslogMonitor) handleBootIDChange(oldBootID, newBootID string) error {
 	if oldBootID != newBootID {
-		klog.Infof("Detected bootID change. Old bootID: %s, New bootID: %s", oldBootID, newBootID)
+		slog.Info("Detected bootID change. Old bootID: %s, New bootID: %s", oldBootID, newBootID)
 
 		// Clear all cursors on reboot since journal cursors become invalid
 		for checkName := range sm.checkLastCursors {
@@ -262,7 +264,7 @@ func (sm *SyslogMonitor) handleBootIDChange(oldBootID, newBootID string) error {
 			return fmt.Errorf("failed to save state after boot ID change: %w", err)
 		}
 
-		klog.Info("Cleared all cursors due to system reboot")
+		slog.Info("Cleared all cursors due to system reboot")
 
 		// Publish healthy events for all checks after a reboot
 		if sm.pcClient != nil {
@@ -273,10 +275,10 @@ func (sm *SyslogMonitor) handleBootIDChange(oldBootID, newBootID string) error {
 				}
 				healthEvents := sm.prepareHealthEventWithAction(check, message, true, errRes)
 				sm.sendHealthEventWithRetry(healthEvents, 5, 2*time.Second)
-				klog.Infof("Published healthy event for check '%s' after system reboot", check.Name)
+				slog.Info("Published healthy event after system reboot", "check", check.Name)
 			}
 		} else {
-			klog.Warningf("Platform connector client is nil, cannot send healthy events after reboot")
+			slog.Warn("Platform connector client is nil, cannot send healthy events after reboot")
 		}
 	}
 
@@ -296,31 +298,31 @@ func (sm *SyslogMonitor) saveCurrentState() error {
 
 // executeCheck performs a single log check based on the provided definition
 func (sm *SyslogMonitor) executeCheck(check CheckDefinition) error {
-	klog.Infof("--- Executing Check: %s ---", check.Name)
+	slog.Info("Executing check", "check", check.Name)
 
 	journal, err := sm.openJournal(check)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to open journal for check %s: %w", check.Name, err)
 	}
 
 	defer func() {
 		if cerr := journal.Close(); cerr != nil {
-			klog.Warningf("Check '%s': error closing journal: %v", check.Name, cerr)
+			slog.Warn("Check '%s': error closing journal: %v", check.Name, cerr)
 		}
 	}()
 
 	if err := sm.configureTagFilters(journal, check); err != nil {
-		return err
+		return fmt.Errorf("failed to configure tag filters for check %s: %w", check.Name, err)
 	}
 
 	err = sm.processJournalEntries(journal, check)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to process journal entries for check %s: %w", check.Name, err)
 	}
 
 	// Save state after successfully processing journal entries
 	if err := sm.saveCurrentState(); err != nil {
-		klog.Warningf("Failed to save state after processing check '%s': %v", check.Name, err)
+		slog.Warn("Failed to save state after processing check '%s': %v", check.Name, err)
 	}
 
 	return nil
@@ -348,16 +350,16 @@ func (sm *SyslogMonitor) validateJournalPath(check CheckDefinition) error {
 func (sm *SyslogMonitor) openJournal(check CheckDefinition) (Journal, error) {
 	//nolint:nestif
 	if check.JournalPath != "" {
-		klog.Infof("Check '%s': Verifying journal path: %s", check.Name, check.JournalPath)
+		slog.Info("Check '%s': Verifying journal path: %s", check.Name, check.JournalPath)
 
 		// Only validate path on filesystem for real journal factories
 		if sm.journalFactory.RequiresFileSystemCheck() {
 			if err := sm.validateJournalPath(check); err != nil {
-				return nil, err
+				return nil, fmt.Errorf("journal path validation failed for check %s: %w", check.Name, err)
 			}
 		}
 
-		klog.Infof("Check '%s': Opening journal at path: %s", check.Name, check.JournalPath)
+		slog.Info("Check '%s': Opening journal at path: %s", check.Name, check.JournalPath)
 
 		journal, err := sm.journalFactory.NewJournalFromDir(check.JournalPath)
 		if err != nil {
@@ -376,13 +378,13 @@ func (sm *SyslogMonitor) configureBootFilter(journal Journal, checkName string) 
 	if bootID != "" {
 		matchExpr := FieldBootID + "=" + bootID
 
-		klog.Infof("Check '%s': Applying boot filter: %s", checkName, matchExpr)
+		slog.Info("Check '%s': Applying boot filter: %s", checkName, matchExpr)
 
 		if err := journal.AddMatch(matchExpr); err != nil {
 			return fmt.Errorf("check '%s': failed to add boot ID match ('%s'): %w", checkName, matchExpr, err)
 		}
 	} else {
-		klog.Warningf("Check '%s': Could not determine current boot ID. Boot filter will not be applied.", checkName)
+		slog.Warn("Could not determine current boot ID, boot filter not applied", "check", checkName)
 	}
 
 	return nil
@@ -403,14 +405,18 @@ func (sm *SyslogMonitor) configureTagFilters(journal Journal, check CheckDefinit
 			// Facility 0 is typically KERNEL messages.
 			matchExpr := FieldSyslogFacility + "=0"
 
-			klog.Infof("Check '%s': Adding kernel log filter from tag '%s': %s", check.Name, trimmedTag, matchExpr)
+			slog.Info("Adding kernel log filter",
+				"check", check.Name,
+				"tag", trimmedTag,
+				"match", matchExpr)
 
 			if err := journal.AddMatch(matchExpr); err != nil {
 				return fmt.Errorf("check '%s': failed to add kernel match ('%s'): %w", check.Name, matchExpr, err)
 			}
 		case "-b", "--boot":
-			klog.Infof("Check '%s': Processing explicit boot tag '%s'. Boot filter is primarily configured via"+
-				"check.Boot flag.", check.Name, trimmedTag)
+			slog.Info("Processing explicit boot tag",
+				"check", check.Name,
+				"tag", trimmedTag)
 			// configureBootFilter is already called if check.Boot is true.
 			// Calling it again here due to an explicit tag is generally harmless if configureBootFilter is idempotent.
 			if err := sm.configureBootFilter(journal, check.Name); err != nil {
@@ -428,18 +434,22 @@ func (sm *SyslogMonitor) configureTagFilters(journal Journal, check CheckDefinit
 				if unitName != "" {
 					matchExpr := FieldSystemdUnit + "=" + unitName
 
-					klog.Infof("Check '%s': Adding unit filter from tag '%s': %s", check.Name, trimmedTag, matchExpr)
+					slog.Info("Adding unit filter",
+						"check", check.Name,
+						"tag", trimmedTag,
+						"match", matchExpr)
 
 					if err := journal.AddMatch(matchExpr); err != nil {
 						return fmt.Errorf("check '%s': failed to add unit match for '%s' (using expression '%s'): %w",
 							check.Name, unitName, matchExpr, err)
 					}
 				} else {
-					klog.Warningf("Check '%s': Tag '%s' for unit filtering resulted in an empty unit name after parsing.",
-						check.Name, trimmedTag)
+					slog.Warn("Tag for unit filtering resulted in empty unit name",
+						"check", check.Name,
+						"tag", trimmedTag)
 				}
 			} else {
-				klog.Infof("Check '%s': Ignoring unrecognized tag in 'configureTagFilters': '%s'", check.Name, trimmedTag)
+				slog.Info("Check '%s': Ignoring unrecognized tag in 'configureTagFilters': '%s'", check.Name, trimmedTag)
 			}
 		}
 	}
@@ -457,17 +467,17 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 
 	bootID, err := journal.GetBootID()
 	if err != nil {
-		klog.Warningf("Check '%s': Failed to get boot ID: %v", check.Name, err)
+		slog.Warn("Failed to get boot ID", "check", check.Name, "error", err)
 	}
 
-	klog.Infof("Check '%s': Boot ID: %s", check.Name, bootID)
+	slog.Info("Boot ID for check", "check", check.Name, "bootID", bootID)
 	// This block handles:
 	// 1. Non-boot checks on their first run (hasLastCursor == false)
 	// 2. All checks (boot or non-boot) on subsequent runs (hasLastCursor == true)
 	//nolint:nestif // TODO
 	if !hasLastCursor { // This implies !check.Boot due to the block above
-		klog.Infof("Check '%s': No last known cursor. Seeking to journal tail to establish a "+
-			"starting point for future entries.", check.Name)
+		slog.Info("No last known cursor, seeking to journal tail",
+			"check", check.Name)
 
 		if err := journal.SeekTail(); err != nil {
 			return fmt.Errorf("check '%s': failed to seek to journal tail for initialization: %w", check.Name, err)
@@ -479,21 +489,21 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 		}
 
 		if count == 0 { // journal is empty
-			klog.Infof("Check %q: journal empty, nothing to do", check.Name)
+			slog.Info("Journal is empty, nothing to do", "check", check.Name)
 			return nil
 		}
 
 		cursor, err := journal.GetCursor()
 		if err != nil {
 			if strings.Contains(err.Error(), "cannot assign requested address") {
-				klog.Infof("Check %q: no cursor (journal empty); will try again next run", check.Name)
+				slog.Info("No cursor available, journal empty", "check", check.Name)
 				return nil
 			}
 
 			return fmt.Errorf("get cursor: %w", err)
 		}
 
-		klog.Infof("Check '%s': Initialized. Journal processing will start from entries"+
+		slog.Info("Check '%s': Initialized. Journal processing will start from entries"+
 			" after cursor '%s' on the next run.", check.Name, cursor)
 
 		sm.checkLastCursors[check.Name] = cursor
@@ -502,11 +512,16 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 	}
 
 	// If we are here, hasLastCursor is true.
-	klog.Infof("Check '%s': Resuming from last known cursor: %s", check.Name, lastKnownCursor)
+
+	slog.Info("Resuming from last known cursor",
+		"check", check.Name,
+		"cursor", lastKnownCursor)
 
 	if err := journal.SeekCursor(lastKnownCursor); err != nil {
-		klog.Warningf("Check '%s': Failed to seek to last known cursor '%s': %v. "+
-			"Re-initializing by seeking to current tail.", check.Name, lastKnownCursor, err)
+		slog.Warn("Failed to seek to last known cursor, re-initializing",
+			"check", check.Name,
+			"cursor", lastKnownCursor,
+			"error", err)
 
 		if errSeekTail := journal.SeekTail(); errSeekTail != nil {
 			return fmt.Errorf("check '%s': failed to seek to journal tail during re-initialization after SeekCursor error: %w",
@@ -519,8 +534,9 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 				check.Name, errGetCursor)
 		}
 
-		klog.Infof("Check '%s': Re-initialized. Journal processing will start from"+
-			" entries after cursor '%s' on the next run.", check.Name, tailCursor)
+		slog.Info("Re-initialized journal processing",
+			"check", check.Name,
+			"cursor", tailCursor)
 
 		sm.checkLastCursors[check.Name] = tailCursor
 
@@ -535,7 +551,9 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 	}
 
 	if nextErr == io.EOF || advanced == 0 { //nolint:errorlint // TODO
-		klog.Infof("Check '%s': No new entries since last cursor %s.", check.Name, lastKnownCursor)
+		slog.Info("No new entries since last cursor",
+			"check", check.Name,
+			"cursor", lastKnownCursor)
 		// sm.checkLastCursors[checkName] is already lastKnownCursor, which is correct for the next run.
 		return nil
 	}
@@ -544,18 +562,25 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 	for {
 		currentEntryCursor, err := journal.GetCursor() // Cursor of the entry we are about to process
 		if err != nil {
-			klog.Warningf("Check '%s': Failed to get cursor for current entry: %v. Attempting to advance."+
-				" Last stored cursor for next run: %s.", check.Name, err, sm.checkLastCursors[check.Name])
+			slog.Warn("Failed to get cursor for current entry, attempting to advance",
+				"check", check.Name,
+				"error", err,
+				"lastStoredCursor", sm.checkLastCursors[check.Name])
 
 			advancedNext, advErr := journal.Next()
 			if advErr == io.EOF || advancedNext == 0 { //nolint:errorlint // TODO
-				klog.Infof("Check '%s': Reached end of journal while trying to recover from GetCursor error."+
-					" Next run will start after: %s.", check.Name, sm.checkLastCursors[check.Name])
+				slog.Info("Reached end of journal while recovering from GetCursor error",
+					"check", check.Name,
+					"nextCursor", sm.checkLastCursors[check.Name])
+
 				break
-			} else if advErr != nil {
-				klog.Errorf("Check '%s': Error advancing journal after GetCursor error: %v. Stopping processing."+
-					" Next run will start after: %s.",
-					check.Name, advErr, sm.checkLastCursors[check.Name])
+			}
+
+			if advErr != nil {
+				slog.Error("Error advancing journal after GetCursor error, stopping",
+					"check", check.Name,
+					"error", advErr,
+					"nextCursor", sm.checkLastCursors[check.Name])
 
 				return fmt.Errorf("error advancing after GetCursor error for check '%s' (last stored cursor for next run %s): %w",
 					check.Name, sm.checkLastCursors[check.Name], advErr)
@@ -566,21 +591,27 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 
 		message, err := sm.getJournalMessage(journal, check.Name)
 		if err != nil {
-			klog.Warningf("Check '%s': Failed to get journal message for entry at cursor %s: %v. Skipping. "+
-				"Next run will start after: %s.", check.Name, currentEntryCursor, err, sm.checkLastCursors[check.Name])
+			slog.Warn("Failed to get journal message, skipping entry",
+				"check", check.Name,
+				"cursor", currentEntryCursor,
+				"error", err,
+				"nextCursor", sm.checkLastCursors[check.Name])
 
 			advancedNext, advErr := journal.Next()
 
 			if advErr == io.EOF || advancedNext == 0 { //nolint:errorlint // TODO
-				klog.Infof("Check '%s': Reached end of journal while trying to recover from getJournalMessage"+
-					" error for cursor %s. Next run will start after: %s.", check.Name, currentEntryCursor,
-					sm.checkLastCursors[check.Name])
+				slog.Info("Reached end of journal while recovering from message error",
+					"check", check.Name,
+					"entryCursor", currentEntryCursor,
+					"nextCursor", sm.checkLastCursors[check.Name])
 
 				break
 			} else if advErr != nil {
-				klog.Errorf("Check '%s': Error advancing journal after getJournalMessage error for cursor %s: %v."+
-					" Stopping. Next run will start after: %s.",
-					check.Name, currentEntryCursor, advErr, sm.checkLastCursors[check.Name])
+				slog.Error("Error advancing journal after message error, stopping",
+					"check", check.Name,
+					"entryCursor", currentEntryCursor,
+					"error", advErr,
+					"nextCursor", sm.checkLastCursors[check.Name])
 
 				return fmt.Errorf("error advancing after getJournalMessage for check '%s' (entry cursor %s, "+
 					"last stored cursor for next run %s): %v",
@@ -593,8 +624,9 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 		if message == "" {
 			// Successfully read an empty message. This entry is considered processed.
 			sm.checkLastCursors[check.Name] = currentEntryCursor // Update cursor for the next run
-			klog.Infof("Check '%s': Empty message at cursor %s. "+
-				"Stored cursor for next run. Advancing.", check.Name, currentEntryCursor)
+			slog.Info("Check, read empty message", "name", check.Name,
+				"message", message,
+				"cursor", currentEntryCursor)
 		} else {
 			err = sm.handleSingleLine(check, message)
 			if err != nil {
@@ -602,22 +634,24 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 			}
 			// This entry (matched or not) is considered processed.
 			sm.checkLastCursors[check.Name] = currentEntryCursor // Update cursor for the next run
-			klog.Infof("Check '%s': Processed entry at cursor %s. Stored cursor for next run. Advancing.",
-				check.Name, currentEntryCursor)
+			slog.Info("Check, considered processed", "name", check.Name,
+				"message", message,
+				"cursor", currentEntryCursor)
 		}
 
 		advancedNext, advErr := journal.Next()
 		if advErr == io.EOF || advancedNext == 0 { //nolint:errorlint // TODO
-			klog.Infof("Check '%s': Reached end of journal after processing entry with cursor %s. Next run will"+
-				"start after this cursor.", check.Name, currentEntryCursor)
+			slog.Info("Check, no more", "name", check.Name, "cursor", currentEntryCursor)
 			// sm.checkLastCursors[checkName] is already set to currentEntryCursor.
 			break
 		}
 
 		if advErr != nil {
 			// Error advancing. currentEntryCursor was the last successfully processed one.
-			klog.Errorf("Check '%s': Error reading next journal entry after cursor %s: %v. Next run will start"+
-				"after this cursor.", check.Name, currentEntryCursor, advErr)
+			slog.Error("Error reading next journal entry, stopping",
+				"check", check.Name,
+				"cursor", currentEntryCursor,
+				"error", advErr)
 
 			return fmt.Errorf("check '%s': error reading next journal entry after cursor %s: %w",
 				check.Name, currentEntryCursor, advErr)
@@ -625,8 +659,9 @@ func (sm *SyslogMonitor) processJournalEntries(journal Journal, check CheckDefin
 	}
 
 	finalCursor := sm.checkLastCursors[check.Name] // Should always exist if we passed initialization.
-	klog.Infof("Check '%s': Finished processing journal entries for this cycle. Next run will start after cursor: %s",
-		check.Name, finalCursor)
+	slog.Info("Finished processing journal entries",
+		"check", check.Name,
+		"nextCursor", finalCursor)
 
 	return nil
 }
@@ -649,13 +684,16 @@ func (sm *SyslogMonitor) getJournalMessage(journal Journal, checkName string) (s
 
 		// If it's not a retryable error, return immediately
 		if !isRetryableJournalError(err) {
-			return "", err
+			return "", fmt.Errorf("non-retryable error reading journal message for check %s: %w", checkName, err)
 		}
 
 		// Log retry attempt
 		if i < maxRetries-1 {
-			klog.V(4).Infof("Check '%s': Retrying journal message read (attempt %d/%d): %v",
-				checkName, i+1, maxRetries, err)
+			slog.Debug("Retrying journal message read",
+				"check", checkName,
+				"attempt", i+1,
+				"maxRetries", maxRetries,
+				"error", err)
 			time.Sleep(retryDelay)
 		}
 	}
@@ -683,19 +721,19 @@ func isRetryableJournalError(err error) bool {
 func (sm *SyslogMonitor) getCurrentBootID() string {
 	journal, err := sm.journalFactory.NewJournal()
 	if err != nil {
-		klog.Warningf("Failed to open system journal for boot ID: %v", err)
+		slog.Warn("Failed to open system journal for boot ID", "error", err)
 		return ""
 	}
 
 	defer func() {
 		if cerr := journal.Close(); cerr != nil {
-			klog.Warningf("Error closing system journal after getting boot ID: %v", cerr)
+			slog.Warn("Error closing system journal after getting boot ID", "error", cerr)
 		}
 	}()
 
 	bootID, err := journal.GetBootID()
 	if err != nil {
-		klog.Warningf("Failed to get boot ID: %v", err)
+		slog.Warn("Failed to get boot ID", "error", err)
 		return ""
 	}
 
@@ -705,13 +743,12 @@ func (sm *SyslogMonitor) getCurrentBootID() string {
 // prepareHealthEventWithAction creates a health event with an explicit RecommendedAction
 func (sm *SyslogMonitor) prepareHealthEventWithAction(
 	check CheckDefinition, message string, isHealthy bool, errRes types.ErrorResolution) *pb.HealthEvents {
-	klog.Infof("Preparing health event (override action) for check '%s': Message: %s, Healthy: %t, Fatal: %t, Action: %s",
-		check.Name,
-		message,
-		isHealthy,
-		false,
-		errRes.RecommendedAction,
-	)
+	slog.Info("Preparing health event with override action",
+		"check", check.Name,
+		"message", message,
+		"healthy", isHealthy,
+		"fatal", false,
+		"action", errRes.RecommendedAction)
 
 	event := &pb.HealthEvent{
 		Version:            1,
@@ -736,11 +773,11 @@ func (sm *SyslogMonitor) prepareHealthEventWithAction(
 func (sm *SyslogMonitor) sendHealthEventWithRetry(healthEvents *pb.HealthEvents,
 	maxRetries int, retryDelay time.Duration) {
 	if sm.pcClient == nil {
-		klog.Error("PlatformConnectorClient is nil, cannot send health event.")
+		slog.Error("PlatformConnectorClient is nil, cannot send health event")
 		return
 	}
 
-	klog.Infof("Attempting to send health event: %+v", healthEvents)
+	slog.Info("Attempting to send health event", "events", healthEvents)
 
 	backoff := wait.Backoff{
 		Steps:    maxRetries,
@@ -752,22 +789,22 @@ func (sm *SyslogMonitor) sendHealthEventWithRetry(healthEvents *pb.HealthEvents,
 	err := wait.ExponentialBackoff(backoff, func() (bool, error) {
 		_, err := sm.pcClient.HealthEventOccuredV1(context.Background(), healthEvents)
 		if err == nil {
-			klog.Infof("Successfully sent health events: %+v", healthEvents)
+			slog.Info("Successfully sent health events", "events", healthEvents)
 			return true, nil
 		}
 
 		if isRetryableError(err) {
-			klog.Warningf("Retryable error occurred while sending health event: %v. Retrying...", err)
+			slog.Warn("Retryable error sending health event, will retry", "error", err)
 			return false, nil
 		}
 
-		klog.Errorf("Non-retryable error occurred while sending health event: %v", err)
+		slog.Error("Non-retryable error sending health event", "error", err)
 
-		return false, err
+		return false, fmt.Errorf("non-retryable error sending health event: %w", err)
 	})
 
 	if err != nil {
-		klog.Errorf("All retry attempts to send health event failed: %v", err)
+		slog.Error("All retry attempts to send health event failed", "error", err)
 	}
 }
 
@@ -799,7 +836,6 @@ func (sm *SyslogMonitor) handleSingleLine(check CheckDefinition, lineToEvaluate 
 	if handler, ok := sm.checkToHandlerMap[check.Name]; ok {
 		healthEvents, err := handler.ProcessLine(lineToEvaluate)
 		if err != nil {
-			klog.Errorf("error processing line %s: %s", lineToEvaluate, err.Error())
 			return fmt.Errorf("error processing line %s: %w", lineToEvaluate, err)
 		}
 

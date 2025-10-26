@@ -25,10 +25,14 @@ RUN mkdir -p /etc/config
 WORKDIR /go/src/platform-connectors
 
 COPY platform-connectors/go.mod platform-connectors/go.sum ./
+COPY data-models/go.mod data-models/go.sum ../data-models/
+COPY commons/go.mod commons/go.sum ../commons/
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
 COPY platform-connectors/ .
+COPY data-models/ ../data-models/
+COPY commons/ ../commons/
 
 RUN go build -o platform-connectors main.go
 

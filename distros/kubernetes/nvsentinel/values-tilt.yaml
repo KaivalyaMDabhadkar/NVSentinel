@@ -73,6 +73,9 @@ global:
 
   kata:
     enabled: false
+  
+  janitor:
+    enabled: true
 
 platformConnector:
   mongodbStore:
@@ -82,6 +85,7 @@ platformConnector:
 
 mongodb-store:
   mongodb:
+    replicaCount: 1
     nodeSelector:
       node-role.kubernetes.io/control-plane: ""
     
@@ -98,6 +102,10 @@ mongodb-store:
       pullPolicy: "IfNotPresent"
 
     tls:
+      replicaset:
+        existingSecrets:
+          - "mongo-server-cert-0"
+      
       image:
         registry: "docker.io"
         repository: "bitnamilegacy/nginx"
@@ -111,3 +119,23 @@ mongodb-store:
         repository: bitnamilegacy/mongodb-exporter
         tag: 0.41.2-debian-12-r1
 
+# Override log levels for all modules during testing
+fault-quarantine:
+  logLevel: debug
+
+fault-remediation:
+  logLevel: debug
+
+node-drainer:
+  logLevel: debug
+
+labeler:
+  logLevel: debug
+
+health-events-analyzer:
+  logLevel: debug
+
+csp-health-monitor:
+  logLevel: debug
+  quarantineTriggerEngine:
+    logLevel: debug

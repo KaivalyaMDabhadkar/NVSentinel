@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -26,7 +27,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -70,10 +70,14 @@ func (m *NodeAnnotationManager) patchNodeWithRetry(ctx context.Context, nodeName
 	return retry.OnError(retry.DefaultRetry, isRetryableError, func() error {
 		_, err := m.kubeClient.CoreV1().Nodes().Patch(ctx, nodeName, types.MergePatchType, patch, metav1.PatchOptions{})
 		if err != nil && isRetryableError(err) {
-			klog.Warningf("Retryable error patching node %s annotation: %v. Retrying...", nodeName, err)
+			slog.Warn("Retryable error patching node %s annotation: %v. Retrying...", nodeName, err)
 		}
 
-		return err
+		if err != nil {
+			return fmt.Errorf("failed to patch node %s: %w", nodeName, err)
+		}
+
+		return nil
 	})
 }
 
@@ -108,7 +112,7 @@ func (m *NodeAnnotationManager) GetRemediationState(
 		n, err := m.kubeClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 		if err != nil {
 			if isRetryableError(err) {
-				klog.Warningf("Retryable error getting node %s: %v. Retrying...", nodeName, err)
+				slog.Warn("Retryable error getting node", "node", nodeName, "error", err)
 			}
 
 			return err
@@ -133,7 +137,7 @@ func (m *NodeAnnotationManager) GetRemediationState(
 
 	var state RemediationStateAnnotation
 	if err := json.Unmarshal([]byte(annotationValue), &state); err != nil {
-		klog.Errorf("Failed to unmarshal annotation for node %s: %v", nodeName, err)
+		slog.Error("Failed to unmarshal annotation", "node", nodeName, "error", err)
 		// Return empty state if unmarshal fails
 		return &RemediationStateAnnotation{
 			EquivalenceGroups: make(map[string]EquivalenceGroupState),
@@ -151,7 +155,7 @@ func (m *NodeAnnotationManager) UpdateRemediationState(ctx context.Context, node
 
 	if err != nil {
 		// Log but continue with empty state
-		klog.Warningf("Failed to get current remediation state for node %s: %v", nodeName, err)
+		slog.Warn("Failed to get current remediation state", "node", nodeName, "error", err)
 
 		state = &RemediationStateAnnotation{
 			EquivalenceGroups: make(map[string]EquivalenceGroupState),
@@ -178,7 +182,10 @@ func (m *NodeAnnotationManager) UpdateRemediationState(ctx context.Context, node
 		return fmt.Errorf("failed to update remediation state annotation for %s: %w", nodeName, err)
 	}
 
-	klog.Infof("Updated remediation state annotation for node %s, group %s, CR %s", nodeName, group, crName)
+	slog.Info("Updated remediation state annotation for node",
+		"node", nodeName,
+		"group", group,
+		"crName", crName)
 
 	return nil
 }
@@ -193,7 +200,7 @@ func (m *NodeAnnotationManager) ClearRemediationState(ctx context.Context, nodeN
 		return fmt.Errorf("failed to clear remediation state annotation for node %s: %w", nodeName, err)
 	}
 
-	klog.Infof("Cleared remediation state annotation for node %s", nodeName)
+	slog.Info("Cleared remediation state annotation for node", "node", nodeName)
 
 	return nil
 }
@@ -227,7 +234,7 @@ func (m *NodeAnnotationManager) RemoveGroupFromState(ctx context.Context, nodeNa
 		return fmt.Errorf("failed to remove group from node annotation for %s: %w", nodeName, err)
 	}
 
-	klog.Infof("Removed group %s from remediation state for node %s", group, nodeName)
+	slog.Info("Removed group from remediation state for node", "node", nodeName, "group", group)
 
 	return nil
 }

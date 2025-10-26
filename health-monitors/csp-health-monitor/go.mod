@@ -34,7 +34,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/api v0.34.1
 	k8s.io/apimachinery v0.34.1 // Often needed alongside client-go
-	k8s.io/klog/v2 v2.130.1
+	k8s.io/klog/v2 v2.130.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
 	k8s.io/utils v0.0.0-20251002143259-bc988d571ff4 // indirect
 	sigs.k8s.io/json v0.0.0-20250730193827-2d320260d730 // indirect
@@ -46,8 +46,9 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.36.3
 	github.com/aws/aws-sdk-go-v2/config v1.29.14
 	github.com/aws/aws-sdk-go-v2/service/health v1.30.2
-	github.com/nvidia/nvsentinel/platform-connectors v0.0.0-20250325062339-8eabcfa82aa9
-	github.com/nvidia/nvsentinel/store-client-sdk v0.0.0-20250901050746-391b5ab7018d
+	github.com/nvidia/nvsentinel/commons v0.0.0
+	github.com/nvidia/nvsentinel/data-models v0.0.0
+	github.com/nvidia/nvsentinel/store-client-sdk v0.0.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/stretchr/testify v1.11.1
 	go.mongodb.org/mongo-driver v1.17.4
@@ -65,7 +66,6 @@ require (
 	cloud.google.com/go/compute/metadata v0.7.0 // indirect
 	cloud.google.com/go/iam v1.2.2 // indirect
 	cloud.google.com/go/longrunning v0.6.2 // indirect
-	github.com/Masterminds/semver/v3 v3.4.0 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.67 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.16.30 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.3.34 // indirect
@@ -94,11 +94,14 @@ require (
 	github.com/go-openapi/swag/typeutils v0.25.1 // indirect
 	github.com/go-openapi/swag/yamlutils v0.25.1 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
+	github.com/google/pprof v0.0.0-20251007162407-5df77e3f7d1d // indirect
 	github.com/google/s2a-go v0.1.8 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/googleapis/gax-go/v2 v2.14.0 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/montanaflynn/stats v0.7.1 // indirect
+	github.com/onsi/ginkgo/v2 v2.26.0 // indirect
+	github.com/onsi/gomega v1.38.2 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.67.1 // indirect
@@ -115,12 +118,11 @@ require (
 	go.opentelemetry.io/otel v1.38.0 // indirect
 	go.opentelemetry.io/otel/metric v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
-	go.uber.org/automaxprocs v1.6.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.3 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
-	golang.org/x/mod v0.29.0 // indirect
 	golang.org/x/sync v0.17.0 // indirect
+	golang.org/x/tools v0.38.0 // indirect
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
@@ -129,9 +131,9 @@ require (
 // Local replacements for internal modules
 replace github.com/nvidia/nvsentinel/statemanager => ../../statemanager
 
-replace github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor => ../../health-monitors/csp-health-monitor
-
 replace github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor => ../../health-monitors/syslog-health-monitor
+
+replace github.com/nvidia/nvsentinel/data-models => ../../data-models
 
 replace github.com/nvidia/nvsentinel/platform-connectors => ../../platform-connectors
 
@@ -148,3 +150,5 @@ replace github.com/nvidia/nvsentinel/labeler-module => ../../labeler-module
 replace github.com/nvidia/nvsentinel/node-drainer-module => ../../node-drainer-module
 
 replace github.com/nvidia/nvsentinel/fault-remediation-module => ../../fault-remediation-module
+
+replace github.com/nvidia/nvsentinel/commons => ../../commons

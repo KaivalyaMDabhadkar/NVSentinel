@@ -20,6 +20,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -32,7 +33,6 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
-	"k8s.io/klog/v2"
 )
 
 type MongoDBClientTLSCertConfig struct {
@@ -152,12 +152,12 @@ func NewChangeStreamWatcher(
 	err = tokenColl.FindOne(ctx, bson.M{"clientName": tokenConfig.ClientName}).Decode(&storedToken)
 	if err == nil {
 		if len(storedToken.ResumeToken) > 0 {
-			klog.Infof("ResumeToken is: %+v", storedToken.ResumeToken)
+			slog.Info("ResumeToken found", "token", storedToken.ResumeToken)
 			opts.SetResumeAfter(storedToken.ResumeToken)
 
 			hasResumeToken = true
 		} else {
-			klog.Info("No valid resume token found, starting stream from the beginning..")
+			slog.Info("No valid resume token found, starting stream from the beginning..")
 		}
 	} else if !errors.Is(err, mongo.ErrNoDocuments) {
 		// if no document was found, it is a normal case if it's the first time the client is connecting
@@ -168,7 +168,7 @@ func NewChangeStreamWatcher(
 	// Open the change stream with appropriate read preference based on resume token presence
 	cs, err := openChangeStream(ctx, client, mongoConfig, pipeline, opts, hasResumeToken)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to open change stream: %w", err)
 	}
 
 	watcher := &ChangeStreamWatcher{
@@ -254,8 +254,9 @@ func openChangeStreamWithRetry(
 		}
 
 		if time.Now().After(deadline) {
-			klog.Warningf("Change stream open on SecondaryPreferred failed for %d seconds; falling back to Primary: %v",
-				retryDeadlineSeconds, openErr)
+			slog.Warn("Change stream open on SecondaryPreferred failed, falling back to Primary",
+				"retryDeadlineSeconds", retryDeadlineSeconds,
+				"error", openErr)
 
 			collP := client.Database(mongoConfig.Database).Collection(
 				mongoConfig.Collection, options.Collection().SetReadPreference(readpref.Primary()))
@@ -268,8 +269,9 @@ func openChangeStreamWithRetry(
 			return cs, nil
 		}
 
-		klog.Warningf("Failed to open change stream on SecondaryPreferred while resuming; retrying in %d seconds: %v",
-			retryIntervalSeconds, openErr)
+		slog.Warn("Failed to open change stream on SecondaryPreferred while resuming, retrying",
+			"retryIntervalSeconds", retryIntervalSeconds,
+			"error", openErr)
 
 		// Use select with timer to make sleep interruptible by context cancellation
 		select {
@@ -284,13 +286,13 @@ func (w *ChangeStreamWatcher) Start(ctx context.Context) {
 	go func(ctx context.Context) {
 		defer w.closeOnce.Do(func() {
 			close(w.eventChannel)
-			klog.Infof("ChangeStreamWatcher event channel closed for client %s", w.clientName)
+			slog.Info("ChangeStreamWatcher event channel closed", "client", w.clientName)
 		})
 
 		for {
 			select {
 			case <-ctx.Done():
-				klog.Infof("ChangeStreamWatcher context cancelled for client %s, stopping event processing", w.clientName)
+				slog.Info("ChangeStreamWatcher context cancelled, stopping event processing", "client", w.clientName)
 				return
 			default:
 				w.mu.Lock()
@@ -306,12 +308,12 @@ func (w *ChangeStreamWatcher) Start(ctx context.Context) {
 					w.mu.Unlock()
 
 					if err != nil {
-						klog.Infof("failed to decode change stream event: %+v", err)
+						slog.Info("Failed to decode change stream event", "error", err)
 						continue
 					}
 					w.eventChannel <- event
 				} else if csErr != nil {
-					klog.Fatalf("failed to watch change stream: %v", csErr)
+					slog.Error("Failed to watch change stream", "error", csErr)
 				}
 			}
 		}
@@ -325,7 +327,7 @@ func (w *ChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
 
 	var err error
 
-	klog.Infof("Attempting to store resume token for client %s.", w.clientName)
+	slog.Info("Attempting to store resume token", "client", w.clientName)
 
 	for {
 		if time.Now().After(timeout) {
@@ -342,7 +344,8 @@ func (w *ChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
 			return nil
 		}
 
-		klog.Warningf("Failed to store resume token for client %s: %v. Retrying...", w.clientName, err)
+		slog.Warn("Failed to store resume token for client, retrying",
+			"client", w.clientName, "error", err)
 		time.Sleep(w.resumeTokenUpdateInterval)
 	}
 }
@@ -386,10 +389,14 @@ func (w *ChangeStreamWatcher) Close(ctx context.Context) error {
 
 	w.closeOnce.Do(func() {
 		close(w.eventChannel)
-		klog.Infof("ChangeStreamWatcher event channel closed for client %s", w.clientName)
+		slog.Info("ChangeStreamWatcher event channel closed", "client", w.clientName)
 	})
 
-	return err
+	if err != nil {
+		return fmt.Errorf("failed to close change stream for client %s: %w", w.clientName, err)
+	}
+
+	return nil
 }
 
 func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.Client, mongoDbName string,
@@ -399,7 +406,7 @@ func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.C
 
 	var err error
 
-	klog.Infof("Trying to ping database %s to confirm connectivity.", mongoDbName)
+	slog.Info("Trying to ping database to confirm connectivity", "database", mongoDbName)
 
 	for {
 		if time.Now().After(timeout) {
@@ -410,7 +417,7 @@ func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.C
 
 		err = client.Database(mongoDbName).RunCommand(ctx, bson.D{{Key: "ping", Value: 1}}).Decode(&result)
 		if err == nil {
-			klog.Infof("Successfully pinged database %s to confirm connectivity.", mongoDbName)
+			slog.Info("Successfully pinged database to confirm connectivity", "database", mongoDbName)
 			break
 		}
 
@@ -428,7 +435,7 @@ func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.C
 		return fmt.Errorf("more than one collection with name %s for DB %s was found", mongoDbCollection, mongoDbName)
 	}
 
-	klog.Infof("Confirmed that the collection %s exists in the database %s.", mongoDbCollection, mongoDbName)
+	slog.Info("Confirmed that the collection %s exists in the database %s.", mongoDbCollection, mongoDbName)
 
 	return nil
 }
@@ -569,7 +576,7 @@ func pollTillCACertIsMountedSuccessfully(certPath string, timeoutInterval time.D
 
 	var err error
 
-	klog.Infof("Trying to read CA cert from %s.", certPath)
+	slog.Info("Trying to read CA cert", "path", certPath)
 
 	for {
 		if time.Now().After(timeout) {
@@ -580,10 +587,10 @@ func pollTillCACertIsMountedSuccessfully(certPath string, timeoutInterval time.D
 		// load CA certificate
 		caCert, err = os.ReadFile(certPath)
 		if err == nil {
-			klog.Infof("Successfully read CA cert.")
+			slog.Info("Successfully read CA cert")
 			return caCert, nil
 		} else {
-			klog.Infof("Failed to read CA certificate with error: %v, retrying...", err)
+			slog.Info("Failed to read CA certificate, retrying", "error", err)
 		}
 
 		time.Sleep(pingInterval)

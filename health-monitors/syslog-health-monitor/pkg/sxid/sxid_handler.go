@@ -16,14 +16,14 @@ package sxid
 
 import (
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
-	"google.golang.org/protobuf/types/known/timestamppb"
-	"k8s.io/klog/v2"
-
-	pb "github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/protos"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	lsnvlink "github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/sxid/lsnvlink"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 func NewSXIDHandler(nodeName, defaultAgentName,
@@ -39,8 +39,8 @@ func NewSXIDHandler(nodeName, defaultAgentName,
 func (sxidHandler *SXIDHandler) ProcessLine(message string) (*pb.HealthEvents, error) {
 	sxidErrorEvent, err := sxidHandler.extractInfoFromNVSwitchErrorMsg(message)
 	if err != nil {
-		klog.Errorf("error parsing line %s: %v", message, err)
-		return nil, err
+		slog.Error("error parsing line", "line", message, "error", err.Error())
+		return nil, fmt.Errorf("failed to extract info from NVSwitch error message: %w", err)
 	}
 
 	if sxidErrorEvent == nil {
@@ -49,11 +49,10 @@ func (sxidHandler *SXIDHandler) ProcessLine(message string) (*pb.HealthEvents, e
 
 	gpuID, err := sxidHandler.getGPUID(sxidErrorEvent.PCI, sxidErrorEvent.Link)
 	if err != nil {
-		klog.Errorf("error in finding GPU ID with PCI %s and NVLink %d: %s",
-			sxidErrorEvent.PCI,
-			sxidErrorEvent.Link,
-			err.Error(),
-		)
+		slog.Error("Error finding GPU ID",
+			"pci", sxidErrorEvent.PCI,
+			"link", sxidErrorEvent.Link,
+			"error", err.Error())
 
 		return nil, fmt.Errorf(
 			"error in finding GPU ID with PCI %s and NVLink %d: %w",
@@ -142,7 +141,7 @@ func (sxidHandler *SXIDHandler) getGPUID(pciAddress string, nvlink int) (int, er
 	// Try dynamic topology using PCI address
 	gpuID, err := provider.GetGPUFromPCINVLink(pciAddress, nvlink)
 	if err != nil {
-		klog.Errorf("Dynamic topology lookup failed for PCI %s: %s", pciAddress, err.Error())
+		slog.Error("Dynamic topology lookup failed for PCI %s: %s", pciAddress, err.Error())
 		return -1, fmt.Errorf("dynamic topology lookup failed for PCI %s: %w", pciAddress, err)
 	}
 

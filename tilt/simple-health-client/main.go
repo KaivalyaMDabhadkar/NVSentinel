@@ -19,14 +19,16 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
-	pb "simple-health-client/protos"
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 )
 
 func main() {
@@ -83,5 +85,8 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Health event sent"})
 	})
 
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		slog.Error("Failed to start HTTP server", "error", err)
+		os.Exit(1)
+	}
 }

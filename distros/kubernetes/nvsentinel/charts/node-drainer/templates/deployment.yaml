@@ -45,6 +45,22 @@ spec:
           ports:
           - name: metrics
             containerPort: {{ .Values.global.metricsPort }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
           args:
           - "--metrics-port={{ .Values.global.metricsPort }}"
           - "--config-path={{ .Values.configPath }}"
@@ -57,6 +73,9 @@ spec:
           - name: mongo-app-client-cert
             mountPath: {{ .Values.clientCertMountPath }}
             readOnly: true
+          env:
+            - name: LOG_LEVEL
+              value: "{{ .Values.logLevel }}"
           envFrom:
             - configMapRef:
                 name: mongodb-config

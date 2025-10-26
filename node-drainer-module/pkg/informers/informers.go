@@ -17,10 +17,14 @@ package informers
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path/filepath"
 	"regexp"
 	"sync"
 	"time"
+
+	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/metrics"
+	storeconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
 
 	"github.com/hashicorp/go-multierror"
 	v1 "k8s.io/api/core/v1"
@@ -30,11 +34,7 @@ import (
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
-
-	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/metrics"
-	storeconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
 )
 
 const (
@@ -170,7 +170,7 @@ func (i *Informers) FindEvictablePodsInNamespaceAndNode(namespace, nodeName stri
 
 	objs, err := i.podInformer.GetIndexer().ByIndex(NamespaceNodeIndex, compositeKey)
 	if err != nil {
-		klog.Errorf("Failed to get pods by index: %v", err)
+		slog.Error("Failed to get pods by index", "error", err)
 		return nil, fmt.Errorf("failed to get pods by index: %w", err)
 	}
 
@@ -194,13 +194,17 @@ func (i *Informers) filterEvictablePods(pods []*v1.Pod) []*v1.Pod {
 		}
 
 		if pod.Status.Phase == v1.PodSucceeded || pod.Status.Phase == v1.PodFailed {
-			klog.Infof("Ignoring completed pod %s in namespace %s on node %s (status: %s) during eviction check",
+			slog.Info("Ignoring completed pod %s in namespace %s on node %s (status: %s) during eviction check",
 				pod.Name, pod.Namespace, pod.Spec.NodeName, pod.Status.Phase)
 			continue
 		}
 
 		if i.isPodStuckInTerminating(pod) || i.isPodNotReady(pod) {
-			klog.Infof("Ignoring pod %s in namespace %s on node %s", pod.Name, pod.Namespace, pod.Spec.NodeName)
+			slog.Info("Ignoring pod in namespace on node",
+				"pod", pod.Name,
+				"namespace", pod.Namespace,
+				"node", pod.Spec.NodeName)
+
 			continue
 		}
 
@@ -213,8 +217,11 @@ func (i *Informers) filterEvictablePods(pods []*v1.Pod) []*v1.Pod {
 func (i *Informers) isDaemonSetPod(pod *v1.Pod) bool {
 	for _, owner := range pod.OwnerReferences {
 		if owner.Kind == "DaemonSet" {
-			klog.Infof("Ignoring DaemonSet pod %s in namespace %s on node %s during eviction check",
-				pod.Name, pod.Namespace, pod.Spec.NodeName)
+			slog.Info("Ignoring DaemonSet pod in namespace on node during eviction check",
+				"pod", pod.Name,
+				"namespace", pod.Namespace,
+				"node", pod.Spec.NodeName)
+
 			return true
 		}
 	}
@@ -236,9 +243,12 @@ func (i *Informers) isPodStuckInTerminating(pod *v1.Pod) bool {
 
 	// If current time is beyond the timeout threshold, pod is considered stuck
 	if time.Now().After(timeoutThreshold) {
-		klog.Infof("Pod %s in namespace %s is stuck in terminating state - deletion timestamp: %v:,"+
-			"grace period: %ds, timeout threshold: %v", pod.Name, pod.Namespace, pod.DeletionTimestamp,
-			gracePeriod, timeoutThreshold)
+		slog.Info("Pod in namespace is stuck in terminating state",
+			"pod", pod.Name,
+			"namespace", pod.Namespace,
+			"deletionTimestamp", pod.DeletionTimestamp,
+			"gracePeriod", gracePeriod,
+			"timeoutThreshold", timeoutThreshold)
 
 		return true
 	}
@@ -258,8 +268,12 @@ func (i *Informers) isPodNotReady(pod *v1.Pod) bool {
 		if condition.Type == v1.PodReady && condition.Status == v1.ConditionFalse {
 			// Additional check: if the pod has been in NotReady state for the configured time
 			if condition.LastTransitionTime.Add(notReadyTimeout).Before(time.Now()) {
-				klog.Infof("Pod %s in namespace %s is in NotReady state since %v (timeout: %v)",
-					pod.Name, pod.Namespace, condition.LastTransitionTime, notReadyTimeout)
+				slog.Info("Pod in namespace is in NotReady state",
+					"pod", pod.Name,
+					"namespace", pod.Namespace,
+					"lastTransitionTime", condition.LastTransitionTime,
+					"timeout", notReadyTimeout)
+
 				return true
 			}
 		}
@@ -272,7 +286,11 @@ func (i *Informers) EvictAllPodsInImmediateMode(ctx context.Context,
 	namespace, nodeName string, timeout time.Duration) error {
 	pods, err := i.FindEvictablePodsInNamespaceAndNode(namespace, nodeName)
 	if err != nil {
-		klog.Errorf("Failed to find evictable pods in namespace %s on node %s: %v", namespace, nodeName, err)
+		slog.Error("Failed to find evictable pods in namespace on node",
+			"namespace", namespace,
+			"node", nodeName,
+			"error", err)
+
 		return fmt.Errorf("failed to find evictable pods in namespace %s on node %s: %w", namespace, nodeName, err)
 	}
 
@@ -282,7 +300,11 @@ func (i *Informers) EvictAllPodsInImmediateMode(ctx context.Context,
 
 	err = i.evictPodsInNamespaceAndNode(ctx, namespace, timeout, pods)
 	if err != nil {
-		klog.Errorf("Failed to evict pods in namespace %s on node %s: %v", namespace, nodeName, err)
+		slog.Error("Failed to evict pods in namespace on node",
+			"namespace", namespace,
+			"node", nodeName,
+			"error", err)
+
 		return fmt.Errorf("failed to evict pods in namespace %s on node %s: %w", namespace, nodeName, err)
 	}
 
@@ -306,16 +328,25 @@ func (i *Informers) evictPodsInNamespaceAndNode(ctx context.Context,
 			err := i.sendEvictionRequestForPod(ctx, namespace, timeout, pod)
 			if err != nil {
 				if errors.IsNotFound(err) {
-					klog.Infof("Pod %s already evicted from namespace %s on node %s", pod.Name, pod.Namespace, pod.Spec.NodeName)
+					slog.Info("Pod already evicted from namespace on node",
+						"pod", pod.Name,
+						"namespace", pod.Namespace,
+						"node", pod.Spec.NodeName)
 				} else {
-					klog.Errorf("Failed to evict pod %s from namespace %s on node %s: %v",
-						pod.Name, pod.Namespace, pod.Spec.NodeName, err)
+					slog.Error("Failed to evict pod from namespace on node",
+						"pod", pod.Name,
+						"namespace", pod.Namespace,
+						"node", pod.Spec.NodeName,
+						"error", err)
 					mu.Lock()
 					result = multierror.Append(result, fmt.Errorf("pod %s/%s: %w", pod.Namespace, pod.Name, err))
 					mu.Unlock()
 				}
 			} else {
-				klog.Infof("Pod %s eviction initiated for namespace %s on node %s", pod.Name, pod.Namespace, pod.Spec.NodeName)
+				slog.Info("Pod eviction initiated for namespace on node",
+					"pod", pod.Name,
+					"namespace", pod.Namespace,
+					"node", pod.Spec.NodeName)
 			}
 		}(ctx, pod, timeout)
 	}
@@ -359,7 +390,7 @@ func (i *Informers) UpdateNodeEvent(ctx context.Context, nodeName string, reason
 
 	cachedEvents, err := i.eventInformer.GetIndexer().ByIndex(NodeEventReasonIndex, compositeKey)
 	if err != nil {
-		klog.Errorf("Failed to query event cache: %v", err)
+		slog.Error("Failed to query event cache", "error", err)
 		return fmt.Errorf("error querying event cache: %w", err)
 	}
 
@@ -379,7 +410,7 @@ func (i *Informers) UpdateNodeEvent(ctx context.Context, nodeName string, reason
 			_, err = eventsClient.Update(ctx, eventCopy, metav1.UpdateOptions{})
 
 			if err != nil {
-				klog.Errorf("Failed to update event occurrence count: %v", err)
+				slog.Error("Failed to update event occurrence count", "error", err)
 				return fmt.Errorf("error in updating event occurrence count: %w", err)
 			}
 
@@ -390,12 +421,16 @@ func (i *Informers) UpdateNodeEvent(ctx context.Context, nodeName string, reason
 	// Get node from informer cache to retrieve its UID for proper event association
 	nodeObj, exists, err := i.nodeInformer.GetIndexer().GetByKey(nodeName)
 	if err != nil {
-		klog.Errorf("Failed to get node %s from cache: %v", nodeName, err)
+		slog.Error("Failed to get node from cache",
+			"node", nodeName,
+			"error", err)
+
 		return fmt.Errorf("error getting node %s from cache: %w", nodeName, err)
 	}
 
 	if !exists {
-		klog.Errorf("Node %s not found in cache", nodeName)
+		slog.Error("Node not found in cache", "node", nodeName)
+
 		return fmt.Errorf("node %s not found in cache", nodeName)
 	}
 
@@ -426,7 +461,7 @@ func (i *Informers) UpdateNodeEvent(ctx context.Context, nodeName string, reason
 
 	_, err = eventsClient.Create(ctx, newEvent, metav1.CreateOptions{})
 	if err != nil {
-		klog.Errorf("Failed to create event: %v", err)
+		slog.Error("Failed to create event", "error", err)
 		return fmt.Errorf("error in creating event: %w", err)
 	}
 
@@ -437,7 +472,7 @@ func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string,
 	timeout int, event *storeconnector.HealthEventWithStatus) error {
 	drainTimeout, err := i.getNodeDrainTimeout(timeout, event)
 	if err != nil {
-		klog.Errorf("Failed to get node drain timeout: %v", err)
+		slog.Error("Failed to get node drain timeout", "error", err)
 		return fmt.Errorf("failed to get node drain timeout: %w", err)
 	}
 
@@ -447,12 +482,14 @@ func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string,
 
 	evicted, remainingPods := i.checkIfPodsPresentInNamespaceAndNode(namespaces, nodeName)
 	if evicted {
-		klog.Infof("All pods on node %s have been deleted", nodeName)
+		slog.Info("All pods on node have been deleted", "node", nodeName)
 		return nil
 	}
 
 	if timeoutReached {
-		klog.Infof("Timeout reached for node %s, force deleting %d remaining pods", nodeName, len(remainingPods))
+		slog.Info("Timeout reached for node, force deleting remaining pods",
+			"node", nodeName,
+			"count", len(remainingPods))
 
 		// Track timeout reached for each namespace
 		for _, ns := range namespaces {
@@ -460,7 +497,10 @@ func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string,
 		}
 
 		if err := i.forceDeletePods(ctx, remainingPods); err != nil {
-			klog.Errorf("Failed to force delete pods on node %s: %v", nodeName, err)
+			slog.Error("Failed to force delete pods on node",
+				"node", nodeName,
+				"error", err)
+
 			return fmt.Errorf("failed to force delete pods on node %s: %w", nodeName, err)
 		}
 
@@ -481,11 +521,16 @@ func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string,
 	reason := "WaitingBeforeForceDelete"
 
 	if err := i.UpdateNodeEvent(ctx, nodeName, reason, message); err != nil {
-		klog.Errorf("Failed to update node event for %s: %v", nodeName, err)
+		slog.Error("Failed to update node event",
+			"node", nodeName,
+			"error", err)
 	}
 
-	klog.Infof("Still waiting for these pods to finish: %v in namespace %v on node %s (timeout in %v)",
-		podNames, namespaces, nodeName, drainTimeout)
+	slog.Info("Still waiting for pods to finish",
+		"pods", podNames,
+		"namespaces", namespaces,
+		"node", nodeName,
+		"timeout", drainTimeout)
 
 	return fmt.Errorf("waiting for %d pods to complete or timeout (%v remaining) on node %s",
 		len(remainingPods), drainTimeout, nodeName)
@@ -520,13 +565,18 @@ func (i *Informers) forceDeletePods(ctx context.Context, pods []*v1.Pod) error {
 			})
 			if err != nil {
 				if !errors.IsNotFound(err) {
-					klog.Errorf("Failed to force delete pod %s in namespace %s: %v", p.Name, p.Namespace, err)
+					slog.Error("Failed to force delete pod in namespace",
+						"pod", p.Name,
+						"namespace", p.Namespace,
+						"error", err)
 					mu.Lock()
 					result = multierror.Append(result, fmt.Errorf("pod %s/%s: %w", p.Namespace, p.Name, err))
 					mu.Unlock()
 				}
 			} else {
-				klog.Infof("Force deleted pod %s in namespace %s", p.Name, p.Namespace)
+				slog.Info("Force deleted pod in namespace",
+					"pod", p.Name,
+					"namespace", p.Namespace)
 			}
 		}(pod)
 	}
@@ -545,13 +595,13 @@ func (i *Informers) GetNamespacesMatchingPattern(ctx context.Context,
 
 	excludeRegex, err := i.compileExcludePattern(excludePattern)
 	if err != nil {
-		klog.Errorf("Failed to compile exclude pattern: %v", err)
+		slog.Error("Failed to compile exclude pattern", "error", err)
 		return nil, fmt.Errorf("failed to compile exclude pattern: %w", err)
 	}
 
 	namespaceSet, err := i.extractNamespacesFromPods(objs, includePattern, excludeRegex)
 	if err != nil {
-		klog.Errorf("Failed to extract namespaces from pods: %v", err)
+		slog.Error("Failed to extract namespaces from pods", "error", err)
 		return nil, fmt.Errorf("failed to extract namespaces from pods: %w", err)
 	}
 
@@ -565,7 +615,7 @@ func (i *Informers) compileExcludePattern(excludePattern string) (*regexp.Regexp
 
 	excludeRegex, err := regexp.Compile(excludePattern)
 	if err != nil {
-		klog.Errorf("Failed to compile exclude pattern: %v", err)
+		slog.Error("Failed to compile exclude pattern", "error", err)
 		return nil, fmt.Errorf("invalid exclude regex %s: %w", excludePattern, err)
 	}
 
@@ -584,7 +634,7 @@ func (i *Informers) extractNamespacesFromPods(objs []any,
 
 		shouldIncludeNamespace, err := i.shouldIncludeNamespace(pod.Namespace, includePattern, excludeRegex)
 		if err != nil {
-			klog.Errorf("Failed to check if namespace %s should be included: %v", pod.Namespace, err)
+			slog.Error("Failed to check if namespace %s should be included: %v", pod.Namespace, err)
 			return nil, fmt.Errorf("failed to check if namespace %s should be included: %w", pod.Namespace, err)
 		}
 
@@ -604,7 +654,7 @@ func (i *Informers) shouldIncludeNamespace(namespace string,
 
 	includeMatches, err := filepath.Match(includePattern, namespace)
 	if err != nil {
-		klog.Errorf("Failed to match include pattern: %v", err)
+		slog.Error("Failed to match include pattern", "error", err)
 		return false, fmt.Errorf("failed to match include pattern: %w", err)
 	}
 
@@ -630,7 +680,10 @@ func (i *Informers) checkIfPodsPresentInNamespaceAndNode(namespaces []string,
 		pods, err := i.FindEvictablePodsInNamespaceAndNode(namespace, nodeName)
 
 		if err != nil {
-			klog.Errorf("Failed to check namespace %s on node %s: %v", namespace, nodeName, err)
+			slog.Error("Failed to check namespace on node",
+				"namespace", namespace,
+				"node", nodeName,
+				"error", err)
 
 			allEvicted = false
 
@@ -651,7 +704,10 @@ func (i *Informers) CheckIfAllPodsAreEvictedInImmediateMode(ctx context.Context,
 	allEvicted, remainingPods := i.checkIfPodsPresentInNamespaceAndNode(namespaces, nodeName)
 
 	if allEvicted {
-		klog.Infof("All pods evicted in namespace %v from node %s", namespaces, nodeName)
+		slog.Info("All pods evicted in namespace from node",
+			"namespaces", namespaces,
+			"node", nodeName)
+
 		return true
 	}
 
@@ -674,19 +730,23 @@ func (i *Informers) CheckIfAllPodsAreEvictedInImmediateMode(ctx context.Context,
 	}
 
 	if shouldForceDelete {
-		klog.Infof("Pods on node %s exceeded timeout, attempting force deletion", nodeName)
+		slog.Info("Pods on node exceeded timeout, attempting force deletion",
+			"node", nodeName)
 
 		err := i.forceDeletePods(ctx, remainingPods)
 		if err != nil {
 			metrics.NodeDrainError.WithLabelValues("pods_force_deletion_error", nodeName).Inc()
-			klog.Errorf("Failed to force delete pods on node %s: %v", nodeName, err)
+			slog.Error("Failed to force delete pods on node",
+				"node", nodeName,
+				"error", err)
 
 			return false
 		}
 
 		allEvicted, _ = i.checkIfPodsPresentInNamespaceAndNode(namespaces, nodeName)
 		if allEvicted {
-			klog.Infof("All pods evicted after force deletion on node %s", nodeName)
+			slog.Info("All pods evicted after force deletion on node",
+				"node", nodeName)
 		}
 
 		return allEvicted
@@ -697,7 +757,7 @@ func (i *Informers) CheckIfAllPodsAreEvictedInImmediateMode(ctx context.Context,
 		remainingPodNames = append(remainingPodNames, fmt.Sprintf("%s/%s", pod.Namespace, pod.Name))
 	}
 
-	klog.Infof("Pods still present on node %s, will retry: %v", nodeName, remainingPodNames)
+	slog.Info("Pods still present on node %s, will retry: %v", nodeName, remainingPodNames)
 
 	return false
 }

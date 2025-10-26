@@ -17,6 +17,8 @@ package informer
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"reflect"
 	"sync"
 	"time"
 
@@ -30,7 +32,6 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -108,24 +109,24 @@ func NewNodeInformer(clientset kubernetes.Interface,
 		return nil, fmt.Errorf("failed to add event handler: %w", err)
 	}
 
-	klog.Info("NodeInformer created, watching all nodes")
+	slog.Info("NodeInformer created, watching all nodes")
 
 	return ni, nil
 }
 
 // Run starts the informer and waits for cache sync.
 func (ni *NodeInformer) Run(stopCh <-chan struct{}) error {
-	klog.Info("Starting NodeInformer")
+	slog.Info("Starting NodeInformer")
 
 	go ni.informer.Run(stopCh)
 
-	klog.Info("Waiting for NodeInformer cache to sync...")
+	slog.Info("Waiting for NodeInformer cache to sync...")
 
 	if ok := cache.WaitForCacheSync(stopCh, ni.informerSynced); !ok {
 		return fmt.Errorf("failed to wait for caches to sync")
 	}
 
-	klog.Info("NodeInformer cache synced")
+	slog.Info("NodeInformer cache synced")
 
 	return nil
 }
@@ -137,14 +138,14 @@ func (ni *NodeInformer) HasSynced() bool {
 
 // WaitForSync waits for the informer cache to sync with context cancellation support.
 func (ni *NodeInformer) WaitForSync(ctx context.Context) bool {
-	klog.Info("Waiting for NodeInformer cache to sync...")
+	slog.Info("Waiting for NodeInformer cache to sync...")
 
 	if ok := cache.WaitForCacheSync(ctx.Done(), ni.informerSynced); !ok {
-		klog.Warning("NodeInformer cache sync failed or context cancelled")
+		slog.Warn("NodeInformer cache sync failed or context cancelled")
 		return false
 	}
 
-	klog.Info("NodeInformer cache synced")
+	slog.Info("NodeInformer cache synced")
 
 	return true
 }
@@ -204,11 +205,14 @@ func (ni *NodeInformer) ListNodes() ([]*v1.Node, error) {
 func (ni *NodeInformer) handleAddNode(obj interface{}) {
 	node, ok := obj.(*v1.Node)
 	if !ok {
-		klog.Errorf("Add event: expected Node object, got %T", obj)
+		slog.Error("Add event received unexpected type",
+			"expected", "*v1.Node",
+			"actualType", reflect.TypeOf(obj))
+
 		return
 	}
 
-	klog.V(4).Infof("Node added: %s", node.Name)
+	slog.Debug("Node added", "node", node.Name)
 
 	ni.mutex.Lock()
 	ni.totalNodes++
@@ -221,7 +225,8 @@ func (ni *NodeInformer) handleUpdateNodeWrapper(oldObj, newObj interface{}) {
 	newNode, okNew := newObj.(*v1.Node)
 
 	if !okOld || !okNew {
-		klog.Errorf("Update event: expected Node objects, got %T and %T", oldObj, newObj)
+		slog.Error("Update event: expected Node objects",
+			"oldType", fmt.Sprintf("%T", oldObj), "newType", fmt.Sprintf("%T", newObj))
 		return
 	}
 
@@ -241,16 +246,16 @@ func (ni *NodeInformer) detectAndHandleManualUncordon(oldNode, newNode *v1.Node)
 		return false
 	}
 
-	klog.Infof("Detected manual uncordon of FQ-quarantined node: %s", newNode.Name)
+	slog.Info("Detected manual uncordon of FQ-quarantined node", "node", newNode.Name)
 
 	// Call the manual uncordon handler if registered
 	if ni.onManualUncordon != nil {
 		if err := ni.onManualUncordon(newNode.Name); err != nil {
-			klog.Errorf("Failed to handle manual uncordon for node %s: %v", newNode.Name, err)
+			slog.Error("Failed to handle manual uncordon for node", "node", newNode.Name, "error", err)
 		}
 	} else {
-		klog.Warningf("Manual uncordon callback not registered for node %s - manual uncordon will not be handled",
-			newNode.Name)
+		slog.Warn("Manual uncordon callback not registered for node - manual uncordon will not be handled",
+			"node", newNode.Name)
 	}
 
 	return true
@@ -267,10 +272,11 @@ func (ni *NodeInformer) handleUpdateNode(oldNode, newNode *v1.Node) {
 	if oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable ||
 		oldNode.Annotations[common.QuarantineHealthEventIsCordonedAnnotationKey] !=
 			newNode.Annotations[common.QuarantineHealthEventIsCordonedAnnotationKey] {
-		klog.V(4).Infof("Node updated: %s (Unschedulable: %t -> %t)", newNode.Name,
-			oldNode.Spec.Unschedulable, newNode.Spec.Unschedulable)
+		slog.Debug("Node updated", "node", newNode.Name,
+			"oldUnschedulable", oldNode.Spec.Unschedulable,
+			"newUnschedulable", newNode.Spec.Unschedulable)
 	} else {
-		klog.V(4).Infof("Node update ignored (no relevant change): %s", newNode.Name)
+		slog.Debug("Node update ignored (no relevant change)", "node", newNode.Name)
 	}
 }
 
@@ -290,18 +296,24 @@ func (ni *NodeInformer) handleDeleteNode(obj interface{}) {
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
 		if !ok {
-			klog.Errorf("Delete event: expected Node object or DeletedFinalStateUnknown, got %T", obj)
+			slog.Error("Delete event received unexpected type",
+				"expected", "*v1.Node or DeletedFinalStateUnknown",
+				"actualType", reflect.TypeOf(obj))
+
 			return
 		}
 
 		node, ok = tombstone.Obj.(*v1.Node)
 		if !ok {
-			klog.Errorf("Delete event: DeletedFinalStateUnknown contained non-Node object %T", tombstone.Obj)
+			slog.Error("Delete event tombstone contained unexpected type",
+				"expected", "*v1.Node",
+				"actualType", reflect.TypeOf(tombstone.Obj))
+
 			return
 		}
 	}
 
-	klog.Infof("Node deleted: %s", node.Name)
+	slog.Info("Node deleted", "node", node.Name)
 
 	ni.mutex.Lock()
 	ni.totalNodes--
@@ -342,7 +354,7 @@ func (ni *NodeInformer) UpdateNode(ctx context.Context, nodeName string, updateF
 			return fmt.Errorf("failed to update node: %w", err)
 		}
 
-		klog.V(3).Infof("Updated node %s (eventual consistency)", nodeName)
+		slog.Debug("Updated node (eventual consistency)", "node", nodeName)
 
 		return nil
 	})
@@ -363,7 +375,7 @@ func (ni *NodeInformer) UpdateNodeAnnotations(
 			node.Annotations[key] = value
 		}
 
-		klog.V(3).Infof("Updating annotations for node %s: %v", nodeName, annotations)
+		slog.Debug("Updating annotations for node", "node", nodeName, "annotations", annotations)
 
 		return nil
 	}

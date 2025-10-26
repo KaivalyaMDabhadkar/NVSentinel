@@ -17,6 +17,8 @@ package mongodb
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/metrics"
@@ -25,7 +27,6 @@ import (
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
-	"k8s.io/klog/v2"
 )
 
 type EventWatcher struct {
@@ -85,7 +86,7 @@ func (w *EventWatcher) SetProcessEventCallback(
 }
 
 func (w *EventWatcher) Start(ctx context.Context) error {
-	klog.Info("Starting MongoDB event watcher")
+	slog.Info("Starting MongoDB event watcher")
 
 	watcher, err := storewatcher.NewChangeStreamWatcher(ctx, w.mongoConfig, w.tokenConfig, w.mongoPipeline)
 	if err != nil {
@@ -96,17 +97,18 @@ func (w *EventWatcher) Start(ctx context.Context) error {
 	w.watcher = watcher
 
 	watcher.Start(ctx)
-	klog.Info("MongoDB change stream watcher started successfully")
+	slog.Info("MongoDB change stream watcher started successfully")
 
 	go w.updateUnprocessedEventsMetric(ctx, watcher)
 
 	go func() {
 		w.watchEvents(ctx, watcher)
-		klog.Fatalf("MongoDB event watcher goroutine exited unexpectedly, event processing has stopped")
+		slog.Error("MongoDB event watcher goroutine exited unexpectedly, event processing has stopped")
+		os.Exit(1)
 	}()
 
 	<-ctx.Done()
-	klog.Info("Context cancelled, stopping MongoDB event watcher")
+	slog.Info("Context cancelled, stopping MongoDB event watcher")
 
 	return nil
 }
@@ -116,12 +118,13 @@ func (w *EventWatcher) watchEvents(ctx context.Context, watcher *storewatcher.Ch
 		metrics.TotalEventsReceived.Inc()
 
 		if processErr := w.processEvent(ctx, event); processErr != nil {
-			klog.Errorf("Event processing failed, but still marking as processed to proceed ahead: %v", processErr)
+			slog.Error("Event processing failed, but still marking as processed to proceed ahead", "error", processErr)
 		}
 
 		if err := w.watcher.MarkProcessed(ctx); err != nil {
 			metrics.ProcessingErrors.WithLabelValues("mark_processed_error").Inc()
-			klog.Fatalf("Error updating resume token: %v", err)
+			slog.Error("Error updating resume token", "error", err)
+			os.Exit(1)
 		}
 	}
 }
@@ -138,7 +141,7 @@ func (w *EventWatcher) processEvent(ctx context.Context, event bson.M) error {
 		return fmt.Errorf("failed to unmarshal event: %w", err)
 	}
 
-	klog.V(3).Infof("Processing event: %+v", healthEventWithStatus)
+	slog.Debug("Processing event", "event", healthEventWithStatus)
 	w.storeEventObjectID(event)
 
 	startTime := time.Now()
@@ -182,13 +185,12 @@ func (w *EventWatcher) updateUnprocessedEventsMetric(ctx context.Context,
 
 			unprocessedCount, err := watcher.GetUnprocessedEventCount(ctx, objID)
 			if err != nil {
-				klog.V(3).Infof("Failed to get unprocessed event count: %v", err)
+				slog.Debug("Failed to get unprocessed event count", "error", err)
 				continue
 			}
 
 			metrics.EventBacklogSize.Set(float64(unprocessedCount))
-			klog.V(3).Infof("Updated unprocessed events metric: %d events after ObjectID %v",
-				unprocessedCount, objID.Hex())
+			slog.Debug("Updated unprocessed events metric", "count", unprocessedCount, "afterObjectID", objID.Hex())
 		}
 	}
 }
@@ -215,7 +217,7 @@ func (w *EventWatcher) updateNodeQuarantineStatus(
 		return fmt.Errorf("error updating document with _id: %v, error: %w", document["_id"], err)
 	}
 
-	klog.Infof("Document with _id: %v has been updated with status %s", document["_id"], *nodeQuarantinedStatus)
+	slog.Info("Document updated with status", "id", document["_id"], "status", *nodeQuarantinedStatus)
 
 	return nil
 }

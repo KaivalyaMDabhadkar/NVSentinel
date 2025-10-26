@@ -17,15 +17,16 @@ package trigger
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/datastore"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/metrics"
 	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
-	pb "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -34,7 +35,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
-	klog "k8s.io/klog/v2"
 )
 
 const (
@@ -84,7 +84,8 @@ func NewEngine(
 
 // Start begins the polling loop and blocks until ctx is cancelled.
 func (e *Engine) Start(ctx context.Context) {
-	klog.Infof("Starting Quarantine Trigger Engine polling every %v", e.pollInterval)
+	slog.Info("Starting Quarantine Trigger Engine",
+		"pollInterval", e.pollInterval)
 
 	ticker := time.NewTicker(e.pollInterval)
 	defer ticker.Stop()
@@ -92,20 +93,20 @@ func (e *Engine) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			klog.Infof("Quarantine Trigger Engine stopping due to context cancellation.")
+			slog.Info("Quarantine Trigger Engine stopping due to context cancellation")
 			return
 		case <-ticker.C:
 			metrics.TriggerPollCycles.Inc() // Increment poll cycle counter
-			klog.V(1).InfoS("Quarantine Trigger Engine polling datastore...")
+			slog.Debug("Quarantine Trigger Engine polling datastore")
 
 			startCycle := time.Now()
 
 			if err := e.checkAndTriggerEvents(ctx); err != nil {
 				metrics.TriggerPollErrors.Inc() // Increment poll error counter
-				klog.Errorf("Error during trigger engine poll cycle: %v", err)
+				slog.Error("Error during trigger engine poll cycle", "error", err)
 			}
 
-			klog.V(2).Infof("Trigger engine poll cycle finished in %v", time.Since(startCycle))
+			slog.Debug("Trigger engine poll cycle finished", "duration", time.Since(startCycle))
 		}
 	}
 }
@@ -123,7 +124,7 @@ func (e *Engine) checkAndTriggerEvents(ctx context.Context) error {
 
 	if err != nil {
 		metrics.TriggerDatastoreQueryErrors.WithLabelValues(queryTypeQuarantine).Inc()
-		klog.Errorf("Failed to query for quarantine triggers: %v", err)
+		slog.Error("Failed to query for quarantine triggers", "error", err)
 
 		return fmt.Errorf(
 			"failed to query for quarantine triggers: %w",
@@ -132,17 +133,16 @@ func (e *Engine) checkAndTriggerEvents(ctx context.Context) error {
 	}
 
 	metrics.TriggerEventsFound.WithLabelValues(quarantineTriggerType).Add(float64(len(quarantineEvents)))
-	klog.V(1).Infof("Found %d events potentially needing quarantine trigger.", len(quarantineEvents))
+	slog.Debug("Found events potentially needing quarantine trigger",
+		"count", len(quarantineEvents))
 
 	for _, event := range quarantineEvents {
 		if errTrig := e.triggerQuarantine(ctx, event); errTrig != nil {
 			// Metrics incremented within triggerQuarantine
-			klog.Errorf(
-				"Error triggering quarantine for event %s (Node: %s): %v",
-				event.EventID,
-				event.NodeName,
-				errTrig,
-			)
+			slog.Error("Error triggering quarantine for event",
+				"eventID", event.EventID,
+				"node", event.NodeName,
+				"error", errTrig)
 		}
 	}
 
@@ -154,23 +154,22 @@ func (e *Engine) checkAndTriggerEvents(ctx context.Context) error {
 
 	if err != nil {
 		metrics.TriggerDatastoreQueryErrors.WithLabelValues(queryTypeHealthy).Inc()
-		klog.Errorf("Failed to query for healthy triggers: %v", err)
+		slog.Error("Failed to query for healthy triggers", "error", err)
 
 		return fmt.Errorf("failed to query for healthy triggers: %w", err) // Return error
 	}
 
 	metrics.TriggerEventsFound.WithLabelValues(healthyTriggerType).Add(float64(len(healthyEvents)))
-	klog.V(1).Infof("Found %d events potentially needing healthy trigger.", len(healthyEvents))
+	slog.Debug("Found events potentially needing healthy trigger",
+		"count", len(healthyEvents))
 
 	for _, event := range healthyEvents {
 		ready, err := e.isNodeReady(ctx, event.NodeName)
 		if err != nil {
-			klog.Errorf(
-				"Failed to confirm node readiness for event %s (Node: %s): %v. Will check with next polling interval.",
-				event.EventID,
-				event.NodeName,
-				err,
-			)
+			slog.Error("Failed to confirm node readiness, will check next polling interval",
+				"eventID", event.EventID,
+				"node", event.NodeName,
+				"error", err)
 
 			continue
 		}
@@ -179,18 +178,16 @@ func (e *Engine) checkAndTriggerEvents(ctx context.Context) error {
 			// Node is ready, proceed with triggering healthy event
 			if errTrig := e.triggerHealthy(ctx, event); errTrig != nil {
 				// Metrics incremented within triggerHealthy
-				klog.Errorf(
-					"Error triggering healthy for event %s (Node: %s): %v",
-					event.EventID,
-					event.NodeName,
-					errTrig,
-				)
+				slog.Error("Error triggering healthy for event",
+					"eventID", event.EventID,
+					"node", event.NodeName,
+					"error", errTrig)
 			}
 		} else {
 			// Node is not ready, start background monitoring if not already monitoring
 			_, alreadyMonitoring := e.monitoredNodes.LoadOrStore(event.NodeName, true)
 			if !alreadyMonitoring {
-				klog.V(2).Infof(
+				slog.Debug(
 					"Node %s is not Ready yet. Starting background monitoring for event %s.",
 					event.NodeName,
 					event.EventID,
@@ -202,7 +199,7 @@ func (e *Engine) checkAndTriggerEvents(ctx context.Context) error {
 				// Start background monitoring in a goroutine
 				go e.monitorNodeReadiness(context.Background(), event.NodeName, event.EventID, event)
 			} else {
-				klog.V(2).Infof(
+				slog.Debug(
 					"Node %s is already being monitored. Deferring healthy trigger for event %s.",
 					event.NodeName,
 					event.EventID,
@@ -226,7 +223,7 @@ func (e *Engine) processAndSendTrigger(
 	metrics.TriggerAttempts.WithLabelValues(triggerType).Inc()
 
 	if event.NodeName == "" {
-		klog.Warningf(
+		slog.Warn(
 			"Cannot trigger %s event for event %s: NodeName is missing. Skipping.",
 			triggerType,
 			event.EventID,
@@ -236,21 +233,17 @@ func (e *Engine) processAndSendTrigger(
 		return fmt.Errorf("missing NodeName for %s trigger (EventID: %s)", triggerType, event.EventID)
 	}
 
-	klog.Infof(
-		"Attempting to trigger %s event for node %s (EventID: %s)",
-		strings.ToUpper(triggerType),
-		event.NodeName,
-		event.EventID,
-	)
+	slog.Info("Attempting to trigger event",
+		"type", strings.ToUpper(triggerType),
+		"node", event.NodeName,
+		"eventID", event.EventID)
 
 	healthEvent, mapErr := e.mapMaintenanceEventToHealthEvent(event, isHealthy, isFatal, message)
 	if mapErr != nil {
-		klog.Errorf(
-			"Error mapping maintenance event to health event for %s trigger (EventID: %s): %v",
-			triggerType,
-			event.EventID,
-			mapErr,
-		)
+		slog.Error("Error mapping maintenance event to health event",
+			"triggerType", triggerType,
+			"eventID", event.EventID,
+			"error", mapErr)
 		metrics.TriggerFailures.WithLabelValues(triggerType, failureReasonMapping).Inc()
 
 		return fmt.Errorf("error mapping event %s for %s: %w", event.EventID, triggerType, mapErr)
@@ -272,13 +265,11 @@ func (e *Engine) processAndSendTrigger(
 	if dbErr != nil {
 		metrics.TriggerDatastoreUpdateErrors.WithLabelValues(triggerType).Inc()
 		metrics.TriggerFailures.WithLabelValues(triggerType, failureReasonDBUpdate).Inc()
-		klog.Errorf(
-			"CRITICAL: Failed to update status to %s for"+
-				" event %s after successfully sending UDS message: %v. Potential for duplicate triggers.",
-			targetDBStatus,
-			event.EventID,
-			dbErr,
-		)
+		slog.Error("CRITICAL: Failed to update status after sending UDS message",
+			"eventID", event.EventID,
+			"targetStatus", targetDBStatus,
+			"error", dbErr,
+			"warning", "Potential for duplicate triggers")
 
 		return fmt.Errorf(
 			"failed to update event status post-%s-trigger for event %s: %w",
@@ -289,12 +280,10 @@ func (e *Engine) processAndSendTrigger(
 	}
 
 	metrics.TriggerSuccess.WithLabelValues(triggerType).Inc()
-	klog.Infof(
-		"Successfully triggered %s event and updated status for node %s (EventID: %s)",
-		strings.ToUpper(triggerType),
-		event.NodeName,
-		event.EventID,
-	)
+	slog.Info("Successfully triggered event and updated status",
+		"type", strings.ToUpper(triggerType),
+		"node", event.NodeName,
+		"eventID", event.EventID)
 
 	return nil
 }
@@ -342,7 +331,7 @@ func (e *Engine) mapMaintenanceEventToHealthEvent(
 
 	actionEnum, ok := pb.RecommenedAction_value[event.RecommendedAction]
 	if !ok {
-		klog.Warningf(
+		slog.Warn(
 			"Unknown recommended action '%s' for event %s. Defaulting to NONE.",
 			event.RecommendedAction,
 			event.EventID,
@@ -406,23 +395,19 @@ func (e *Engine) sendHealthEventWithRetry(ctx context.Context, healthEvent *pb.H
 			Events: []*pb.HealthEvent{healthEvent},
 		}
 
-		klog.V(2).Infof(
-			"Attempting to send health event via UDS (Node: %s, Check: %s, Fatal: %v, Healthy: %v)",
-			healthEvent.NodeName,
-			healthEvent.CheckName,
-			healthEvent.IsFatal,
-			healthEvent.IsHealthy,
-		)
+		slog.Debug("Attempting to send health event via UDS",
+			"node", healthEvent.NodeName,
+			"check", healthEvent.CheckName,
+			"fatal", healthEvent.IsFatal,
+			"healthy", healthEvent.IsHealthy)
 
 		_, attemptErr := e.udsClient.HealthEventOccuredV1(ctx, healthEvents)
 		lastErr = attemptErr // Store the error from this attempt
 
 		if attemptErr == nil {
-			klog.V(1).Infof(
-				"Successfully sent health event via UDS: (Node: %s, Check: %s)",
-				healthEvent.NodeName,
-				healthEvent.CheckName,
-			)
+			slog.Debug("Successfully sent health event via UDS",
+				"node", healthEvent.NodeName,
+				"check", healthEvent.CheckName)
 
 			return true, nil // Success
 		}
@@ -431,7 +416,7 @@ func (e *Engine) sendHealthEventWithRetry(ctx context.Context, healthEvent *pb.H
 		metrics.TriggerUDSSendErrors.Inc()
 
 		if isRetryableGRPCError(attemptErr) {
-			klog.Warningf(
+			slog.Warn(
 				"Retryable error sending health event via UDS (Node: %s): %v. Retrying...",
 				healthEvent.NodeName,
 				attemptErr,
@@ -440,7 +425,7 @@ func (e *Engine) sendHealthEventWithRetry(ctx context.Context, healthEvent *pb.H
 			return false, nil // Retryable error, continue loop
 		}
 
-		klog.Errorf(
+		slog.Error(
 			"Non-retryable error sending health event via UDS (Node: %s): %v",
 			healthEvent.NodeName,
 			attemptErr,
@@ -455,23 +440,19 @@ func (e *Engine) sendHealthEventWithRetry(ctx context.Context, healthEvent *pb.H
 
 	if wait.Interrupted(err) {
 		// The loop timed out after all retries
-		klog.Errorf(
-			"Failed to send health event via UDS (Node: %s) after %d attempts due to timeout. Last error: %v",
-			healthEvent.NodeName,
-			udsMaxRetries,
-			lastErr,
-		)
+		slog.Error("Failed to send health event via UDS after timeout",
+			"node", healthEvent.NodeName,
+			"maxRetries", udsMaxRetries,
+			"lastError", lastErr)
 
 		return fmt.Errorf("failed to send health event after %d retries (timeout): %w", udsMaxRetries, lastErr)
 	}
 
 	if err != nil {
 		// This is the non-retryable error returned from the callback
-		klog.Errorf(
-			"Failed to send health event via UDS (Node: %s) due to non-retryable error: %v",
-			healthEvent.NodeName,
-			err,
-		)
+		slog.Error("Failed to send health event via UDS due to non-retryable error",
+			"node", healthEvent.NodeName,
+			"error", err)
 
 		return fmt.Errorf("failed to send health event (Node: %s): %w", healthEvent.NodeName, err)
 	}
@@ -503,11 +484,11 @@ func (e *Engine) isNodeReady(ctx context.Context, nodeName string) (bool, error)
 func (e *Engine) monitorNodeReadiness(ctx context.Context, nodeName, eventID string, event model.MaintenanceEvent) {
 	defer func() {
 		// Clean up the monitoring flag when done
-		klog.Infof("Deleting monitoring flag for node %s (EventID: %s)", nodeName, eventID)
+		slog.Info("Deleting monitoring flag for node %s (EventID: %s)", nodeName, eventID)
 		e.monitoredNodes.Delete(nodeName)
 	}()
 
-	klog.Infof(
+	slog.Info(
 		"Starting background node readiness monitoring for node %s (EventID: %s)",
 		nodeName,
 		eventID,
@@ -537,67 +518,59 @@ func (e *Engine) monitorNodeReadiness(ctx context.Context, nodeName, eventID str
 			err = monitorCtx.Err()
 
 			if err == context.DeadlineExceeded {
-				klog.Errorf(
-					"ALERT: Node %s has been not Ready for %v (EventID: %s). Node readiness timeout exceeded!",
-					nodeName,
-					duration,
-					eventID,
-				)
+				slog.Error("ALERT: Node readiness timeout exceeded",
+					"node", nodeName,
+					"duration", duration,
+					"eventID", eventID,
+					"message", "Node has been not Ready for extended period")
 
 				metrics.NodeNotReadyTimeout.WithLabelValues(nodeName).Inc()
 
 				if err := e.store.UpdateEventStatus(ctx, eventID, model.StatusNodeReadinessTimeout); err != nil {
-					klog.Errorf("Failed to update event %s status to NODE_READINESS_TIMEOUT: %v", eventID, err)
+					slog.Error("Failed to update event status to NODE_READINESS_TIMEOUT",
+						"eventID", eventID,
+						"error", err)
 				}
 			} else if err != nil {
-				klog.Errorf(
-					"Background node readiness monitoring failed for node %s (EventID: %s): %v",
-					nodeName,
-					eventID,
-					err,
-				)
+				slog.Error("Background node readiness monitoring failed",
+					"node", nodeName,
+					"eventID", eventID,
+					"error", err)
 			}
 
 			return
 		case <-ticker.C:
 			ready, err := e.isNodeReady(monitorCtx, nodeName)
 			if err != nil {
-				klog.V(2).Infof(
-					"Error checking node readiness for %s during background monitoring: %v. Will retry in next interval.",
-					nodeName,
-					err,
-				)
+				slog.Debug("Error checking node readiness during background monitoring",
+					"node", nodeName,
+					"error", err,
+					"message", "Will retry in next interval")
 
 				continue
 			}
 
 			if ready {
 				elapsed := time.Since(startTime)
-				klog.Infof(
-					"Node %s became Ready after %v of monitoring. Triggering healthy event.",
-					nodeName,
-					elapsed,
-				)
+				slog.Info("Node became Ready, triggering healthy event",
+					"node", nodeName,
+					"monitoringDuration", elapsed)
 
 				if errTrig := e.triggerHealthy(monitorCtx, event); errTrig != nil {
-					klog.Errorf(
-						"Error triggering healthy for event %s (Node: %s): %v",
-						event.EventID,
-						event.NodeName,
-						errTrig,
-					)
+					slog.Error("Error triggering healthy for event",
+						"eventID", event.EventID,
+						"node", event.NodeName,
+						"error", errTrig)
 				}
 
 				return
 			}
 
 			elapsed := time.Since(startTime)
-			klog.V(2).Infof(
-				"Node %s still not Ready after %v of monitoring. Will check again in %v.",
-				nodeName,
-				elapsed,
-				e.monitorInterval,
-			)
+			slog.Debug("Node still not Ready, will check again",
+				"node", nodeName,
+				"elapsed", elapsed,
+				"nextCheck", e.monitorInterval)
 		}
 	}
 }

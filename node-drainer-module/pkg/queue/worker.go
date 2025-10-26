@@ -17,10 +17,11 @@ package queue
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/metrics"
+
 	"go.mongodb.org/mongo-driver/bson"
-	"k8s.io/klog/v2"
 )
 
 type EventProcessor interface {
@@ -28,7 +29,7 @@ type EventProcessor interface {
 }
 
 func (m *eventQueueManager) Start(ctx context.Context) {
-	klog.Info("Starting workqueue processor")
+	slog.Info("Starting workqueue processor")
 
 	go m.runWorker(ctx)
 }
@@ -37,7 +38,7 @@ func (m *eventQueueManager) runWorker(ctx context.Context) {
 	for m.processNextWorkItem(ctx) {
 	}
 
-	klog.Info("Worker stopped")
+	slog.Info("Worker stopped")
 }
 
 func (m *eventQueueManager) processNextWorkItem(ctx context.Context) bool {
@@ -50,8 +51,10 @@ func (m *eventQueueManager) processNextWorkItem(ctx context.Context) bool {
 
 	err := m.processEvent(ctx, *nodeEvent.Event, nodeEvent.Collection, nodeEvent.NodeName)
 	if err != nil {
-		klog.Warningf("Error processing event for node %s (attempt %d): %v (will retry)",
-			nodeEvent.NodeName, m.queue.NumRequeues(nodeEvent)+1, err)
+		slog.Warn("Error processing event for node (will retry)",
+			"node", nodeEvent.NodeName,
+			"attempt", m.queue.NumRequeues(nodeEvent)+1,
+			"error", err)
 		m.queue.AddRateLimited(nodeEvent)
 	} else {
 		m.queue.Forget(nodeEvent)

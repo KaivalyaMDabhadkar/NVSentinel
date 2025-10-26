@@ -17,10 +17,10 @@ package ringbuffer
 import (
 	"context"
 	"errors"
+	"log/slog"
 
-	"k8s.io/klog/v2"
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 	"k8s.io/client-go/util/workqueue"
 )
 
@@ -53,14 +53,14 @@ func (rb *RingBuffer) Enqueue(data *platformconnector.HealthEvents) {
 func (rb *RingBuffer) Dequeue() *platformconnector.HealthEvents {
 	healthEvents, quit := rb.healthMetricQueue.Get()
 	if quit {
-		klog.Infof("quitting from queue processing")
+		slog.Info("quitting from queue processing")
 		return nil
 	}
 
-	klog.Infof("Successfully got item %v ", healthEvents)
+	slog.Info("Successfully got item", "healthEvents", healthEvents)
 
 	if errors.Is(rb.ctx.Err(), context.Canceled) {
-		klog.Info("Processing cancelled")
+		slog.Info("Processing cancelled")
 		return nil
 	}
 

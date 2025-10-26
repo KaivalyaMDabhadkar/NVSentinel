@@ -22,14 +22,20 @@ FROM public.ecr.aws/docker/library/golang:1.24-bullseye AS builder
 # TODO: remove when pushing to GitHub
 ENV CGO_ENABLED=0
 
-WORKDIR /go/src/labeler
+WORKDIR /go/src
 
-COPY labeler-module/go.mod labeler-module/go.sum ./
+COPY labeler-module/go.mod labeler-module/go.sum ./labeler-module/
+COPY data-models/go.mod data-models/go.sum ./data-models/
+COPY commons/go.mod commons/go.sum ./commons/
+
+WORKDIR /go/src/labeler-module
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 
 COPY labeler-module/ .
+COPY data-models/ ../data-models/
+COPY commons/ ../commons/
 
 RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -o labeler main.go
@@ -38,6 +44,6 @@ FROM ${IMG}:${TAG}
 
 WORKDIR /app
 
-COPY --from=builder /go/src/labeler/labeler .
+COPY --from=builder /go/src/labeler-module/labeler .
 
 ENTRYPOINT ["/app/labeler"]

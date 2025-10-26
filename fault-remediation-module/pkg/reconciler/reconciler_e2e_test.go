@@ -17,6 +17,7 @@ package reconciler
 import (
 	"context"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -24,10 +25,11 @@ import (
 	"text/template"
 	"time"
 
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/crstatus"
 	storeconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+
 	"github.com/nvidia/nvsentinel/statemanager"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,7 +46,6 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/restmapper"
-	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
 
@@ -572,9 +573,9 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 		go func() {
 			defer close(reconcilerDone)
 			mockWatcher.Start(ctx)
-			klog.Info("Test: Listening for events on the channel...")
+			slog.Info("Test: Listening for events on the channel...")
 			for event := range mockWatcher.Events() {
-				klog.Infof("Test: Event received: %+v", event)
+				slog.Info("Test: Event received", "eventData", event)
 				reconcilerInstance.processEvent(ctx, event, mockWatcher, mockColl)
 			}
 		}()

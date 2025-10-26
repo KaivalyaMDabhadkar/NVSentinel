@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
@@ -31,7 +32,6 @@ import (
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/informer"
-	platformconnectorprotos "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 )
 
 var (
@@ -99,7 +99,7 @@ func TestEvaluate(t *testing.T) {
 		t.Fatalf("Failed to create HealthEventRuleEvaluator: %v", err)
 	}
 
-	eventTrue := &platformconnectorprotos.HealthEvent{
+	eventTrue := &protos.HealthEvent{
 		Agent:     "GPU",
 		CheckName: "XidError",
 		ErrorCode: []string{"31"},
@@ -114,7 +114,7 @@ func TestEvaluate(t *testing.T) {
 		t.Errorf("Expected evaluation result to be true, got false")
 	}
 
-	eventFalse := &platformconnectorprotos.HealthEvent{
+	eventFalse := &protos.HealthEvent{
 		Agent:     "GPU",
 		CheckName: "XidError",
 		ErrorCode: []string{"50"},
@@ -207,7 +207,7 @@ func TestNodeToSkipLabelRuleEvaluator(t *testing.T) {
 				t.Fatalf("Failed to create NodeToSkipLabelRuleEvaluator: %v", err)
 			}
 			if evaluator != nil {
-				isEvaluated, err := evaluator.Evaluate(&platformconnectorprotos.HealthEvent{
+				isEvaluated, err := evaluator.Evaluate(&protos.HealthEvent{
 					NodeName: nodeName,
 				})
 				if (err != nil) != tt.expectError {
@@ -224,7 +224,7 @@ func TestNodeToSkipLabelRuleEvaluator(t *testing.T) {
 
 func TestRoundTrip(t *testing.T) {
 	eventTime := timestamppb.New(time.Now())
-	event := &platformconnectorprotos.HealthEvent{
+	event := &protos.HealthEvent{
 		Version:            1,
 		Agent:              "test-agent",
 		ComponentClass:     "test-component",
@@ -232,9 +232,9 @@ func TestRoundTrip(t *testing.T) {
 		IsFatal:            true,
 		IsHealthy:          false,
 		Message:            "test-message",
-		RecommendedAction:  platformconnectorprotos.RecommenedAction_RESTART_VM,
+		RecommendedAction:  protos.RecommenedAction_RESTART_VM,
 		ErrorCode:          []string{"E001", "E002"},
-		EntitiesImpacted:   []*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "GPU-0"}},
+		EntitiesImpacted:   []*protos.Entity{{EntityType: "GPU", EntityValue: "GPU-0"}},
 		Metadata:           map[string]string{"key1": "value1"},
 		GeneratedTimestamp: eventTime,
 		NodeName:           "test-node",
@@ -253,7 +253,7 @@ func TestRoundTrip(t *testing.T) {
 		"isFatal":           true,
 		"isHealthy":         false,
 		"message":           "test-message",
-		"recommendedAction": float64(platformconnectorprotos.RecommenedAction_RESTART_VM),
+		"recommendedAction": float64(protos.RecommenedAction_RESTART_VM),
 		"errorCode":         []interface{}{"E001", "E002"},
 		"entitiesImpacted": []interface{}{
 			map[string]interface{}{

@@ -85,6 +85,7 @@ jobs:
           protoc-gen-go-version: ${{ needs.prepare-environment.outputs.protoc_gen_go_version }}
           protoc-gen-go-grpc-version: ${{ needs.prepare-environment.outputs.protoc_gen_go_grpc_version }}
           grpcio-tools-version: ${{ needs.prepare-environment.outputs.grpcio_tools_version }}
+          black-version: ${{ needs.prepare-environment.outputs.black_version }}
           shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
 
       - name: ${{ matrix.step_name }}
@@ -127,6 +128,7 @@ jobs:
           protoc-gen-go-version: ${{ needs.prepare-environment.outputs.protoc_gen_go_version }}
           protoc-gen-go-grpc-version: ${{ needs.prepare-environment.outputs.protoc_gen_go_grpc_version }}
           grpcio-tools-version: ${{ needs.prepare-environment.outputs.grpcio_tools_version }}
+          black-version: ${{ needs.prepare-environment.outputs.black_version }}
           shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
           install-dcgm: ${{ matrix.install_dcgm || 'false' }}
 
@@ -153,12 +155,13 @@ jobs:
           - platform-connectors
           - store-client-sdk
           - statemanager
-          - configmanager
+          - commons
           - health-events-analyzer
           - fault-quarantine-module
           - labeler-module
           - node-drainer-module
           - fault-remediation-module
+          - janitor
     steps:
       - uses: actions/checkout@v4
 
@@ -173,6 +176,7 @@ jobs:
           protoc-gen-go-version: ${{ needs.prepare-environment.outputs.protoc_gen_go_version }}
           protoc-gen-go-grpc-version: ${{ needs.prepare-environment.outputs.protoc_gen_go_grpc_version }}
           grpcio-tools-version: ${{ needs.prepare-environment.outputs.grpcio_tools_version }}
+          black-version: ${{ needs.prepare-environment.outputs.black_version }}
           shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
 
       - name: Run lint and test
@@ -320,7 +324,7 @@ jobs:
 
           # Generate the report using fgrosse's CLI tool (same format!)
           echo "Generating coverage report..."
-          if ! go-coverage-report -root=github.com/NVIDIA/nvsentinel \
+          if ! go-coverage-report -root=github.com/nvidia/nvsentinel \
             .github/outputs/old-coverage.txt \
             .github/outputs/new-coverage.txt \
             .github/outputs/all_modified_files.json > coverage-report.md 2> coverage-report.err; then
@@ -343,6 +347,12 @@ jobs:
           fi
 
           echo "✅ Coverage report generated successfully"
+
+          # Check if coverage report indicates no change to avoid spam
+          if grep -q "will \*\*not change\*\* overall coverage" coverage-report.md; then
+            echo "ℹ️  Coverage report shows no change - skipping PR comment to reduce noise"
+            exit 0
+          fi
 
           # Post comment using our correct PR number
           if [[ -n "${{ steps.pr-number.outputs.pr_number }}" ]]; then

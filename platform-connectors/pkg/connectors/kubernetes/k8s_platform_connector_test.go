@@ -18,17 +18,17 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"syscall"
 	"testing"
 	"time"
 
-	"github.com/stretchr/testify/require"
-	"k8s.io/klog/v2"
-
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
+
+	"github.com/stretchr/testify/require"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -234,7 +234,7 @@ func TestK8sNodeConditions(t *testing.T) {
 	fakeNode := getNode()
 	_, err := clientSet.CoreV1().Nodes().Create(ctx, fakeNode, metav1.CreateOptions{})
 	if err != nil {
-		klog.Errorf("Failed to create  node with err %s", err)
+		slog.Error("Failed to create node", "error", err)
 		os.Exit(1)
 	}
 	for testCase, healthEvent := range healthEventsList {
@@ -332,7 +332,7 @@ func TestK8sNodeEvents(t *testing.T) {
 	fakeNode := getNode()
 	_, err := clientSet.CoreV1().Nodes().Create(ctx, fakeNode, metav1.CreateOptions{})
 	if err != nil {
-		klog.Errorf("Failed to create  node with err %s", err)
+		slog.Error("Failed to create node", "error", err)
 		os.Exit(1)
 	}
 
@@ -344,7 +344,7 @@ func TestK8sNodeEvents(t *testing.T) {
 	if err != nil {
 		t.Errorf("Failed to process healthEvents with err %s", err)
 	}
-	events, err := clientSet.CoreV1().Events("").List(ctx, metav1.ListOptions{
+	events, _ := clientSet.CoreV1().Events("").List(ctx, metav1.ListOptions{
 		FieldSelector: fmt.Sprintf("involvedObject.kind=Node,involvedObject.name=%s", fakeNode.Name),
 	})
 

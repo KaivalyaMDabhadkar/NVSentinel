@@ -19,19 +19,20 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"log/slog"
 	"os"
 	"strconv"
 	"time"
 
-	platformconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
+	platformconnector "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
-	"k8s.io/klog/v2"
 )
 
 type MongoDbStoreConnector struct {
@@ -59,30 +60,30 @@ func new(
 
 //nolint:cyclop
 func InitializeMongoDbStoreConnector(ctx context.Context, ringbuffer *ringbuffer.RingBuffer,
-	clientCertMountPath string) *MongoDbStoreConnector {
+	clientCertMountPath string) (*MongoDbStoreConnector, error) {
 	mongoDbURI := os.Getenv("MONGODB_URI")
 	if mongoDbURI == "" {
-		klog.Fatalf("MongoDB URI is not provided")
+		return nil, fmt.Errorf("MONGODB_URI is not set")
 	}
 
 	mongoDbName := os.Getenv("MONGODB_DATABASE_NAME")
 	if mongoDbName == "" {
-		klog.Fatalf("MongoDB database name is not provided")
+		return nil, fmt.Errorf("MONGODB_DATABASE_NAME is not set")
 	}
 
 	mongoDbCollection := os.Getenv("MONGODB_COLLECTION_NAME")
 	if mongoDbCollection == "" {
-		klog.Fatalf("MongoDB collection name is not provided")
+		return nil, fmt.Errorf("MONGODB_COLLECTION_NAME is not set")
 	}
 
 	totalCACertTimeoutSeconds, err := getEnvAsInt("CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS", 360)
 	if err != nil {
-		klog.Fatalf("invalid CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS: %v", err)
+		return nil, fmt.Errorf("invalid CA_CERT_MOUNT_TIMEOUT_TOTAL_SECONDS: %w", err)
 	}
 
 	intervalCACertSeconds, err := getEnvAsInt("CA_CERT_READ_INTERVAL_SECONDS", 5)
 	if err != nil {
-		klog.Fatalf("invalid CA_CERT_READ_INTERVAL_SECONDS: %v", err)
+		return nil, fmt.Errorf("invalid CA_CERT_READ_INTERVAL_SECONDS: %w", err)
 	}
 
 	clientCertPath := clientCertMountPath + "/tls.crt"
@@ -97,18 +98,18 @@ func InitializeMongoDbStoreConnector(ctx context.Context, ringbuffer *ringbuffer
 	// load CA certificate
 	caCert, err := pollTillCACertIsMountedSuccessfully(mongoCACertPath, totalCertTimeout, intervalCert)
 	if err != nil {
-		klog.Fatalf("Failed to read CA certificate: %v", err)
+		return nil, fmt.Errorf("failed to load CA certificate: %w", err)
 	}
 
 	caCertPool := x509.NewCertPool()
 	if !caCertPool.AppendCertsFromPEM(caCert) {
-		klog.Fatalf("Failed to append CA certificate to pool")
+		return nil, fmt.Errorf("failed to append CA certificate to pool")
 	}
 
 	// Load client certificate and key
 	clientCert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
 	if err != nil {
-		klog.Fatalf("Failed to load client certificate and key: %v", err)
+		return nil, fmt.Errorf("failed to load client certificate and key: %w", err)
 	}
 
 	tlsConfig := &tls.Config{
@@ -127,17 +128,17 @@ func InitializeMongoDbStoreConnector(ctx context.Context, ringbuffer *ringbuffer
 
 	client, err := mongo.Connect(ctx, clientOpts)
 	if err != nil {
-		klog.Fatalf("Error connecting to mongoDB: %s", err.Error())
+		return nil, fmt.Errorf("failed to connect to mongodb: %w", err)
 	}
 
 	totalTimeoutSeconds, err := getEnvAsInt("MONGODB_PING_TIMEOUT_TOTAL_SECONDS", 300)
 	if err != nil {
-		klog.Fatalf("invalid MONGODB_PING_TIMEOUT_TOTAL_SECONDS: %v", err)
+		return nil, fmt.Errorf("invalid MONGODB_PING_TIMEOUT_TOTAL_SECONDS: %w", err)
 	}
 
 	intervalSeconds, err := getEnvAsInt("MONGODB_PING_INTERVAL_SECONDS", 5)
 	if err != nil {
-		klog.Fatalf("invalid MONGODB_PING_INTERVAL_SECONDS: %v", err)
+		return nil, fmt.Errorf("invalid MONGODB_PING_INTERVAL_SECONDS: %w", err)
 	}
 
 	totalTimeout := time.Duration(totalTimeoutSeconds) * time.Second
@@ -145,13 +146,13 @@ func InitializeMongoDbStoreConnector(ctx context.Context, ringbuffer *ringbuffer
 
 	nodeName := os.Getenv("NODE_NAME")
 	if nodeName == "" {
-		klog.Fatalf("Failed to fetch nodename")
+		return nil, fmt.Errorf("NODE_NAME is not set")
 	}
 
 	// Confirm connectivity to the target database and collection
 	err = confirmConnectivityWithDBAndCollection(ctx, client, mongoDbName, mongoDbCollection, totalTimeout, interval)
 	if err != nil {
-		klog.Fatalf("error connecting to database: %v", err)
+		return nil, fmt.Errorf("error connecting to database: %w", err)
 	}
 
 	// For strong consistency, we need the majority of replicas to ack reads and writes
@@ -161,24 +162,17 @@ func InitializeMongoDbStoreConnector(ctx context.Context, ringbuffer *ringbuffer
 
 	collection := client.Database(mongoDbName).Collection(mongoDbCollection, collOpts)
 
-	klog.Info("Successfully initialized mongodb store connector.")
+	slog.Info("Successfully initialized mongodb store connector")
 
-	return new(client, ringbuffer, nodeName, collection)
+	return new(client, ringbuffer, nodeName, collection), nil
 }
 
 func (r *MongoDbStoreConnector) FetchAndProcessHealthMetric(ctx context.Context) {
 	// Build an in-memory cache of entity states from existing documents in MongoDB
-	defer func() {
-		err := r.client.Disconnect(ctx)
-		if err != nil {
-			klog.Errorf("failed to close mongodb connection with error: %+v ", err)
-		}
-	}()
-
 	for {
 		select {
 		case <-ctx.Done():
-			klog.Info("Context canceled. Exiting health metric processing loop.")
+			slog.Info("Context canceled, exiting health metric processing loop")
 			return
 		default:
 			healthEvents := r.ringBuffer.Dequeue()
@@ -188,13 +182,34 @@ func (r *MongoDbStoreConnector) FetchAndProcessHealthMetric(ctx context.Context)
 
 			err := r.insertHealthEvents(ctx, healthEvents)
 			if err != nil {
-				klog.Errorf("Error inserting health events: %v", err)
+				slog.Error("Error inserting health events", "error", err)
 				r.ringBuffer.HealthMetricEleProcessingFailed(healthEvents)
 			} else {
 				r.ringBuffer.HealthMetricEleProcessingCompleted(healthEvents)
 			}
 		}
 	}
+}
+
+// Disconnect closes the MongoDB client connection
+// Safe to call multiple times - will not error if already disconnected
+func (r *MongoDbStoreConnector) Disconnect(ctx context.Context) error {
+	if r.client == nil {
+		return nil
+	}
+
+	err := r.client.Disconnect(ctx)
+	if err != nil {
+		// Log but don't return error if already disconnected
+		// This can happen in tests where mtest framework also disconnects
+		slog.Warn("Error disconnecting MongoDB client (may already be disconnected)", "error", err)
+
+		return nil
+	}
+
+	slog.Info("Successfully disconnected MongoDB client")
+
+	return nil
 }
 
 func (r *MongoDbStoreConnector) insertHealthEvents(
@@ -241,7 +256,7 @@ func pollTillCACertIsMountedSuccessfully(certPath string, timeoutInterval time.D
 
 	var err error
 
-	klog.Infof("Trying to read CA cert from %s.", certPath)
+	slog.Info("Trying to read CA cert", "path", certPath)
 
 	for {
 		if time.Now().After(timeout) {
@@ -252,10 +267,10 @@ func pollTillCACertIsMountedSuccessfully(certPath string, timeoutInterval time.D
 		// load CA certificate
 		caCert, err = os.ReadFile(certPath)
 		if err == nil {
-			klog.Infof("Successfully read CA cert.")
+			slog.Info("Successfully read CA cert")
 			return caCert, nil
 		} else {
-			klog.Infof("Failed to read CA certificate with error: %v, retrying...", err)
+			slog.Info("Failed to read CA certificate, retrying", "error", err)
 		}
 
 		time.Sleep(pingInterval)
@@ -269,7 +284,7 @@ func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.C
 
 	var err error
 
-	klog.Infof("Trying to ping database %s to confirm connectivity.", mongoDbName)
+	slog.Info("Trying to ping database to confirm connectivity", "database", mongoDbName)
 
 	for {
 		if time.Now().After(timeout) {
@@ -280,7 +295,7 @@ func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.C
 
 		err = client.Database(mongoDbName).RunCommand(ctx, bson.D{{Key: "ping", Value: 1}}).Decode(&result)
 		if err == nil {
-			klog.Infof("Successfully pinged database %s to confirm connectivity.", mongoDbName)
+			slog.Info("Successfully pinged database to confirm connectivity", "database", mongoDbName)
 			break
 		}
 
@@ -298,7 +313,7 @@ func confirmConnectivityWithDBAndCollection(ctx context.Context, client *mongo.C
 		return fmt.Errorf("more than one collection with name %s for DB %s was found", mongoDbCollection, mongoDbName)
 	}
 
-	klog.Infof("Confirmed that the collection %s exists in the database %s.", mongoDbCollection, mongoDbName)
+	slog.Info("Confirmed that the collection %s exists in the database %s.", mongoDbCollection, mongoDbName)
 
 	return nil
 }

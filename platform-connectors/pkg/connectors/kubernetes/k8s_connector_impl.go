@@ -16,11 +16,13 @@ package kubernetes
 
 import (
 	"context"
+	"fmt"
+	"log/slog"
 
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
+
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/klog/v2"
 )
 
 /*
@@ -53,11 +55,11 @@ func NewK8sConnector(
 
 func InitializeK8sConnector(ctx context.Context, ringbuffer *ringbuffer.RingBuffer,
 	qps float32, burst int, stopCh <-chan struct{},
-) *K8sConnector {
+) (*K8sConnector, error) {
 	// Create the in-cluster config
 	config, err := rest.InClusterConfig()
 	if err != nil {
-		klog.Fatalf("Error creating Kubernetes client: %s", err.Error())
+		return nil, fmt.Errorf("error creating in-cluster config: %w", err)
 	}
 
 	config.Burst = burst
@@ -65,24 +67,24 @@ func InitializeK8sConnector(ctx context.Context, ringbuffer *ringbuffer.RingBuff
 
 	clientSet, err := kubernetes.NewForConfig(config)
 	if err != nil {
-		klog.Fatalf("error creating clientset with err %s", err.Error())
+		return nil, fmt.Errorf("error creating kubernetes clientset: %w", err)
 	}
 
 	kubernetesConnector := NewK8sConnector(clientSet, ringbuffer, stopCh, ctx)
 
-	return kubernetesConnector
+	return kubernetesConnector, nil
 }
 
 func (r *K8sConnector) FetchAndProcessHealthMetric(ctx context.Context) {
 	for {
 		select {
 		case <-r.stopCh:
-			klog.Infof("k8sConnector queue received stop signal")
+			slog.Info("k8sConnector queue received stop signal")
 			return
 		default:
 			healthEvents := r.ringBuffer.Dequeue()
 			if err := r.processHealthEvents(ctx, healthEvents); err != nil {
-				klog.Errorf("Not able to process healthEvent.Error is %s", err)
+				slog.Error("Not able to process healthEvent", "error", err)
 				r.ringBuffer.HealthMetricEleProcessingFailed(healthEvents)
 			} else {
 				r.ringBuffer.HealthMetricEleProcessingCompleted(healthEvents)

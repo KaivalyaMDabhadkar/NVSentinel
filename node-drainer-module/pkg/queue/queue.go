@@ -17,12 +17,13 @@ package queue
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/metrics"
+
 	"go.mongodb.org/mongo-driver/bson"
 	"k8s.io/client-go/util/workqueue"
-	"k8s.io/klog/v2"
 )
 
 func NewEventQueueManager() EventQueueManager {
@@ -65,8 +66,8 @@ func (m *eventQueueManager) EnqueueEvent(ctx context.Context,
 }
 
 func (m *eventQueueManager) Shutdown() {
-	klog.Info("Shutting down workqueue")
+	slog.Info("Shutting down workqueue")
 	m.queue.ShutDown()
 	close(m.shutdown)
-	klog.Info("Workqueue shutdown complete")
+	slog.Info("Workqueue shutdown complete")
 }

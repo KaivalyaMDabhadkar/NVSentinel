@@ -17,11 +17,12 @@ package initializer
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"time"
 
-	"github.com/nvidia/nvsentinel/configmanager"
+	"github.com/nvidia/nvsentinel/commons/pkg/configmanager"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/breaker"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/config"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/informer"
@@ -31,7 +32,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
-	"k8s.io/klog/v2"
 )
 
 type InitializationParams struct {
@@ -67,20 +67,21 @@ type EnvConfig struct {
 }
 
 func startMetricsServer(port string) {
-	klog.Infof("Starting metrics port on: %s", port)
+	slog.Info("Starting metrics port", "port", port)
 
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
 		err := http.ListenAndServe(":"+port, nil)
 		if err != nil {
-			klog.Fatalf("Failed to start metrics server: %v", err)
+			slog.Error("Failed to start metrics server", "error", err)
+			panic(err)
 		}
 	}()
 }
 
 func InitializeAll(ctx context.Context, params InitializationParams) (*Components, error) {
-	klog.Info("Starting fault quarantine module initialization")
+	slog.Info("Starting fault quarantine module initialization")
 
 	envConfig, err := loadEnvConfig()
 	if err != nil {
@@ -99,7 +100,7 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 	}
 
 	if params.DryRun {
-		klog.Info("Running in dry-run mode")
+		slog.Info("Running in dry-run mode")
 	}
 
 	k8sClient, err := informer.NewFaultQuarantineClient(params.KubeconfigPath, params.DryRun)
@@ -107,14 +108,14 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 		return nil, fmt.Errorf("error while initializing kubernetes client: %w", err)
 	}
 
-	klog.Info("Successfully initialized kubernetes client")
+	slog.Info("Successfully initialized kubernetes client")
 
 	nodeInformer, err := initializeNodeInformer(k8sClient)
 	if err != nil {
 		return nil, fmt.Errorf("error while initializing node informer: %w", err)
 	}
 
-	klog.Info("Successfully initialized node informer")
+	slog.Info("Successfully initialized node informer")
 
 	var circuitBreaker breaker.CircuitBreaker
 
@@ -132,9 +133,9 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 
 		circuitBreaker = cb
 
-		klog.Info("Successfully initialized circuit breaker")
+		slog.Info("Successfully initialized circuit breaker")
 	} else {
-		klog.Info("Circuit breaker is disabled, skipping initialization")
+		slog.Info("Circuit breaker is disabled, skipping initialization")
 	}
 
 	reconcilerCfg := createReconcilerConfig(
@@ -166,7 +167,7 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 
 	reconcilerInstance.SetEventWatcher(eventWatcher)
 
-	klog.Info("Initialization completed successfully")
+	slog.Info("Initialization completed successfully")
 
 	return &Components{
 		Reconciler:     reconcilerInstance,
@@ -188,7 +189,7 @@ func loadEnvConfig() (*EnvConfig, error) {
 	envVars, envErrors := configmanager.ReadEnvVars(envSpecs)
 	if len(envErrors) > 0 {
 		for _, err := range envErrors {
-			klog.Error(err)
+			slog.Error("Environment variable error", "error", err)
 		}
 
 		return nil, fmt.Errorf("required environment variables are missing")
@@ -337,7 +338,7 @@ func initializeCircuitBreaker(
 ) (breaker.CircuitBreaker, error) {
 	circuitBreakerName := "fault-quarantine-circuit-breaker"
 
-	klog.Infof("Initializing circuit breaker with config map %s in namespace %s", circuitBreakerName, namespace)
+	slog.Info("Initializing circuit breaker", "configMap", circuitBreakerName, "namespace", namespace)
 
 	cb, err := breaker.NewSlidingWindowBreaker(ctx, breaker.Config{
 		Window:             duration,

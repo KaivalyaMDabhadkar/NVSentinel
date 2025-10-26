@@ -16,10 +16,10 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 
 	"github.com/BurntSushi/toml"
-	klog "k8s.io/klog/v2"
 )
 
 const (
@@ -81,12 +81,12 @@ func LoadConfig(filePath string) (*Config, error) {
 
 	// Validate general configuration (loglevel, clusterName, intervals)
 	if err := validateGeneralConfig(&cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("general config validation failed: %w", err)
 	}
 
 	// Validate CSP-specific configuration (polling intervals, single CSP)
 	if err := validateCSPConfig(&cfg); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("CSP config validation failed: %w", err)
 	}
 
 	return &cfg, nil
@@ -95,37 +95,33 @@ func LoadConfig(filePath string) (*Config, error) {
 // applyDefaults assigns default values to zero-value fields.
 func applyDefaults(cfg *Config) {
 	if cfg.MaintenanceEventPollIntervalSeconds == 0 {
-		klog.Infof(
-			"Configuration: 'maintenanceEventPollIntervalSeconds' not set, defaulting to %d",
-			DefaultMaintenanceEventPollIntervalSeconds,
-		)
+		slog.Info("Configuration not set, applying default",
+			"setting", "maintenanceEventPollIntervalSeconds",
+			"default", DefaultMaintenanceEventPollIntervalSeconds)
 
 		cfg.MaintenanceEventPollIntervalSeconds = DefaultMaintenanceEventPollIntervalSeconds
 	}
 
 	if cfg.TriggerQuarantineWorkflowTimeLimitMinutes == 0 {
-		klog.Infof(
-			"Configuration: 'triggerQuarantineWorkflowTimeLimitMinutes' not set, defaulting to %d",
-			DefaultTriggerQuarantineWorkflowTimeLimitMinutes,
-		)
+		slog.Info("Configuration not set, applying default",
+			"setting", "triggerQuarantineWorkflowTimeLimitMinutes",
+			"default", DefaultTriggerQuarantineWorkflowTimeLimitMinutes)
 
 		cfg.TriggerQuarantineWorkflowTimeLimitMinutes = DefaultTriggerQuarantineWorkflowTimeLimitMinutes
 	}
 
 	if cfg.PostMaintenanceHealthyDelayMinutes == 0 {
-		klog.Infof(
-			"Configuration: 'postMaintenanceHealthyDelayMinutes' not set or is 0, defaulting to %d",
-			DefaultPostMaintenanceHealthyDelayMinutes,
-		)
+		slog.Info("Configuration not set, applying default",
+			"setting", "postMaintenanceHealthyDelayMinutes",
+			"default", DefaultPostMaintenanceHealthyDelayMinutes)
 
 		cfg.PostMaintenanceHealthyDelayMinutes = DefaultPostMaintenanceHealthyDelayMinutes
 	}
 
 	if cfg.NodeReadinessTimeoutMinutes == 0 {
-		klog.Infof(
-			"Configuration: 'nodeReadinessTimeoutMinutes' not set or is 0, defaulting to %d",
-			DefaultNodeReadinessTimeoutMinutes,
-		)
+		slog.Info("Configuration not set, applying default",
+			"setting", "nodeReadinessTimeoutMinutes",
+			"default", DefaultNodeReadinessTimeoutMinutes)
 
 		cfg.NodeReadinessTimeoutMinutes = DefaultNodeReadinessTimeoutMinutes
 	}

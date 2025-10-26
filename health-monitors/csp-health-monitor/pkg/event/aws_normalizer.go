@@ -16,12 +16,13 @@ package event
 
 import (
 	"fmt"
+	"log/slog"
 	"time"
+
+	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/health/types"
-	"github.com/nvidia/nvsentinel/health-monitors/csp-health-monitor/pkg/model"
-	klog "k8s.io/klog/v2"
 )
 
 type EventMetadata struct {
@@ -84,13 +85,13 @@ func (n *AWSNormalizer) Normalize(
 ) (*model.MaintenanceEvent, error) {
 	event, meta, err := validateAWSNormalizerInput(rawEvent, additionalInfo...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("AWS normalizer input validation failed: %w", err)
 	}
 
-	klog.V(3).Infof(
-		"Normalizing AWS event %s for node %s (instance %s)",
-		aws.ToString(event.Arn), meta.NodeName, meta.InstanceId,
-	)
+	slog.Debug("Normalizing AWS event",
+		"eventArn", aws.ToString(event.Arn),
+		"node", meta.NodeName,
+		"instanceID", meta.InstanceId)
 
 	// always scheduled type for AWS
 	maintenanceType := model.TypeScheduled
@@ -113,7 +114,7 @@ func (n *AWSNormalizer) Normalize(
 		now := time.Now().UTC()
 		actualEndTime = &now
 	default:
-		klog.Errorf("Unknown event status code found %+v", event)
+		slog.Error("Unknown event status code found", "event", event)
 		return nil, fmt.Errorf("unknown event status code found %+v", event)
 	}
 
@@ -148,7 +149,10 @@ func (n *AWSNormalizer) Normalize(
 		},
 	}
 
-	klog.V(2).Infof("Normalized AWS event for node %s: \n%+v", meta.NodeName, normalizedEvent)
+	slog.Debug("Normalized AWS event",
+		"node", meta.NodeName,
+		"eventID", normalizedEvent.EventID,
+		"status", normalizedEvent.Status)
 
 	return normalizedEvent, nil
 }

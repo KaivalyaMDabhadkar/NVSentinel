@@ -24,6 +24,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/breaker"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/config"
@@ -31,7 +32,6 @@ import (
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/healthEventsAnnotation"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/informer"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
-	platformconnectorprotos "github.com/nvidia/nvsentinel/platform-connectors/pkg/protos"
 	"github.com/nvidia/nvsentinel/statemanager"
 	storeclientsdk "github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
 	"github.com/stretchr/testify/assert"
@@ -110,7 +110,7 @@ func createE2ETestNode(ctx context.Context, t *testing.T, name string, annotatio
 	require.NoError(t, err, "Failed to create test node %s", name)
 }
 
-func createHealthEventBSON(eventID primitive.ObjectID, nodeName, checkName string, isHealthy, isFatal bool, entities []*platformconnectorprotos.Entity, quarantineStatus store.Status) bson.M {
+func createHealthEventBSON(eventID primitive.ObjectID, nodeName, checkName string, isHealthy, isFatal bool, entities []*protos.Entity, quarantineStatus store.Status) bson.M {
 	entitiesBSON := []interface{}{}
 	for _, entity := range entities {
 		entitiesBSON = append(entitiesBSON, bson.M{
@@ -289,13 +289,13 @@ func verifyHealthEventInAnnotation(t *testing.T, node *corev1.Node, expectedChec
 	err := json.Unmarshal([]byte(annotationStr), &healthEventsMap)
 	require.NoError(t, err, "Should unmarshal annotation")
 
-	queryEvent := &platformconnectorprotos.HealthEvent{
+	queryEvent := &protos.HealthEvent{
 		Agent:          expectedAgent,
 		ComponentClass: expectedComponentClass,
 		CheckName:      expectedCheckName,
 		NodeName:       node.Name,
 		Version:        1,
-		EntitiesImpacted: []*platformconnectorprotos.Entity{
+		EntitiesImpacted: []*protos.Entity{
 			{EntityType: expectedEntityType, EntityValue: expectedEntityValue},
 		},
 	}
@@ -409,7 +409,7 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -452,7 +452,7 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -531,7 +531,7 @@ func TestE2E_EntityLevelTracking(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -554,7 +554,7 @@ func TestE2E_EntityLevelTracking(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -587,7 +587,7 @@ func TestE2E_EntityLevelTracking(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -615,13 +615,13 @@ func TestE2E_EntityLevelTracking(t *testing.T) {
 	var healthEventsMap healthEventsAnnotation.HealthEventsAnnotationMap
 	err = json.Unmarshal([]byte(node.Annotations[quarantineHealthEventAnnotationKey]), &healthEventsMap)
 	require.NoError(t, err)
-	gpu0Query := &platformconnectorprotos.HealthEvent{
+	gpu0Query := &protos.HealthEvent{
 		Agent:          "gpu-health-monitor",
 		ComponentClass: "GPU",
 		CheckName:      "GpuXidError",
 		NodeName:       nodeName,
 		Version:        1,
-		EntitiesImpacted: []*platformconnectorprotos.Entity{
+		EntitiesImpacted: []*protos.Entity{
 			{EntityType: "GPU", EntityValue: "0"},
 		},
 	}
@@ -636,7 +636,7 @@ func TestE2E_EntityLevelTracking(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -701,7 +701,7 @@ func TestE2E_MultipleChecksOnSameNode(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -717,7 +717,7 @@ func TestE2E_MultipleChecksOnSameNode(t *testing.T) {
 		"GpuNvLinkWatch",
 		false,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -743,7 +743,7 @@ func TestE2E_MultipleChecksOnSameNode(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -763,7 +763,7 @@ func TestE2E_MultipleChecksOnSameNode(t *testing.T) {
 		"GpuNvLinkWatch",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -810,7 +810,7 @@ func TestE2E_CheckLevelHealthyEvent(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{
+		[]*protos.Entity{
 			{EntityType: "GPU", EntityValue: "0"},
 			{EntityType: "GPU", EntityValue: "1"},
 		},
@@ -833,7 +833,7 @@ func TestE2E_CheckLevelHealthyEvent(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{}, // Empty - means all entities healthy
+		[]*protos.Entity{}, // Empty - means all entities healthy
 		store.StatusInProgress,
 	)
 
@@ -880,7 +880,7 @@ func TestE2E_DuplicateEntityEvents(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -901,7 +901,7 @@ func TestE2E_DuplicateEntityEvents(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -963,7 +963,7 @@ func TestE2E_HealthyEventWithoutQuarantine(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1025,7 +1025,7 @@ func TestE2E_PartialEntityRecovery(t *testing.T) {
 			"GpuXidError",
 			false,
 			true,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
 			store.StatusInProgress,
 		)
 	}
@@ -1046,7 +1046,7 @@ func TestE2E_PartialEntityRecovery(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -1100,7 +1100,7 @@ func TestE2E_AllGPUsFailThenRecover(t *testing.T) {
 			"GpuXidError",
 			false,
 			true,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
 			store.StatusInProgress,
 		)
 	}
@@ -1122,7 +1122,7 @@ func TestE2E_AllGPUsFailThenRecover(t *testing.T) {
 			"GpuXidError",
 			true,
 			false,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
 			store.StatusInProgress,
 		)
 	}
@@ -1301,7 +1301,7 @@ func TestE2E_BackwardCompatibilityOldFormat(t *testing.T) {
 	nodeName := "e2e-backward-" + primitive.NewObjectID().Hex()[:8]
 
 	// Old format: single HealthEvent object (not array)
-	existingOldEvent := &platformconnectorprotos.HealthEvent{
+	existingOldEvent := &protos.HealthEvent{
 		NodeName:       nodeName,
 		Agent:          "gpu-health-monitor",
 		ComponentClass: "GPU",
@@ -1309,7 +1309,7 @@ func TestE2E_BackwardCompatibilityOldFormat(t *testing.T) {
 		Version:        1,
 		IsHealthy:      false,
 		IsFatal:        true,
-		EntitiesImpacted: []*platformconnectorprotos.Entity{
+		EntitiesImpacted: []*protos.Entity{
 			{EntityType: "GPU", EntityValue: "0"},
 		},
 	}
@@ -1359,7 +1359,7 @@ func TestE2E_BackwardCompatibilityOldFormat(t *testing.T) {
 		"GpuNvLinkWatch",
 		false,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -1380,7 +1380,7 @@ func TestE2E_BackwardCompatibilityOldFormat(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1400,7 +1400,7 @@ func TestE2E_BackwardCompatibilityOldFormat(t *testing.T) {
 		"GpuNvLinkWatch",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -1449,7 +1449,7 @@ func TestE2E_MixedHealthyUnhealthyFlapping(t *testing.T) {
 			"GpuXidError",
 			false,
 			true,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 			store.StatusInProgress,
 		)
 
@@ -1465,7 +1465,7 @@ func TestE2E_MixedHealthyUnhealthyFlapping(t *testing.T) {
 			"GpuXidError",
 			true,
 			false,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 			store.StatusInProgress,
 		)
 
@@ -1527,7 +1527,7 @@ func TestE2E_MultipleNodesSimultaneous(t *testing.T) {
 			"GpuXidError",
 			false,
 			true,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 			store.StatusInProgress,
 		)
 	}
@@ -1593,7 +1593,7 @@ func TestE2E_HealthyEventForNonMatchingCheck(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1609,7 +1609,7 @@ func TestE2E_HealthyEventForNonMatchingCheck(t *testing.T) {
 		"GpuNvLinkWatch",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1679,7 +1679,7 @@ func TestE2E_MultipleRulesetsWithPriorities(t *testing.T) {
 		"TestCheck",
 		false,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1737,7 +1737,7 @@ func TestE2E_NonFatalEventDoesNotQuarantine(t *testing.T) {
 		"GpuXidError",
 		false,
 		false, // Not fatal
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1792,7 +1792,7 @@ func TestE2E_OutOfOrderEvents(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1812,7 +1812,7 @@ func TestE2E_OutOfOrderEvents(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1859,7 +1859,7 @@ func TestE2E_SkipRedundantCordoning(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1876,7 +1876,7 @@ func TestE2E_SkipRedundantCordoning(t *testing.T) {
 		"GpuMemWatch",
 		false,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -1929,7 +1929,7 @@ func TestE2E_NodeAlreadyCordonedManually(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -1973,14 +1973,14 @@ func TestE2E_NodeAlreadyQuarantinedStillUnhealthy(t *testing.T) {
 	nodeName := "e2e-already-q-unhealthy-" + primitive.NewObjectID().Hex()[:8]
 
 	// Create node already quarantined by FQM
-	existingEvent := &platformconnectorprotos.HealthEvent{
+	existingEvent := &protos.HealthEvent{
 		NodeName:       nodeName,
 		Agent:          "agent1",
 		CheckName:      "checkA",
 		ComponentClass: "GPU",
 		Version:        1,
 		IsHealthy:      false,
-		EntitiesImpacted: []*platformconnectorprotos.Entity{
+		EntitiesImpacted: []*protos.Entity{
 			{EntityType: "GPU", EntityValue: "0"},
 		},
 	}
@@ -2049,14 +2049,14 @@ func TestE2E_NodeAlreadyQuarantinedBecomesHealthy(t *testing.T) {
 	nodeName := "e2e-already-q-healthy-" + primitive.NewObjectID().Hex()[:8]
 
 	// Create node already quarantined by FQM
-	existingEvent := &platformconnectorprotos.HealthEvent{
+	existingEvent := &protos.HealthEvent{
 		NodeName:       nodeName,
 		Agent:          "agent1",
 		CheckName:      "checkA",
 		ComponentClass: "GPU",
 		Version:        1,
 		IsHealthy:      false,
-		EntitiesImpacted: []*platformconnectorprotos.Entity{
+		EntitiesImpacted: []*protos.Entity{
 			{EntityType: "GPU", EntityValue: "0"},
 		},
 	}
@@ -2172,7 +2172,7 @@ func TestE2E_RulesetNotMatching(t *testing.T) {
 		"GpuMemWatch",
 		false,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -2192,7 +2192,7 @@ func TestE2E_RulesetNotMatching(t *testing.T) {
 		"GpuXidError",
 		false,
 		false, // Not fatal
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -2244,7 +2244,7 @@ func TestE2E_PartialAnnotationUpdate(t *testing.T) {
 			"GpuXidError",
 			false,
 			true,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
 			store.StatusInProgress,
 		)
 	}
@@ -2270,7 +2270,7 @@ func TestE2E_PartialAnnotationUpdate(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -2295,13 +2295,13 @@ func TestE2E_PartialAnnotationUpdate(t *testing.T) {
 	verifyHealthEventInAnnotation(t, node, "GpuXidError", "gpu-health-monitor", "GPU", "GPU", "2")
 
 	// Verify GPU 1 is NOT in annotation
-	gpu1Query := &platformconnectorprotos.HealthEvent{
+	gpu1Query := &protos.HealthEvent{
 		Agent:          "gpu-health-monitor",
 		ComponentClass: "GPU",
 		CheckName:      "GpuXidError",
 		NodeName:       nodeName,
 		Version:        1,
-		EntitiesImpacted: []*platformconnectorprotos.Entity{
+		EntitiesImpacted: []*protos.Entity{
 			{EntityType: "GPU", EntityValue: "1"},
 		},
 	}
@@ -2365,7 +2365,7 @@ func TestE2E_CircuitBreakerBasic(t *testing.T) {
 			"TestCheck",
 			false,
 			false,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 			store.StatusInProgress,
 		)
 	}
@@ -2393,7 +2393,7 @@ func TestE2E_CircuitBreakerBasic(t *testing.T) {
 		"TestCheck",
 		false,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -2414,7 +2414,7 @@ func TestE2E_CircuitBreakerBasic(t *testing.T) {
 		"TestCheck",
 		false,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -2483,7 +2483,7 @@ func TestE2E_CircuitBreakerSlidingWindow(t *testing.T) {
 			"TestCheck",
 			false,
 			false,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 			store.StatusInProgress,
 		)
 	}
@@ -2570,7 +2570,7 @@ func TestE2E_CircuitBreakerUniqueNodeTracking(t *testing.T) {
 			"TestCheck",
 			false,
 			false,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 			store.StatusInProgress,
 		)
 	}
@@ -2593,7 +2593,7 @@ func TestE2E_CircuitBreakerUniqueNodeTracking(t *testing.T) {
 			"TestCheck",
 			false,
 			false,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 			store.StatusInProgress,
 		)
 	}
@@ -2735,7 +2735,7 @@ func TestE2E_NodeRuleEvaluator(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -2792,7 +2792,7 @@ func TestE2E_NodeRuleDoesNotMatch(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -2849,7 +2849,7 @@ func TestE2E_TaintWithoutCordon(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -2921,7 +2921,7 @@ func TestE2E_CordonWithoutTaint(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -3003,7 +3003,7 @@ func TestE2E_ManualUncordonAnnotationCleanup(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -3033,14 +3033,14 @@ func TestE2E_UnhealthyEventOnQuarantinedNodeNoRuleMatch(t *testing.T) {
 	nodeName := "e2e-q-node-nomatch-" + primitive.NewObjectID().Hex()[:8]
 
 	// Create node already quarantined
-	existingEvent := &platformconnectorprotos.HealthEvent{
+	existingEvent := &protos.HealthEvent{
 		NodeName:       nodeName,
 		Agent:          "gpu-health-monitor",
 		CheckName:      "GpuXidError",
 		ComponentClass: "GPU",
 		Version:        1,
 		IsHealthy:      false,
-		EntitiesImpacted: []*platformconnectorprotos.Entity{
+		EntitiesImpacted: []*protos.Entity{
 			{EntityType: "GPU", EntityValue: "0"},
 		},
 	}
@@ -3090,7 +3090,7 @@ func TestE2E_UnhealthyEventOnQuarantinedNodeNoRuleMatch(t *testing.T) {
 		"GpuMemWatch", // Different check - doesn't match rule
 		false,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -3217,7 +3217,7 @@ func TestE2E_DryRunMode(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -3286,7 +3286,7 @@ func TestE2E_TaintOnlyThenCordonRule(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -3359,7 +3359,7 @@ func TestE2E_ConflictRetryOnConcurrentUpdate(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
 		store.StatusInProgress,
 	)
 
@@ -3393,7 +3393,7 @@ func TestE2E_ConflictRetryOnConcurrentUpdate(t *testing.T) {
 		"GpuXidError",
 		false,
 		true,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -3435,14 +3435,14 @@ func TestE2E_ConflictRetryOnUnquarantine(t *testing.T) {
 	nodeName := "e2e-conflict-unq-" + primitive.NewObjectID().Hex()[:8]
 
 	// Create quarantined node
-	existingEvent := &platformconnectorprotos.HealthEvent{
+	existingEvent := &protos.HealthEvent{
 		NodeName:       nodeName,
 		Agent:          "gpu-health-monitor",
 		CheckName:      "GpuXidError",
 		ComponentClass: "GPU",
 		Version:        1,
 		IsHealthy:      false,
-		EntitiesImpacted: []*platformconnectorprotos.Entity{
+		EntitiesImpacted: []*protos.Entity{
 			{EntityType: "GPU", EntityValue: "0"},
 		},
 	}
@@ -3582,7 +3582,7 @@ func TestE2E_MultipleConflictsOnPartialRecovery(t *testing.T) {
 			"GpuXidError",
 			false,
 			true,
-			[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
+			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
 			store.StatusInProgress,
 		)
 	}
@@ -3631,7 +3631,7 @@ func TestE2E_MultipleConflictsOnPartialRecovery(t *testing.T) {
 		"GpuXidError",
 		true,
 		false,
-		[]*platformconnectorprotos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
 		store.StatusInProgress,
 	)
 
@@ -3650,13 +3650,13 @@ func TestE2E_MultipleConflictsOnPartialRecovery(t *testing.T) {
 		}
 
 		// Verify GPU 1 is NOT present
-		gpu1Query := &platformconnectorprotos.HealthEvent{
+		gpu1Query := &protos.HealthEvent{
 			Agent:          "gpu-health-monitor",
 			ComponentClass: "GPU",
 			CheckName:      "GpuXidError",
 			NodeName:       nodeName,
 			Version:        1,
-			EntitiesImpacted: []*platformconnectorprotos.Entity{
+			EntitiesImpacted: []*protos.Entity{
 				{EntityType: "GPU", EntityValue: "1"},
 			},
 		}

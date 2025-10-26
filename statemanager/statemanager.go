@@ -144,12 +144,12 @@ package statemanager
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -225,7 +225,9 @@ func (manager *stateManager) UpdateNVSentinelStateNodeLabel(ctx context.Context,
 
 		if removeStateLabel {
 			if !exists {
-				klog.Infof("Label %s is already absent for node %s", NVSentinelStateLabelKey, nodeName)
+				slog.Info("Label already absent",
+					"node", nodeName,
+					"label", NVSentinelStateLabelKey)
 
 				return nil
 			}
@@ -234,21 +236,21 @@ func (manager *stateManager) UpdateNVSentinelStateNodeLabel(ctx context.Context,
 
 			_, err = manager.clientSet.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
 			if err != nil {
-				return err
+				return fmt.Errorf("failed to update node %s to remove label: %w", nodeName, err)
 			}
 
 			nodeModified = true
 
-			klog.Infof("Label %s removed successfully for node %s", NVSentinelStateLabelKey, nodeName)
+			slog.Info("Label %s removed successfully for node %s", NVSentinelStateLabelKey, nodeName)
 
 			return nil
 		}
 
-		klog.Infof("Setting %s label to %s for node %s", NVSentinelStateLabelKey, newStateLabelValue, nodeName)
+		slog.Info("Labeling node", "node", nodeName, "from", currentValue, "to", newStateLabelValue)
 
 		if exists && currentValue == string(newStateLabelValue) {
-			klog.Infof("Label %s with value %s is already set for node %s", NVSentinelStateLabelKey,
-				newStateLabelValue, nodeName)
+			slog.Info("No update needed for node", "node", nodeName, "label", NVSentinelStateLabelKey,
+				"value", newStateLabelValue)
 
 			return nil
 		}
@@ -258,8 +260,8 @@ func (manager *stateManager) UpdateNVSentinelStateNodeLabel(ctx context.Context,
 		// while still having the label reflect what modules are actually doing
 		validationErr := validateStateTransition(nodeName, currentValue, exists, newStateLabelValue)
 		if validationErr != nil {
-			klog.Warningf("Invalid state transition for node %s: %v (proceeding with label update anyway)",
-				nodeName, validationErr)
+			slog.Warn("Invalid state transition", "node", nodeName,
+				"from", currentValue, "to", newStateLabelValue, "error", validationErr)
 		}
 
 		node.Labels[NVSentinelStateLabelKey] = string(newStateLabelValue)
@@ -267,12 +269,12 @@ func (manager *stateManager) UpdateNVSentinelStateNodeLabel(ctx context.Context,
 		// Update the node (this happens regardless of validation result)
 		_, err = manager.clientSet.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
 		if err != nil {
-			return err
+			return fmt.Errorf("failed to update node %s with new label: %w", nodeName, err)
 		}
 
 		nodeModified = true
 
-		klog.Infof("Label %s updated successfully for node %s", NVSentinelStateLabelKey, nodeName)
+		slog.Info("Label %s updated successfully for node %s", NVSentinelStateLabelKey, nodeName)
 
 		// Return validation error AFTER successful label update
 		// This allows callers to emit error metrics while the label reflects reality
