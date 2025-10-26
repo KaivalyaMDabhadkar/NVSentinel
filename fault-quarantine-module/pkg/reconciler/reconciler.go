@@ -966,9 +966,13 @@ func (r *Reconciler) performUncordon(
 		return true
 	}
 
-	// Nothing to uncordon
 	if len(taintsToBeRemoved) == 0 && !isUnCordon {
 		return false
+	}
+
+	if !isUnCordon {
+		slog.Error("performUncordon called but node is not cordoned", "node", event.NodeName)
+		return true
 	}
 
 	// Add the main quarantine annotation to removal list
@@ -989,7 +993,6 @@ func (r *Reconciler) performUncordon(
 		ctx,
 		event.NodeName,
 		taintsToBeRemoved,
-		isUnCordon,
 		annotationsToBeRemoved,
 		labelsToRemove,
 		labelsMap,
@@ -1112,16 +1115,16 @@ func (r *Reconciler) cleanupManualUncordonAnnotation(ctx context.Context, nodeNa
 	if _, hasManualUncordon := annotations[common.QuarantinedNodeUncordonedManuallyAnnotationKey]; hasManualUncordon {
 		slog.Info("Removing manual uncordon annotation from node before applying new quarantine", "node", nodeName)
 
-		// Remove the manual uncordon annotation before applying quarantine
-		if err := r.k8sClient.UnTaintAndUnCordonNodeAndRemoveAnnotations(
-			ctx,
-			nodeName,
-			nil,   // No taints to remove
-			false, // Not uncordoning
-			[]string{common.QuarantinedNodeUncordonedManuallyAnnotationKey}, // Remove manual uncordon annotation
-			nil, // No labels to remove
-			nil, // No labels to add
-		); err != nil {
+		// Remove the manual uncordon annotation via direct node update (not uncordoning)
+		updateFn := func(node *corev1.Node) error {
+			if node.Annotations != nil {
+				delete(node.Annotations, common.QuarantinedNodeUncordonedManuallyAnnotationKey)
+			}
+
+			return nil
+		}
+
+		if err := r.nodeInformer.UpdateNode(ctx, nodeName, updateFn); err != nil {
 			slog.Error("Failed to remove manual uncordon annotation from node", "node", nodeName, "error", err)
 		}
 	}

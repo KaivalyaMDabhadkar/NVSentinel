@@ -26,7 +26,7 @@ type K8sClientInterface interface {
 	TaintAndCordonNodeAndSetAnnotations(ctx context.Context, nodeName string,
 		taints []config.Taint, isCordon bool, annotations map[string]string, labelMap map[string]string) error
 	UnTaintAndUnCordonNodeAndRemoveAnnotations(ctx context.Context, nodeName string,
-		taints []config.Taint, isUncordon bool, annotationKeys []string, labelsToRemove []string,
+		taints []config.Taint, annotationKeys []string, labelsToRemove []string,
 		labelMap map[string]string) error
 	UpdateNodeAnnotations(ctx context.Context, nodeName string, annotations map[string]string) error
 	HandleManualUncordonCleanup(ctx context.Context, nodeName string, taintsToRemove []config.Taint,

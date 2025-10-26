@@ -39,15 +39,6 @@ const (
 	quarantineAnnotationIndexName = "quarantineAnnotation"
 )
 
-// NodeInfoProvider defines the interface for getting node counts.
-type NodeInfoProvider interface {
-	// GetNodeCounts returns the total number of nodes and the number of those nodes
-	// that are currently quarantined (have quarantine annotation).
-	GetNodeCounts() (totalNodes int, quarantinedNodesMap map[string]bool, err error)
-	// HasSynced returns true if the underlying informer cache has synced.
-	HasSynced() bool
-}
-
 // NodeInformer watches specific nodes and provides counts.
 type NodeInformer struct {
 	clientset      kubernetes.Interface

@@ -113,10 +113,8 @@ func (c *FaultQuarantineClient) GetTotalNodes(ctx context.Context) (int, error) 
 	return totalNodes, nil
 }
 
-func (c *FaultQuarantineClient) SetNodeInformer(nodeInformer NodeInfoProvider) {
-	if ni, ok := nodeInformer.(*NodeInformer); ok {
-		c.nodeInformer = ni
-	}
+func (c *FaultQuarantineClient) SetNodeInformer(nodeInformer *NodeInformer) {
+	c.nodeInformer = nodeInformer
 }
 
 func (c *FaultQuarantineClient) SetLabelKeys(cordonedReasonKey, uncordonedReasonKey string) {
@@ -282,7 +280,6 @@ func (c *FaultQuarantineClient) UnTaintAndUnCordonNodeAndRemoveAnnotations(
 	ctx context.Context,
 	nodename string,
 	taints []config.Taint,
-	isUnCordon bool,
 	annotationKeys []string,
 	labelsToRemove []string,
 	labels map[string]string,
@@ -292,7 +289,7 @@ func (c *FaultQuarantineClient) UnTaintAndUnCordonNodeAndRemoveAnnotations(
 			return nil
 		}
 
-		c.handleUncordon(node, isUnCordon, labels, nodename)
+		c.handleUncordon(node, labels, nodename)
 
 		c.removeAnnotations(node, annotationKeys, nodename)
 
@@ -343,12 +340,8 @@ func (c *FaultQuarantineClient) removeTaints(node *v1.Node, taints []config.Tain
 }
 
 func (c *FaultQuarantineClient) handleUncordon(
-	node *v1.Node, isUnCordon bool, labels map[string]string, nodename string,
+	node *v1.Node, labels map[string]string, nodename string,
 ) {
-	if !isUnCordon {
-		return
-	}
-
 	slog.Info("Uncordoning node", "node", nodename)
 
 	if !c.DryRunMode {
