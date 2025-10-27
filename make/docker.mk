@@ -27,14 +27,14 @@ docker-build: setup-buildx ## Build Docker image (multi-platform with cache)
 	$(if $(filter true,$(DISABLE_REGISTRY_CACHE)),@echo "Registry cache disabled for this build")
 	cd $(REPO_ROOT) && docker buildx build \
 		--platform $(PLATFORMS) \
-		--network=host \
-		$(CACHE_FROM_ARG) \
-		$(CACHE_TO_ARG) \
-		$(DOCKER_EXTRA_ARGS) \
-		$(DOCKER_LOAD_ARG) \
-		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel-$(MODULE_NAME):$(SAFE_REF_NAME) \
-		-f $(MODULE_PATH)/Dockerfile \
-		.
+	--network=host \
+	$(CACHE_FROM_ARG) \
+	$(CACHE_TO_ARG) \
+	$(DOCKER_EXTRA_ARGS) \
+	$(DOCKER_LOAD_ARG) \
+	-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel/$(MODULE_NAME):$(SAFE_REF_NAME) \
+	-f $(MODULE_PATH)/Dockerfile \
+	.
 
 # Simplified docker target (local builds)
 .PHONY: docker
@@ -65,7 +65,7 @@ docker-publish: setup-buildx ## Build and publish Docker image to registry
 		$(CACHE_TO_ARG) \
 		$(DOCKER_EXTRA_ARGS) \
 		--push \
-		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel-$(MODULE_NAME):$(SAFE_REF_NAME) \
+		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel/$(MODULE_NAME):$(SAFE_REF_NAME) \
 		-f $(MODULE_PATH)/Dockerfile \
 		.
 

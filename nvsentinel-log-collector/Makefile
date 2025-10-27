@@ -106,7 +106,7 @@ docker-build-log-collector: setup-buildx
 		$(CACHE_TO_ARG_LOG) \
 		$(DOCKER_LOAD_ARG) \
 		-f $(MODULE_PATH)/Dockerfile \
-		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel-log-collector:$(SAFE_REF_NAME) \
+		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel/log-collector:$(SAFE_REF_NAME) \
 		.
 
 # Build file-server-cleanup image (local development)
@@ -121,7 +121,7 @@ docker-build-file-server-cleanup: setup-buildx
 		$(CACHE_TO_ARG_CLEANUP) \
 		$(DOCKER_LOAD_ARG) \
 		-f $(MODULE_PATH)/Dockerfile.cleanup \
-		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel-file-server-cleanup:$(SAFE_REF_NAME) \
+		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel/file-server-cleanup:$(SAFE_REF_NAME) \
 		.
 
 # Local-only Docker build (no remote cache, faster for local development)
@@ -167,7 +167,7 @@ docker-publish-log-collector: setup-buildx
 		$(CACHE_TO_ARG_LOG) \
 		--push \
 		-f $(MODULE_PATH)/Dockerfile \
-		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel-log-collector:$(SAFE_REF_NAME) \
+		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel/log-collector:$(SAFE_REF_NAME) \
 		.
 
 # Build and publish file-server-cleanup image
@@ -182,7 +182,7 @@ docker-publish-file-server-cleanup: setup-buildx
 		$(CACHE_TO_ARG_CLEANUP) \
 		--push \
 		-f $(MODULE_PATH)/Dockerfile.cleanup \
-		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel-file-server-cleanup:$(SAFE_REF_NAME) \
+		-t $(CONTAINER_REGISTRY)/$(CONTAINER_ORG)/nvsentinel/file-server-cleanup:$(SAFE_REF_NAME) \
 		.
 
 # Legacy targets for backwards compatibility

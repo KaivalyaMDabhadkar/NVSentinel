@@ -13,8 +13,8 @@
 # limitations under the License.
 
 docker_build(
-    "ghcr.io/nvidia/nvsentinel-syslog-health-monitor",
+    "ghcr.io/nvidia/nvsentinel/syslog-health-monitor",
     context="../..",
     dockerfile="./Dockerfile",
-    build_args={"BUILD_TAGS": ""}
+    build_args={"BUILD_TAGS": "fake"}
 )

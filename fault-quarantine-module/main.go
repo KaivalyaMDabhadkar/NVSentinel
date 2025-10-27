@@ -21,12 +21,15 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/configmanager"
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
+	"github.com/nvidia/nvsentinel/commons/pkg/server"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/initializer"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -57,11 +60,21 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	portInt, err := strconv.Atoi(*metricsPort)
+	if err != nil {
+		return fmt.Errorf("invalid metrics port: %w", err)
+	}
+
+	srv := server.NewServer(
+		server.WithPort(portInt),
+		server.WithPrometheusMetrics(),
+		server.WithSimpleHealth(),
+	)
+
 	params := initializer.InitializationParams{
 		MongoClientCertMountPath: *mongoClientCertMountPath,
 		KubeconfigPath:           *kubeconfigPath,
 		TomlConfigPath:           *tomlConfigPath,
-		MetricsPort:              *metricsPort,
 		DryRun:                   *dryRun,
 		CircuitBreakerPercentage: *circuitBreakerPercentage,
 		CircuitBreakerDuration:   *circuitBreakerDuration,
@@ -81,10 +94,23 @@ func run() error {
 
 	slog.Info("Node informer started and synced")
 
-	slog.Info("Starting fault quarantine reconciler")
-	components.Reconciler.Start(ctx)
+	g, gCtx := errgroup.WithContext(ctx)
 
-	return nil
+	g.Go(func() error {
+		slog.Info("Starting metrics server", "port", portInt)
+
+		if err := srv.Serve(gCtx); err != nil {
+			slog.Error("Metrics server failed - continuing without metrics", "error", err)
+		}
+
+		return nil
+	})
+
+	g.Go(func() error {
+		return components.Reconciler.Start(gCtx)
+	})
+
+	return g.Wait()
 }
 
 func parseFlags() (metricsPort, mongoClientCertMountPath, kubeconfigPath *string, dryRun, circuitBreakerEnabled *bool,

@@ -63,29 +63,14 @@ jobs:
       fail-fast: false  # Continue testing other containers even if one fails
       matrix:
         include:
-          # Health Monitors
+          # Health Monitors (Docker-based)
           - component: gpu-health-monitor-dcgm3
             make_command: 'make -C health-monitors/gpu-health-monitor docker-build-dcgm3'
           - component: gpu-health-monitor-dcgm4
             make_command: 'make -C health-monitors/gpu-health-monitor docker-build-dcgm4'
           - component: syslog-health-monitor
             make_command: 'make -C health-monitors/syslog-health-monitor docker-build'
-          - component: csp-health-monitor
-            make_command: 'make -C health-monitors/csp-health-monitor docker-build'
-          # Core Modules
-          - component: health-events-analyzer
-            make_command: 'make -C health-events-analyzer docker-build'
-          - component: fault-quarantine-module
-            make_command: 'make -C fault-quarantine-module docker-build'
-          - component: labeler-module
-            make_command: 'make -C labeler-module docker-build'
-          - component: node-drainer-module
-            make_command: 'make -C node-drainer-module docker-build'
-          - component: fault-remediation-module
-            make_command: 'make -C fault-remediation-module docker-build'
-          - component: janitor
-            make_command: 'make -C janitor docker-build'
-          # Log Collection
+          # Log Collection (Docker-based)
           - component: log-collector
             make_command: 'make -C nvsentinel-log-collector docker-build-log-collector'
           - component: file-server-cleanup
@@ -123,6 +108,7 @@ jobs:
           grpcio-tools-version: ${{ needs.prepare-environment.outputs.grpcio_tools_version }}
           black-version: ${{ needs.prepare-environment.outputs.black_version }}
           shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
+          ko-version: ${{ needs.prepare-environment.outputs.ko_version }}
 
       - name: Build container for ${{ matrix.component }}
         if: steps.should-build.outputs.build == 'true'
@@ -144,25 +130,75 @@ jobs:
         uses: ./.github/actions/build-container
         env:
           CI_COMMIT_REF_NAME: ${{ steps.ref-name.outputs.value }}
-          # Disable registry cache for pull requests to avoid permission issues
-          DISABLE_REGISTRY_CACHE: ${{ (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/')) && 'true' || 'false' }}
+          # Disable registry cache for validation builds (this is a test workflow, not publish)
+          # Registry cache writing requires special permissions that may not be available
+          DISABLE_REGISTRY_CACHE: 'true'
           # Disable --load flag in CI builds (causes issues with multi-platform builds)
           DOCKER_LOAD_ARG: ''
         with:
           make_command: ${{ matrix.make_command }}
 
+  # Test ko-based builds (Go modules)
+  ko-build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: prepare-environment
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - module: platform-connectors
+            path: .
+          - module: health-events-analyzer
+            path: .
+          - module: fault-quarantine-module
+            path: .
+          - module: labeler-module
+            path: .
+          - module: node-drainer-module
+            path: .
+          - module: fault-remediation-module
+            path: .
+          - module: janitor
+            path: .
+          - module: health-monitors/csp-health-monitor
+            path: ./cmd/csp-health-monitor
+          - module: health-monitors/csp-health-monitor
+            path: ./cmd/maintenance-notifier
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ needs.prepare-environment.outputs.go_version }}
+
+      - name: Install ko
+        shell: bash
+        run: |
+          # Install ko for container builds
+          go install github.com/google/ko@${{ needs.prepare-environment.outputs.ko_version }}
+          ko version
+
+      - name: Test ko build for ${{ matrix.module }}
+        run: |
+          cd ${{ matrix.module }}
+          ko build --bare --platform=linux/amd64,linux/arm64 ${{ matrix.path }}
+        env:
+          KO_DOCKER_REPO: ko.local
+
   container-build-summary:
     runs-on: ubuntu-latest
-    needs: container-build-test
+    needs: [container-build-test, ko-build-test]
     if: always()
     steps:
       - name: Check build results
         run: |
           echo "Container build validation completed"
-          if [[ "${{ needs.container-build-test.result }}" == "failure" ]]; then
+          if [[ "${{ needs.container-build-test.result }}" == "failure" ]] || [[ "${{ needs.ko-build-test.result }}" == "failure" ]]; then
             echo "❌ Some container builds failed"
             exit 1
-          elif [[ "${{ needs.container-build-test.result }}" == "cancelled" ]]; then
+          elif [[ "${{ needs.container-build-test.result }}" == "cancelled" ]] || [[ "${{ needs.ko-build-test.result }}" == "cancelled" ]]; then
             echo "⚠️ Container builds were cancelled"
             exit 1
           else

@@ -50,6 +50,9 @@ inputs:
     description: 'Whether to install DCGM (requires sudo, may fail in some environments)'
     required: false
     default: 'false'
+  ko-version:
+    description: 'Version of ko to install'
+    required: true
 
 runs:
   using: 'composite'
@@ -189,7 +192,15 @@ runs:
         go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
         go install golang.org/x/tools/cmd/goimports@latest
         go install github.com/google/go-containerregistry/cmd/crane@latest
-        go install github.com/google/ko@latest
+        
+        # Install ko with version validation
+        if [ -z "${{ inputs.ko-version }}" ]; then
+          echo "ERROR: ko-version input is empty!"
+          echo "This usually means the prepare-environment workflow didn't output the version correctly."
+          exit 1
+        fi
+        echo "Installing ko version: ${{ inputs.ko-version }}"
+        go install github.com/google/ko@${{ inputs.ko-version }}
 
     - name: Set environment variables
       shell: bash
@@ -202,15 +213,15 @@ runs:
       shell: bash
       run: |
         echo "=== Verifying tool installations ==="
-        echo "Python: $(python3 --version)"
-        echo "Poetry: $(poetry --version)"
-        echo "Helm: $(helm version --short)"
-        echo "Go: $(go version)"
-        echo "ko: $(ko version)"
-        echo "golangci-lint: $(golangci-lint --version)"
-        echo "gotestsum: $(gotestsum --version)"
-        echo "protoc: $(protoc --version)"
-        echo "shellcheck: $(shellcheck --version | head -n 2)"
+        echo "Python: $(python3 --version || echo 'not installed')"
+        echo "Poetry: $(poetry --version || echo 'not installed')"
+        echo "Helm: $(helm version --short || echo 'not installed')"
+        echo "Go: $(go version || echo 'not installed')"
+        echo "ko: $(ko version || echo 'not installed')"
+        echo "golangci-lint: $(golangci-lint --version || echo 'not installed')"
+        echo "gotestsum: $(gotestsum --version || echo 'not installed')"
+        echo "protoc: $(protoc --version || echo 'not installed')"
+        echo "shellcheck: $(shellcheck --version | head -n 2 || echo 'not installed')"
         echo "addlicense: $(addlicense >/dev/null 2>&1 || echo 'installed')"
         echo "goimports: $(goimports --help >/dev/null 2>&1 || echo 'installed')"
         echo "black: $(black --version || echo 'not installed')"

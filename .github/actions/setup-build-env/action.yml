@@ -50,6 +50,9 @@ inputs:
     description: 'Whether to install DCGM (requires sudo, may fail in some environments)'
     required: false
     default: 'false'
+  ko-version:
+    description: 'Version of ko to install'
+    required: true
 
 runs:
   using: 'composite'
@@ -68,3 +71,4 @@ runs:
         black-version: ${{ inputs.black-version }}
         shellcheck-version: ${{ inputs.shellcheck-version }}
         install-dcgm: ${{ inputs.install-dcgm }}
+        ko-version: ${{ inputs.ko-version }}

@@ -20,7 +20,7 @@
 # =============================================================================
 
 IS_GO_MODULE := 1
-HAS_DOCKER := 1
+IS_KO_MODULE := 1
 
 # Platform-connectors specific settings
 LINT_EXTRA_FLAGS := --out-format code-climate:code-quality-report.json,colored-line-number
@@ -34,15 +34,12 @@ TEST_SETUP_COMMANDS := export PATH="$$GOPATH/bin:$$PATH" && \
                       go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest && \
                       export KUBEBUILDER_ASSETS=$$(setup-envtest use -p path 1.30.0) &&
 
-DOCKER_EXTRA_ARGS :=
-
 # =============================================================================
 # INCLUDE SHARED DEFINITIONS
 # =============================================================================
 
 include ../make/common.mk
 include ../make/go.mk
-include ../make/docker.mk
 
 # =============================================================================
 # DEFAULT TARGET
@@ -86,7 +83,7 @@ help:
 	@echo "  MODULE_NAME=$(MODULE_NAME)"
 	@echo "  REPO_ROOT=$(REPO_ROOT)"
 	@echo "  IS_GO_MODULE=1 (Go module with kubebuilder/envtest)"
-	@echo "  HAS_DOCKER=1 (Docker builds enabled)"
+	@echo "  IS_KO_MODULE=1 (ko container builds enabled)"
 	@echo ""
 	@echo "Main targets:"
 	@echo "  all        - Run lint-test (default)"
@@ -101,19 +98,15 @@ help:
 	@echo "  build      - Build the module"
 	@echo "  binary     - Build the main binary"
 	@echo "  clean      - Clean build artifacts"
+	@echo "  ko-build   - Build container image using ko (local)"
+	@echo "  ko-publish - Build and publish container image using ko"
 	@echo ""
-	@echo "Docker targets:"
-	@echo "  docker               - Build Docker image (local, alias for docker-build)"
-	@echo "  docker-build         - Build Docker image (local development)"
-	@echo "  docker-build-local   - Build Docker image (local, no remote cache)"
-	@echo "  docker-publish       - Build and publish Docker image (CI/production)"
-	@echo "  setup-buildx         - Setup Docker buildx builder"
-	@echo "  image                - Legacy target (calls docker-build)"
-	@echo "  publish              - Legacy target (calls docker-publish)"
-	@echo "  help       - Show this help message"
-	@echo ""
-	@echo "Module-specific notes:"
+	@echo "Build notes:"
+	@echo "  - Container images are built using ko"
+	@echo "  - Use 'make ko-build' for local builds (KO_DOCKER_REPO=ko.local by default)"
+	@echo "  - Use 'make ko-publish' to build and push (set KO_DOCKER_REPO and VERSION)"
+	@echo "  - For Tilt development, see Tiltfile"
 	@echo "  - Excludes protobuf packages from test coverage"
 	@echo "  - Uses code-climate format for lint output"
 	@echo "  - Runs tests with -short flag for faster execution"
-	@echo "  - Uses standardized repo-root Docker build context"
+

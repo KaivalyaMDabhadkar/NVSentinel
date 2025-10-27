@@ -23,6 +23,13 @@ export VERSION="${VERSION:-v0.1.0}"
 export GIT_COMMIT="${GIT_COMMIT:-dev}"
 export BUILD_DATE=$(date -u +%FT%TZ)
 
+# Build flags - use PLATFORMS env var if set, otherwise use .ko.yaml defaults
+KO_FLAGS=(-B --image-refs=digests.txt --sbom=cyclonedx --tags="${VERSION}")
+if [ -n "${PLATFORMS:-}" ]; then
+  echo "Building for platforms: ${PLATFORMS}"
+  KO_FLAGS+=(--platform="${PLATFORMS}")
+fi
+
 # Ensure go.work file exists
 if [ ! -f go.work ]; then
   go work init
@@ -37,7 +44,7 @@ if [ ! -f go.work ]; then
     ./platform-connectors
 fi
 
-ko build -B --image-refs=digests.txt --sbom=cyclonedx --tags="${VERSION}-slim" \
+ko build "${KO_FLAGS[@]}" \
   ./fault-quarantine-module \
   ./fault-remediation-module \
   ./health-events-analyzer \
@@ -51,7 +58,7 @@ ko build -B --image-refs=digests.txt --sbom=cyclonedx --tags="${VERSION}-slim" \
 echo "built refs:"
 cat digests.txt
 
-# digests.txt has: ghcr.io/nvidia/nvsentinel-fault-quarantine-module:v0.1.0-slim@sha256:9168...
+# digests.txt has: ghcr.io/nvidia/nvsentinel/fault-quarantine-module:v0.1.0@sha256:9168...
 # for attestation matrix we need subject-name WITHOUT tag, and the digest.
 jq -R -s '
   split("\n")

@@ -425,3 +425,10 @@ terraform.rc
 # ============================================================================
 digests.txt
 images.json
+
+# Binary files
+fault-quarantine-module/fault-quarantine-module
+fault-remediation-module/fault-remediation-module
+health-events-analyzer/health-events-analyzer
+node-drainer-module/node-drainer-module
+platform-connectors/platform-connectors

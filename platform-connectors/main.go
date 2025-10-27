@@ -20,20 +20,21 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
+	srv "github.com/nvidia/nvsentinel/commons/pkg/server"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/kubernetes"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/server"
+	"golang.org/x/sync/errgroup"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"google.golang.org/grpc"
 	"k8s.io/apimachinery/pkg/util/json"
 )
@@ -148,26 +149,68 @@ func startGRPCServer(socket string) (net.Listener, error) {
 	return lis, nil
 }
 
-func startMetricsServer(metricsPort string) {
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		})
-		slog.Info("Starting metrics server", "port", metricsPort)
-		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
-		err := http.ListenAndServe(":"+metricsPort, nil)
-		if err != nil {
-			slog.Error("Failed to start metrics server", "error", err)
-			os.Exit(1)
-		}
-	}()
+func initializeConnectors(
+	ctx context.Context,
+	config map[string]interface{},
+	stopCh chan struct{},
+	mongoClientCertMountPath string,
+) (*ringbuffer.RingBuffer, *store.MongoDbStoreConnector, error) {
+	var (
+		k8sRingBuffer  *ringbuffer.RingBuffer
+		storeConnector *store.MongoDbStoreConnector
+		err            error
+	)
 
-	slog.Info("Metrics server goroutine started")
+	if config["enableK8sPlatformConnector"] == True {
+		k8sRingBuffer, err = initializeK8sConnector(ctx, config, stopCh)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to initialize K8s connector: %w", err)
+		}
+	}
+
+	if config["enableMongoDBStorePlatformConnector"] == True {
+		storeConnector, err = initializeMongoDBConnector(ctx, mongoClientCertMountPath)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to initialize MongoDB store connector: %w", err)
+		}
+	}
+
+	return k8sRingBuffer, storeConnector, nil
 }
 
-//nolint:cyclop // Main run function complexity is acceptable
+func cleanupResources(
+	socket string,
+	lis net.Listener,
+	k8sRingBuffer *ringbuffer.RingBuffer,
+	storeConnector *store.MongoDbStoreConnector,
+) error {
+	if lis != nil {
+		if k8sRingBuffer != nil {
+			k8sRingBuffer.ShutDownHealthMetricQueue()
+		}
+
+		if err := lis.Close(); err != nil {
+			slog.Error("Failed to close listener", "error", err)
+		}
+
+		// Remove the socket file
+		if err := os.Remove(socket); err != nil && !os.IsNotExist(err) {
+			slog.Error("Failed to remove socket file", "error", err)
+		}
+	}
+
+	if storeConnector != nil {
+		disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer disconnectCancel()
+
+		if err := storeConnector.Disconnect(disconnectCtx); err != nil {
+			return fmt.Errorf("error disconnecting MongoDB store connector: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func run() error {
 	socket := flag.String("socket", "", "unix socket path")
 	configFilePath := flag.String("config", "/etc/config/config.json", "path to the config file")
@@ -194,22 +237,9 @@ func run() error {
 		return err
 	}
 
-	var k8sRingBuffer *ringbuffer.RingBuffer
-
-	var storeConnector *store.MongoDbStoreConnector
-
-	if config["enableK8sPlatformConnector"] == True {
-		k8sRingBuffer, err = initializeK8sConnector(ctx, config, stopCh)
-		if err != nil {
-			return err
-		}
-	}
-
-	if config["enableMongoDBStorePlatformConnector"] == True {
-		storeConnector, err = initializeMongoDBConnector(ctx, *mongoClientCertMountPath)
-		if err != nil {
-			return fmt.Errorf("failed to initialize MongoDB store connector: %w", err)
-		}
+	k8sRingBuffer, storeConnector, err := initializeConnectors(ctx, config, stopCh, *mongoClientCertMountPath)
+	if err != nil {
+		return err
 	}
 
 	lis, err := startGRPCServer(*socket)
@@ -217,34 +247,64 @@ func run() error {
 		return err
 	}
 
-	startMetricsServer(*metricsPort)
-
-	slog.Info("Waiting for signal")
-	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
-	sig := <-sigs
-	slog.Info("Received signal", "signal", sig)
-
-	close(stopCh)
-
-	if lis != nil {
-		if k8sRingBuffer != nil {
-			k8sRingBuffer.ShutDownHealthMetricQueue()
-		}
-
-		lis.Close()
-		os.Remove(*socket)
+	// Parse the metrics port
+	portInt, err := strconv.Atoi(*metricsPort)
+	if err != nil {
+		return fmt.Errorf("invalid metrics port: %w", err)
 	}
 
-	if storeConnector != nil {
-		disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer disconnectCancel()
+	// Create server
+	srv := srv.NewServer(
+		srv.WithPort(portInt),
+		srv.WithPrometheusMetrics(),
+		srv.WithSimpleHealth(),
+	)
 
-		if err := storeConnector.Disconnect(disconnectCtx); err != nil {
-			slog.Error("Failed to disconnect MongoDB client", "error", err)
+	// Start server in errgroup alongside the store and k8s connectors
+	g, gCtx := errgroup.WithContext(ctx)
+
+	// Start the metrics/health server.
+	// Metrics server failures are logged but do NOT terminate the service.
+	g.Go(func() error {
+		slog.Info("Starting metrics server", "port", portInt)
+
+		if err := srv.Serve(gCtx); err != nil {
+			slog.Error("Metrics server failed - continuing without metrics", "error", err)
 		}
-	}
 
-	cancel()
+		return nil
+	})
 
-	return nil
+	g.Go(func() error {
+		slog.Info("Waiting for SIGINT/SIGTERM or context cancellation")
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+		defer func() {
+			// Always stop signal delivery and close channel to avoid leaks.
+			signal.Stop(sigs)
+			close(sigs)
+		}()
+
+		select {
+		case sig := <-sigs:
+			slog.Info("Received signal", "signal", sig)
+		case <-gCtx.Done():
+			slog.Info("Context cancelled, initiating shutdown")
+		}
+
+		close(stopCh)
+
+		// Cleanup all resources
+		if err := cleanupResources(*socket, lis, k8sRingBuffer, storeConnector); err != nil {
+			return err
+		}
+
+		// Also cancel the root to propagate shutdown to any other goroutines.
+		cancel()
+
+		return nil
+	})
+
+	// Wait for both goroutines to finish
+	return g.Wait()
 }

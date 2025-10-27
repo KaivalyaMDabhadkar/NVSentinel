@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"path/filepath"
 	"time"
 
@@ -29,7 +28,6 @@ import (
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/mongodb"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/reconciler"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -38,7 +36,6 @@ type InitializationParams struct {
 	MongoClientCertMountPath string
 	KubeconfigPath           string
 	TomlConfigPath           string
-	MetricsPort              string
 	DryRun                   bool
 	CircuitBreakerPercentage int
 	CircuitBreakerDuration   time.Duration
@@ -66,20 +63,6 @@ type EnvConfig struct {
 	UnprocessedEventsMetricUpdateIntervalSeconds int
 }
 
-func startMetricsServer(port string) {
-	slog.Info("Starting metrics port", "port", port)
-
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
-		err := http.ListenAndServe(":"+port, nil)
-		if err != nil {
-			slog.Error("Failed to start metrics server", "error", err)
-			panic(err)
-		}
-	}()
-}
-
 func InitializeAll(ctx context.Context, params InitializationParams) (*Components, error) {
 	slog.Info("Starting fault quarantine module initialization")
 
@@ -87,8 +70,6 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 	if err != nil {
 		return nil, fmt.Errorf("failed to load environment configuration: %w", err)
 	}
-
-	startMetricsServer(params.MetricsPort)
 
 	mongoConfig := createMongoConfig(envConfig, params.MongoClientCertMountPath)
 	tokenConfig := createTokenConfig(envConfig)

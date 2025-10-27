@@ -67,6 +67,7 @@ jobs:
           grpcio-tools-version: ${{ needs.prepare-environment.outputs.grpcio_tools_version }}
           black-version: ${{ needs.prepare-environment.outputs.black_version }}
           shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
+          ko-version: ${{ needs.prepare-environment.outputs.ko_version }}
 
       - name: Compute ref name with short SHA
         id: ref-name
@@ -105,45 +106,21 @@ jobs:
         include:
           - component: gpu-health-monitor-dcgm3
             make_command: 'make -C health-monitors/gpu-health-monitor docker-publish-dcgm3'
-            container_name: 'nvsentinel-gpu-health-monitor'
+            container_name: 'nvsentinel/gpu-health-monitor'
             tag_suffix: '-dcgm-3.x'
           - component: gpu-health-monitor-dcgm4
             make_command: 'make -C health-monitors/gpu-health-monitor docker-publish-dcgm4'
-            container_name: 'nvsentinel-gpu-health-monitor'
+            container_name: 'nvsentinel/gpu-health-monitor'
             tag_suffix: '-dcgm-4.x'
           - component: syslog-health-monitor
             make_command: 'make -C health-monitors/syslog-health-monitor docker-publish'
-            container_name: 'nvsentinel-syslog-health-monitor'
-          - component: csp-health-monitor
-            make_command: 'make -C health-monitors/csp-health-monitor docker-publish'
-            container_name: 'nvsentinel-csp-health-monitor'
-          - component: platform-connectors
-            make_command: 'make -C platform-connectors docker-publish'
-            container_name: 'nvsentinel-platform-connectors'
-          - component: health-events-analyzer
-            make_command: 'make -C health-events-analyzer docker-publish'
-            container_name: 'nvsentinel-health-events-analyzer'
-          - component: fault-quarantine-module
-            make_command: 'make -C fault-quarantine-module docker-publish'
-            container_name: 'nvsentinel-fault-quarantine-module'
-          - component: labeler-module
-            make_command: 'make -C labeler-module docker-publish'
-            container_name: 'nvsentinel-labeler-module'
-          - component: node-drainer-module
-            make_command: 'make -C node-drainer-module docker-publish'
-            container_name: 'nvsentinel-node-drainer-module'
-          - component: fault-remediation-module
-            make_command: 'make -C fault-remediation-module docker-publish'
-            container_name: 'nvsentinel-fault-remediation-module'
-          - component: janitor
-            make_command: 'make -C janitor docker-publish'
-            container_name: 'nvsentinel-janitor'
+            container_name: 'nvsentinel/syslog-health-monitor'
           - component: log-collector
             make_command: 'make -C nvsentinel-log-collector docker-publish-log-collector'
-            container_name: 'nvsentinel-log-collector'
+            container_name: 'nvsentinel/log-collector'
           - component: file-server-cleanup
             make_command: 'make -C nvsentinel-log-collector docker-publish-file-server-cleanup'
-            container_name: 'nvsentinel-file-server-cleanup'
+            container_name: 'nvsentinel/file-server-cleanup'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -162,6 +139,7 @@ jobs:
           grpcio-tools-version: ${{ needs.prepare-environment.outputs.grpcio_tools_version }}
           black-version: ${{ needs.prepare-environment.outputs.black_version }}
           shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
+          ko-version: ${{ needs.prepare-environment.outputs.ko_version }}
 
       - name: Compute ref name with short SHA
         id: ref-name
@@ -220,6 +198,7 @@ jobs:
           grpcio-tools-version: ${{ needs.prepare-environment.outputs.grpcio_tools_version }}
           black-version: ${{ needs.prepare-environment.outputs.black_version }}
           shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
+          ko-version: ${{ needs.prepare-environment.outputs.ko_version }}
 
       # ko is already installed in the setup-ci-tools action
       - name: Authenticate to GHCR

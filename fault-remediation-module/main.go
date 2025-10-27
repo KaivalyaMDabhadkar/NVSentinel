@@ -19,19 +19,21 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
+	"github.com/nvidia/nvsentinel/commons/pkg/server"
 	"github.com/nvidia/nvsentinel/fault-remediation-module/pkg/reconciler"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
 	"github.com/nvidia/nvsentinel/statemanager"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
+	"golang.org/x/sync/errgroup"
 
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 )
@@ -182,24 +184,6 @@ func getTokenConfig() (*storewatcher.TokenConfig, error) {
 	}, nil
 }
 
-func startMetricsServer(metricsPort string) {
-	go func() {
-		http.Handle("/metrics", promhttp.Handler())
-		http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("ok"))
-		})
-		slog.Info("Starting metrics server", "port", metricsPort)
-		//nolint:gosec // G114: Ignoring the use of http.ListenAndServe without timeouts
-		if err := http.ListenAndServe(":"+metricsPort, nil); err != nil {
-			slog.Error("Metrics server failed", "error", err)
-			os.Exit(1)
-		}
-	}()
-
-	slog.Info("Metrics server goroutine started")
-}
-
 func getMongoPipeline() mongo.Pipeline {
 	return mongo.Pipeline{
 		bson.D{
@@ -227,7 +211,10 @@ func getMongoPipeline() mongo.Pipeline {
 }
 
 func run() error {
-	ctx := context.Background()
+	// Create a context that listens for OS interrupt signals (SIGINT, SIGTERM).
+	// This enables proper graceful shutdown in Kubernetes environments
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Parse flags and get configuration
 	cfg := parseFlags()
@@ -281,11 +268,40 @@ func run() error {
 
 	reconciler := reconciler.NewReconciler(reconcilerCfg, cfg.dryRun)
 
-	startMetricsServer(cfg.metricsPort)
+	// Parse the metrics port
+	portInt, err := strconv.Atoi(cfg.metricsPort)
+	if err != nil {
+		return fmt.Errorf("invalid metrics port: %w", err)
+	}
 
-	reconciler.Start(ctx)
+	// Create the server
+	srv := server.NewServer(
+		server.WithPort(portInt),
+		server.WithPrometheusMetrics(),
+		server.WithSimpleHealth(),
+	)
 
-	return nil
+	// Start server and reconciler concurrently
+	g, gCtx := errgroup.WithContext(ctx)
+
+	// Start the metrics/health server.
+	// Metrics server failures are logged but do NOT terminate the service.
+	g.Go(func() error {
+		slog.Info("Starting metrics server", "port", portInt)
+
+		if err := srv.Serve(gCtx); err != nil {
+			slog.Error("Metrics server failed - continuing without metrics", "error", err)
+		}
+
+		return nil
+	})
+
+	g.Go(func() error {
+		return reconciler.Start(gCtx)
+	})
+
+	// Wait for both goroutines to finish
+	return g.Wait()
 }
 
 func main() {

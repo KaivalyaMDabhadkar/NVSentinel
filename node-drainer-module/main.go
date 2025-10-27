@@ -21,10 +21,13 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
+	"github.com/nvidia/nvsentinel/commons/pkg/server"
 	"github.com/nvidia/nvsentinel/node-drainer-module/pkg/initializer"
+	"golang.org/x/sync/errgroup"
 )
 
 var (
@@ -102,28 +105,70 @@ func run() error {
 
 	slog.Info("All components started successfully")
 
-	if err := initializer.StartMetricsServer(*metricsPort); err != nil {
-		return fmt.Errorf("failed to start metrics server: %w", err)
+	// Parse the metrics port
+	portInt, err := strconv.Atoi(*metricsPort)
+	if err != nil {
+		return fmt.Errorf("invalid metrics port: %w", err)
 	}
 
-	select {
-	case <-ctx.Done():
-	case err := <-criticalError:
-		slog.Error("Critical component failure", "error", err)
-		stop() // Cancel context to trigger shutdown
+	// Create the server
+	srv := server.NewServer(
+		server.WithPort(portInt),
+		server.WithPrometheusMetrics(),
+		server.WithSimpleHealth(),
+	)
 
-		return fmt.Errorf("critical component failure: %w", err)
-	}
+	// Start server in errgroup alongside event watcher monitoring
+	g, gCtx := errgroup.WithContext(ctx)
 
-	slog.Info("Shutting down node drainer")
+	// Start the metrics/health server.
+	// Metrics server failures are logged but do NOT terminate the service.
+	g.Go(func() error {
+		slog.Info("Starting metrics server", "port", portInt)
 
-	if err := components.EventWatcher.Stop(); err != nil {
-		return fmt.Errorf("failed to stop event watcher: %w", err)
-	}
+		if err := srv.Serve(gCtx); err != nil {
+			slog.Error("Metrics server failed - continuing without metrics", "error", err)
+		}
 
-	components.QueueManager.Shutdown()
+		return nil
+	})
 
-	slog.Info("Node drainer stopped")
+	// Monitor for critical errors or graceful shutdown signals.
+	g.Go(func() error {
+		select {
+		case <-gCtx.Done():
+			// Context was cancelled (SIGTERM/SIGINT or another goroutine failed)
+			slog.Info("Context cancelled, initiating shutdown")
+		case err := <-criticalError:
+			// Critical component (event watcher) failed
+			slog.Error("Critical component failure", "error", err)
+			stop() // Cancel context to trigger shutdown of other components
 
-	return nil
+			slog.Info("Shutting down node drainer")
+
+			if errStop := components.EventWatcher.Stop(); errStop != nil {
+				return fmt.Errorf("failed to stop event watcher: %w", errStop)
+			}
+
+			components.QueueManager.Shutdown()
+			slog.Info("Node drainer stopped")
+
+			return fmt.Errorf("critical component failure: %w", err)
+		}
+
+		// Normal shutdown path (context cancelled without critical error)
+		slog.Info("Shutting down node drainer")
+
+		if errStop := components.EventWatcher.Stop(); errStop != nil {
+			return fmt.Errorf("failed to stop event watcher: %w", errStop)
+		}
+
+		components.QueueManager.Shutdown()
+		slog.Info("Node drainer stopped")
+
+		return nil
+	})
+
+	// Wait for both goroutines to finish
+	return g.Wait()
 }

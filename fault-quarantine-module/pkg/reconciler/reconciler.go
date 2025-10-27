@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -132,10 +131,13 @@ func (r *Reconciler) SetEventWatcher(eventWatcher mongodb.EventWatcherInterface)
 	r.eventWatcher = eventWatcher
 }
 
-func (r *Reconciler) Start(ctx context.Context) {
+func (r *Reconciler) Start(ctx context.Context) error {
 	r.setupNodeInformerCallbacks()
 
-	ruleSetEvals := r.initializeRuleSetEvaluators()
+	ruleSetEvals, err := r.initializeRuleSetEvaluators()
+	if err != nil {
+		return fmt.Errorf("failed to initialize rule set evaluators: %w", err)
+	}
 
 	r.setupLabelKeys()
 
@@ -144,14 +146,13 @@ func (r *Reconciler) Start(ctx context.Context) {
 	r.precomputeTaintInitKeys(ruleSetEvals, rulesetsConfig)
 
 	if !r.nodeInformer.WaitForSync(ctx) {
-		slog.Error("Failed to sync NodeInformer cache, cannot proceed with event processing")
-		os.Exit(1)
+		return fmt.Errorf("failed to sync NodeInformer cache")
 	}
 
 	r.initializeQuarantineMetrics()
 
 	if shouldHalt := r.checkCircuitBreakerAtStartup(ctx); shouldHalt {
-		return
+		return fmt.Errorf("circuit breaker is tripped at startup")
 	}
 
 	r.eventWatcher.SetProcessEventCallback(
@@ -161,11 +162,12 @@ func (r *Reconciler) Start(ctx context.Context) {
 	)
 
 	if err := r.eventWatcher.Start(ctx); err != nil {
-		slog.Error("Event watcher failed", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("event watcher failed: %w", err)
 	}
 
 	slog.Info("Event watcher stopped, exiting fault-quarantine reconciler.")
+
+	return nil
 }
 
 // setupNodeInformerCallbacks configures callbacks on the already-created node informer
@@ -179,13 +181,13 @@ func (r *Reconciler) setupNodeInformerCallbacks() {
 }
 
 // initializeRuleSetEvaluators initializes all rule set evaluators from config
-func (r *Reconciler) initializeRuleSetEvaluators() []evaluator.RuleSetEvaluatorIface {
+func (r *Reconciler) initializeRuleSetEvaluators() ([]evaluator.RuleSetEvaluatorIface, error) {
 	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(r.config.TomlConfig.RuleSets, r.nodeInformer)
 	if err != nil {
-		slog.Error("Failed to initialize all rule set evaluators", "error", err)
+		return nil, fmt.Errorf("failed to initialize all rule set evaluators: %w", err)
 	}
 
-	return ruleSetEvals
+	return ruleSetEvals, nil
 }
 
 // setupLabelKeys configures label keys for cordon/uncordon tracking
