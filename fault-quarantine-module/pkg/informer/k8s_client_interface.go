@@ -18,7 +18,7 @@ import (
 	"context"
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/config"
-	"k8s.io/client-go/kubernetes"
+	v1 "k8s.io/api/core/v1"
 )
 
 // K8sClientInterface defines the methods used by Reconciler from k8sClient
@@ -28,10 +28,9 @@ type K8sClientInterface interface {
 	UnTaintAndUnCordonNodeAndRemoveAnnotations(ctx context.Context, nodeName string,
 		taints []config.Taint, annotationKeys []string, labelsToRemove []string,
 		labelMap map[string]string) error
-	UpdateNodeAnnotations(ctx context.Context, nodeName string, annotations map[string]string) error
 	HandleManualUncordonCleanup(ctx context.Context, nodeName string, taintsToRemove []config.Taint,
 		annotationsToRemove []string, annotationsToAdd map[string]string, labelsToRemove []string) error
-	GetK8sClient() kubernetes.Interface
+	UpdateNode(ctx context.Context, nodeName string, updateFn func(*v1.Node) error) error
 	EnsureCircuitBreakerConfigMap(ctx context.Context, name, namespace string, initialStatus string) error
 	ReadCircuitBreakerState(ctx context.Context, name, namespace string) (string, error)
 	WriteCircuitBreakerState(ctx context.Context, name, namespace, status string) error

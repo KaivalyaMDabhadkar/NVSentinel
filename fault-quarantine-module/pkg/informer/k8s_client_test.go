@@ -100,7 +100,7 @@ func setupTestClient(t *testing.T) *FaultQuarantineClient {
 		t.Fatalf("NodeInformer failed to sync")
 	}
 
-	client.SetNodeInformer(nodeInformer)
+	client.NodeInformer = nodeInformer
 	client.SetLabelKeys(cordonedReasonLabelKey, uncordonedReasonLabelkey)
 
 	return client
@@ -444,7 +444,7 @@ func TestUnTaintAndUnCordonNode_PartialAnnotationRemoval(t *testing.T) {
 	}
 }
 
-func TestTaintAndCordonNode_AlreadyTaintedCOrdonned(t *testing.T) {
+func TestTaintAndCordonNode_AlreadyTaintedCordoned(t *testing.T) {
 	ctx := context.Background()
 	nodeName := "test-already-tainted-" + primitive.NewObjectID().Hex()[:8]
 

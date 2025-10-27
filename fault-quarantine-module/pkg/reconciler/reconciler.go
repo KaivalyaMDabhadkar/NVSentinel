@@ -61,8 +61,7 @@ type keyValTaint struct {
 
 type Reconciler struct {
 	config                ReconcilerConfig
-	k8sClient             informer.K8sClientInterface
-	nodeInformer          *informer.NodeInformer
+	k8sClient             *informer.FaultQuarantineClient
 	lastProcessedObjectID atomic.Value
 	cb                    breaker.CircuitBreaker
 	eventWatcher          mongodb.EventWatcherInterface
@@ -88,15 +87,13 @@ var (
 
 func NewReconciler(
 	cfg ReconcilerConfig,
-	k8sClient informer.K8sClientInterface,
+	k8sClient *informer.FaultQuarantineClient,
 	circuitBreaker breaker.CircuitBreaker,
-	nodeInformer *informer.NodeInformer,
 ) *Reconciler {
 	r := &Reconciler{
-		config:       cfg,
-		k8sClient:    k8sClient,
-		cb:           circuitBreaker,
-		nodeInformer: nodeInformer,
+		config:    cfg,
+		k8sClient: k8sClient,
+		cb:        circuitBreaker,
 	}
 
 	return r
@@ -145,14 +142,14 @@ func (r *Reconciler) Start(ctx context.Context) error {
 
 	r.precomputeTaintInitKeys(ruleSetEvals, rulesetsConfig)
 
-	if !r.nodeInformer.WaitForSync(ctx) {
+	if !r.k8sClient.NodeInformer.WaitForSync(ctx) {
 		return fmt.Errorf("failed to sync NodeInformer cache")
 	}
 
 	r.initializeQuarantineMetrics()
 
-	if shouldHalt := r.checkCircuitBreakerAtStartup(ctx); shouldHalt {
-		return fmt.Errorf("circuit breaker is tripped at startup")
+	if err := r.checkCircuitBreakerAtStartup(ctx); err != nil {
+		return err
 	}
 
 	r.eventWatcher.SetProcessEventCallback(
@@ -172,17 +169,17 @@ func (r *Reconciler) Start(ctx context.Context) error {
 
 // setupNodeInformerCallbacks configures callbacks on the already-created node informer
 func (r *Reconciler) setupNodeInformerCallbacks() {
-	r.nodeInformer.SetOnQuarantinedNodeDeletedCallback(func(nodeName string) {
+	r.k8sClient.NodeInformer.SetOnQuarantinedNodeDeletedCallback(func(nodeName string) {
 		metrics.CurrentQuarantinedNodes.WithLabelValues(nodeName).Set(0)
 		slog.Info("Set currentQuarantinedNodes to 0 for deleted quarantined node", "node", nodeName)
 	})
 
-	r.nodeInformer.SetOnManualUncordonCallback(r.handleManualUncordon)
+	r.k8sClient.NodeInformer.SetOnManualUncordonCallback(r.handleManualUncordon)
 }
 
 // initializeRuleSetEvaluators initializes all rule set evaluators from config
 func (r *Reconciler) initializeRuleSetEvaluators() ([]evaluator.RuleSetEvaluatorIface, error) {
-	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(r.config.TomlConfig.RuleSets, r.nodeInformer)
+	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(r.config.TomlConfig.RuleSets, r.k8sClient.NodeInformer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize all rule set evaluators: %w", err)
 	}
@@ -193,10 +190,7 @@ func (r *Reconciler) initializeRuleSetEvaluators() ([]evaluator.RuleSetEvaluator
 // setupLabelKeys configures label keys for cordon/uncordon tracking
 func (r *Reconciler) setupLabelKeys() {
 	r.SetLabelKeys(r.config.TomlConfig.LabelPrefix)
-
-	if fqClient, ok := r.k8sClient.(*informer.FaultQuarantineClient); ok {
-		fqClient.SetLabelKeys(r.cordonedReasonLabelKey, r.uncordonedReasonLabelKey)
-	}
+	r.k8sClient.SetLabelKeys(r.cordonedReasonLabelKey, r.uncordonedReasonLabelKey)
 }
 
 // buildRulesetsConfig builds the rulesets configuration maps from TOML config
@@ -249,7 +243,7 @@ func (r *Reconciler) precomputeTaintInitKeys(
 
 // initializeQuarantineMetrics initializes metrics for already quarantined nodes
 func (r *Reconciler) initializeQuarantineMetrics() {
-	totalNodes, quarantinedNodesMap, err := r.nodeInformer.GetNodeCounts()
+	totalNodes, quarantinedNodesMap, err := r.k8sClient.NodeInformer.GetNodeCounts()
 	if err != nil {
 		slog.Error("Failed to get initial node counts", "error", err)
 		return
@@ -264,31 +258,37 @@ func (r *Reconciler) initializeQuarantineMetrics() {
 }
 
 // checkCircuitBreakerAtStartup checks if circuit breaker is tripped at startup
-// Returns true if processing should halt
-func (r *Reconciler) checkCircuitBreakerAtStartup(ctx context.Context) bool {
-	// If breaker is enabled and already tripped at startup, halt until restart/manual close
+// Returns error if retry exhaustion occurs (should restart pod)
+// Blocks indefinitely if circuit breaker is tripped (wait for manual intervention)
+func (r *Reconciler) checkCircuitBreakerAtStartup(ctx context.Context) error {
 	if !r.config.CircuitBreakerEnabled {
-		return false
+		return nil
 	}
 
 	tripped, err := r.cb.IsTripped(ctx)
 	if err != nil {
+		// Check if this is a retry exhaustion error (should restart pod)
+		if errors.Is(err, breaker.ErrRetryExhausted) {
+			return err
+		}
+
+		// Other errors: log and block indefinitely
 		slog.Error("Error checking if circuit breaker is tripped", "error", err)
 		<-ctx.Done()
 
-		return true
+		return fmt.Errorf("circuit breaker check failed: %w", err)
 	}
 
 	if tripped {
 		slog.Error("Fault Quarantine circuit breaker is TRIPPED. Halting event dequeuing indefinitely.")
 		<-ctx.Done()
 
-		return true
+		return fmt.Errorf("circuit breaker is TRIPPED at startup")
 	}
 
 	slog.Info("Listening for events on the channel...")
 
-	return false
+	return nil
 }
 
 // ProcessEvent processes a single health event
@@ -908,7 +908,7 @@ func (r *Reconciler) addEventToAnnotation(
 		return nil
 	}
 
-	return r.nodeInformer.UpdateNode(ctx, event.NodeName, updateFn)
+	return r.k8sClient.UpdateNode(ctx, event.NodeName, updateFn)
 }
 
 // removeEventFromAnnotation removes entities from a health event in the node's quarantine annotation
@@ -949,7 +949,7 @@ func (r *Reconciler) removeEventFromAnnotation(
 		return nil
 	}
 
-	return r.nodeInformer.UpdateNode(ctx, event.NodeName, updateFn)
+	return r.k8sClient.UpdateNode(ctx, event.NodeName, updateFn)
 }
 
 func (r *Reconciler) performUncordon(
@@ -1081,7 +1081,7 @@ func formatCordonOrUncordonReasonValue(input string, length int) string {
 
 // getNodeQuarantineAnnotations retrieves quarantine annotations from the informer cache
 func (r *Reconciler) getNodeQuarantineAnnotations(nodeName string) (map[string]string, error) {
-	node, err := r.nodeInformer.GetNode(nodeName)
+	node, err := r.k8sClient.NodeInformer.GetNode(nodeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get node from cache: %w", err)
 	}
@@ -1126,7 +1126,7 @@ func (r *Reconciler) cleanupManualUncordonAnnotation(ctx context.Context, nodeNa
 			return nil
 		}
 
-		if err := r.nodeInformer.UpdateNode(ctx, nodeName, updateFn); err != nil {
+		if err := r.k8sClient.UpdateNode(ctx, nodeName, updateFn); err != nil {
 			slog.Error("Failed to remove manual uncordon annotation from node", "node", nodeName, "error", err)
 		}
 	}

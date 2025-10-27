@@ -186,6 +186,7 @@ func TestNodeToSkipLabelRuleEvaluator(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Failed to create NodeInformer: %v", err)
 			}
+
 			stopCh := make(chan struct{})
 			defer close(stopCh)
 

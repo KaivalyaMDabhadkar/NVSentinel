@@ -88,7 +88,7 @@ func run() error {
 
 	slog.Info("Starting node informer")
 
-	if err := components.Informer.Run(ctx.Done()); err != nil {
+	if err := components.K8sClient.NodeInformer.Run(ctx.Done()); err != nil {
 		return fmt.Errorf("failed to start node informer: %w", err)
 	}
 

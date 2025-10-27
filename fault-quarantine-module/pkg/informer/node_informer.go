@@ -24,14 +24,11 @@ import (
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	corelisters "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/util/retry"
 )
 
 const (
@@ -49,9 +46,6 @@ type NodeInformer struct {
 	// Mutex protects access to the counts below
 	mutex      sync.RWMutex
 	totalNodes int
-
-	// operationMutex provides per-node locking for thread-safe updates
-	operationMutex sync.Map // map[string]*sync.Mutex
 
 	// onQuarantinedNodeDeleted is called when a quarantined node with annotations is deleted
 	onQuarantinedNodeDeleted func(nodeName string)
@@ -165,7 +159,6 @@ func (ni *NodeInformer) GetNodeCounts() (totalNodes int, quarantinedNodesMap map
 	total := ni.totalNodes
 	ni.mutex.RUnlock()
 
-	// Use indexer to efficiently get quarantined nodes
 	quarantinedObjs, err := ni.informer.GetIndexer().ByIndex(quarantineAnnotationIndexName, "quarantined")
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to get quarantined nodes from index: %w", err)
@@ -318,58 +311,4 @@ func (ni *NodeInformer) handleDeleteNode(obj interface{}) {
 	if hadQuarantineAnnotation && ni.onQuarantinedNodeDeleted != nil {
 		ni.onQuarantinedNodeDeleted(node.Name)
 	}
-}
-
-// UpdateNode atomically updates a node using eventual consistency.
-// The updateFn is applied to the latest node version from the API server.
-// Per-node locking ensures thread-safe updates on the same node.
-func (ni *NodeInformer) UpdateNode(ctx context.Context, nodeName string, updateFn func(*v1.Node) error) error {
-	// Lock per-node to ensure atomic operations on the same node
-	mu, _ := ni.operationMutex.LoadOrStore(nodeName, &sync.Mutex{})
-	mu.(*sync.Mutex).Lock()
-	defer mu.(*sync.Mutex).Unlock()
-
-	return retry.OnError(retry.DefaultBackoff, errors.IsConflict, func() error {
-		// Get the latest version from API server
-		node, err := ni.clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to get node: %w", err)
-		}
-
-		if err := updateFn(node); err != nil {
-			return fmt.Errorf("update function failed: %w", err)
-		}
-
-		_, err = ni.clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
-		if err != nil {
-			return fmt.Errorf("failed to update node: %w", err)
-		}
-
-		slog.Debug("Updated node (eventual consistency)", "node", nodeName)
-
-		return nil
-	})
-}
-
-// UpdateNodeAnnotations atomically updates node annotations using eventual consistency.
-func (ni *NodeInformer) UpdateNodeAnnotations(
-	ctx context.Context,
-	nodeName string,
-	annotations map[string]string,
-) error {
-	updateFn := func(node *v1.Node) error {
-		if node.Annotations == nil {
-			node.Annotations = make(map[string]string)
-		}
-
-		for key, value := range annotations {
-			node.Annotations[key] = value
-		}
-
-		slog.Debug("Updating annotations for node", "node", nodeName, "annotations", annotations)
-
-		return nil
-	}
-
-	return ni.UpdateNode(ctx, nodeName, updateFn)
 }

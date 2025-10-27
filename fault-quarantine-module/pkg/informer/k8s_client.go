@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
@@ -31,7 +32,6 @@ import (
 	"k8s.io/client-go/util/retry"
 )
 
-// other modules may also update the node, so we need to make sure that we retry on conflict
 var customBackoff = wait.Backoff{
 	Steps:    10,
 	Duration: 10 * time.Millisecond,
@@ -42,12 +42,14 @@ var customBackoff = wait.Backoff{
 type FaultQuarantineClient struct {
 	Clientset                kubernetes.Interface
 	DryRunMode               bool
-	nodeInformer             *NodeInformer
+	NodeInformer             *NodeInformer
 	cordonedReasonLabelKey   string
 	uncordonedReasonLabelKey string
+	operationMutex           sync.Map // map[string]*sync.Mutex for per-node locking
 }
 
-func NewFaultQuarantineClient(kubeconfig string, dryRun bool) (*FaultQuarantineClient, error) {
+func NewFaultQuarantineClient(kubeconfig string, dryRun bool,
+	resyncPeriod time.Duration) (*FaultQuarantineClient, error) {
 	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
 	if err != nil {
 		return nil, fmt.Errorf("error creating Kubernetes config: %w", err)
@@ -58,16 +60,18 @@ func NewFaultQuarantineClient(kubeconfig string, dryRun bool) (*FaultQuarantineC
 		return nil, fmt.Errorf("error creating clientset: %w", err)
 	}
 
+	nodeInformer, err := NewNodeInformer(clientset, resyncPeriod)
+	if err != nil {
+		return nil, fmt.Errorf("error creating node informer: %w", err)
+	}
+
 	client := &FaultQuarantineClient{
-		Clientset:  clientset,
-		DryRunMode: dryRun,
+		Clientset:    clientset,
+		DryRunMode:   dryRun,
+		NodeInformer: nodeInformer,
 	}
 
 	return client, nil
-}
-
-func (c *FaultQuarantineClient) GetK8sClient() kubernetes.Interface {
-	return c.Clientset
 }
 
 func (c *FaultQuarantineClient) EnsureCircuitBreakerConfigMap(ctx context.Context,
@@ -103,7 +107,7 @@ func (c *FaultQuarantineClient) EnsureCircuitBreakerConfigMap(ctx context.Contex
 }
 
 func (c *FaultQuarantineClient) GetTotalNodes(ctx context.Context) (int, error) {
-	totalNodes, _, err := c.nodeInformer.GetNodeCounts()
+	totalNodes, _, err := c.NodeInformer.GetNodeCounts()
 	if err != nil {
 		return 0, fmt.Errorf("failed to get node counts from informer: %w", err)
 	}
@@ -113,13 +117,35 @@ func (c *FaultQuarantineClient) GetTotalNodes(ctx context.Context) (int, error) 
 	return totalNodes, nil
 }
 
-func (c *FaultQuarantineClient) SetNodeInformer(nodeInformer *NodeInformer) {
-	c.nodeInformer = nodeInformer
-}
-
 func (c *FaultQuarantineClient) SetLabelKeys(cordonedReasonKey, uncordonedReasonKey string) {
 	c.cordonedReasonLabelKey = cordonedReasonKey
 	c.uncordonedReasonLabelKey = uncordonedReasonKey
+}
+
+func (c *FaultQuarantineClient) UpdateNode(ctx context.Context, nodeName string, updateFn func(*v1.Node) error) error {
+	mu, _ := c.operationMutex.LoadOrStore(nodeName, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
+
+	return retry.OnError(retry.DefaultBackoff, errors.IsConflict, func() error {
+		node, err := c.Clientset.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		if err := updateFn(node); err != nil {
+			return err
+		}
+
+		_, err = c.Clientset.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+		if err != nil {
+			return err
+		}
+
+		slog.Debug("Updated node (eventual consistency)", "node", nodeName)
+
+		return nil
+	})
 }
 
 func (c *FaultQuarantineClient) ReadCircuitBreakerState(ctx context.Context, name, namespace string) (string, error) {
@@ -171,29 +197,33 @@ func (c *FaultQuarantineClient) TaintAndCordonNodeAndSetAnnotations(
 	labels map[string]string,
 ) error {
 	updateFn := func(node *v1.Node) error {
-		if err := c.applyTaints(node, taints, nodename); err != nil {
-			return fmt.Errorf("failed to apply taints to node %s: %w", nodename, err)
+		if len(taints) > 0 {
+			if err := c.applyTaints(node, taints, nodename); err != nil {
+				return fmt.Errorf("failed to apply taints to node %s: %w", nodename, err)
+			}
 		}
 
-		if shouldSkip := c.handleCordon(node, isCordon, nodename); shouldSkip {
-			return nil
+		if isCordon {
+			if shouldSkip := c.handleCordon(node, nodename); shouldSkip {
+				return nil
+			}
 		}
 
-		c.applyAnnotations(node, annotations, nodename)
+		if len(annotations) > 0 {
+			c.applyAnnotations(node, annotations, nodename)
+		}
 
-		c.applyLabels(node, labels, nodename)
+		if len(labels) > 0 {
+			c.applyLabels(node, labels, nodename)
+		}
 
 		return nil
 	}
 
-	return c.nodeInformer.UpdateNode(ctx, nodename, updateFn)
+	return c.UpdateNode(ctx, nodename, updateFn)
 }
 
 func (c *FaultQuarantineClient) applyTaints(node *v1.Node, taints []config.Taint, nodename string) error {
-	if len(taints) == 0 {
-		return nil
-	}
-
 	existingTaints := make(map[config.Taint]v1.Taint)
 	for _, taint := range node.Spec.Taints {
 		existingTaints[config.Taint{Key: taint.Key, Value: taint.Value, Effect: string(taint.Effect)}] = taint
@@ -220,11 +250,7 @@ func (c *FaultQuarantineClient) applyTaints(node *v1.Node, taints []config.Taint
 	return nil
 }
 
-func (c *FaultQuarantineClient) handleCordon(node *v1.Node, isCordon bool, nodename string) bool {
-	if !isCordon {
-		return false
-	}
-
+func (c *FaultQuarantineClient) handleCordon(node *v1.Node, nodename string) bool {
 	_, exist := node.Annotations[common.QuarantineHealthEventAnnotationKey]
 	if node.Spec.Unschedulable {
 		if exist {
@@ -245,10 +271,6 @@ func (c *FaultQuarantineClient) handleCordon(node *v1.Node, isCordon bool, noden
 }
 
 func (c *FaultQuarantineClient) applyAnnotations(node *v1.Node, annotations map[string]string, nodename string) {
-	if len(annotations) == 0 {
-		return
-	}
-
 	if node.Annotations == nil {
 		node.Annotations = make(map[string]string)
 	}
@@ -261,10 +283,6 @@ func (c *FaultQuarantineClient) applyAnnotations(node *v1.Node, annotations map[
 }
 
 func (c *FaultQuarantineClient) applyLabels(node *v1.Node, labels map[string]string, nodename string) {
-	if len(labels) == 0 {
-		return
-	}
-
 	if node.Labels == nil {
 		node.Labels = make(map[string]string)
 	}
@@ -285,27 +303,35 @@ func (c *FaultQuarantineClient) UnTaintAndUnCordonNodeAndRemoveAnnotations(
 	labels map[string]string,
 ) error {
 	updateFn := func(node *v1.Node) error {
-		if shouldReturn := c.removeTaints(node, taints, nodename); shouldReturn {
-			return nil
+		if len(taints) > 0 {
+			if shouldReturn := c.removeTaints(node, taints, nodename); shouldReturn {
+				return nil
+			}
 		}
 
 		c.handleUncordon(node, labels, nodename)
 
-		c.removeAnnotations(node, annotationKeys, nodename)
+		if len(annotationKeys) > 0 {
+			for _, annotationKey := range annotationKeys {
+				slog.Info("Removing annotation key from node", "key", annotationKey, "node", nodename)
+				delete(node.Annotations, annotationKey)
+			}
+		}
 
-		c.removeLabels(node, labelsToRemove, nodename)
+		if len(labelsToRemove) > 0 {
+			for _, labelKey := range labelsToRemove {
+				slog.Info("Removing label key from node", "key", labelKey, "node", nodename)
+				delete(node.Labels, labelKey)
+			}
+		}
 
 		return nil
 	}
 
-	return c.nodeInformer.UpdateNode(ctx, nodename, updateFn)
+	return c.UpdateNode(ctx, nodename, updateFn)
 }
 
 func (c *FaultQuarantineClient) removeTaints(node *v1.Node, taints []config.Taint, nodename string) bool {
-	if len(taints) == 0 {
-		return false
-	}
-
 	taintsAlreadyPresentOnNodeMap := map[config.Taint]bool{}
 	for _, taint := range node.Spec.Taints {
 		taintsAlreadyPresentOnNodeMap[config.Taint{Key: taint.Key, Value: taint.Value, Effect: string(taint.Effect)}] = true
@@ -363,46 +389,6 @@ func (c *FaultQuarantineClient) handleUncordon(
 	}
 }
 
-func (c *FaultQuarantineClient) removeAnnotations(node *v1.Node, annotationKeys []string, nodename string) {
-	if len(annotationKeys) == 0 || node.Annotations == nil {
-		return
-	}
-
-	for _, annotationKey := range annotationKeys {
-		slog.Info("Removing annotation key from node", "key", annotationKey, "node", nodename)
-		delete(node.Annotations, annotationKey)
-	}
-}
-
-func (c *FaultQuarantineClient) removeLabels(node *v1.Node, labelsToRemove []string, nodename string) {
-	if len(labelsToRemove) == 0 {
-		return
-	}
-
-	for _, labelKey := range labelsToRemove {
-		slog.Info("Removing label key from node", "key", labelKey, "node", nodename)
-		delete(node.Labels, labelKey)
-	}
-}
-
-// UpdateNodeAnnotations updates only the specified annotations on a node without affecting other properties
-// Uses eventual consistency from the local node informer
-func (c *FaultQuarantineClient) UpdateNodeAnnotations(
-	ctx context.Context,
-	nodename string,
-	annotations map[string]string,
-) error {
-	err := c.nodeInformer.UpdateNodeAnnotations(ctx, nodename, annotations)
-	if err != nil {
-		slog.Error("Failed to update annotations for node", "node", nodename, "error", err)
-		return fmt.Errorf("failed to update annotations for node %s: %w", nodename, err)
-	}
-
-	slog.Info("Successfully updated annotations for node", "node", nodename)
-
-	return nil
-}
-
 // HandleManualUncordonCleanup atomically removes FQ annotations/taints/labels and adds manual uncordon annotation
 // This is used when a node is manually uncordoned while having FQ quarantine state
 func (c *FaultQuarantineClient) HandleManualUncordonCleanup(
@@ -413,37 +399,34 @@ func (c *FaultQuarantineClient) HandleManualUncordonCleanup(
 	annotationsToAdd map[string]string,
 	labelsToRemove []string,
 ) error {
-	updateFn := c.createManualUncordonUpdateFn(taintsToRemove, annotationsToRemove, annotationsToAdd, labelsToRemove)
+	updateFn := func(node *v1.Node) error {
+		if len(taintsToRemove) > 0 {
+			c.removeNodeTaints(node, taintsToRemove)
+		}
 
-	return c.nodeInformer.UpdateNode(ctx, nodename, updateFn)
-}
+		if len(annotationsToRemove) > 0 || len(annotationsToAdd) > 0 {
+			c.updateNodeAnnotationsForManualUncordon(node, annotationsToRemove, annotationsToAdd)
+		}
 
-func (c *FaultQuarantineClient) createManualUncordonUpdateFn(
-	taintsToRemove []config.Taint,
-	annotationsToRemove []string,
-	annotationsToAdd map[string]string,
-	labelsToRemove []string,
-) func(*v1.Node) error {
-	return func(node *v1.Node) error {
-		c.removeNodeTaints(node, taintsToRemove)
-		c.updateNodeAnnotationsForManualUncordon(node, annotationsToRemove, annotationsToAdd)
-		c.removeNodeLabels(node, labelsToRemove)
+		if len(labelsToRemove) > 0 {
+			for _, key := range labelsToRemove {
+				delete(node.Labels, key)
+			}
+		}
 
 		return nil
 	}
+
+	return c.UpdateNode(ctx, nodename, updateFn)
 }
 
 func (c *FaultQuarantineClient) removeNodeTaints(node *v1.Node, taintsToRemove []config.Taint) {
-	if len(taintsToRemove) == 0 {
-		return
-	}
-
-	taintsToRemoveMap := make(map[config.Taint]bool)
+	taintsToRemoveMap := make(map[config.Taint]bool, len(taintsToRemove))
 	for _, taint := range taintsToRemove {
 		taintsToRemoveMap[taint] = true
 	}
 
-	newTaints := []v1.Taint{}
+	newTaints := make([]v1.Taint, 0, len(node.Spec.Taints))
 
 	for _, taint := range node.Spec.Taints {
 		if !taintsToRemoveMap[config.Taint{Key: taint.Key, Value: taint.Value, Effect: string(taint.Effect)}] {
@@ -469,15 +452,5 @@ func (c *FaultQuarantineClient) updateNodeAnnotationsForManualUncordon(
 
 	for key, value := range annotationsToAdd {
 		node.Annotations[key] = value
-	}
-}
-
-func (c *FaultQuarantineClient) removeNodeLabels(node *v1.Node, labelsToRemove []string) {
-	if node.Labels == nil {
-		return
-	}
-
-	for _, key := range labelsToRemove {
-		delete(node.Labels, key)
 	}
 }

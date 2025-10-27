@@ -145,13 +145,14 @@ type StatusGetter func(eventID primitive.ObjectID) *store.Status
 func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.TomlConfig, cbConfig *breaker.CircuitBreakerConfig) (*Reconciler, *storeclientsdk.FakeChangeStreamWatcher, StatusGetter, breaker.CircuitBreaker) {
 	t.Helper()
 
-	fqClient := &informer.FaultQuarantineClient{
-		Clientset:  e2eTestClient,
-		DryRunMode: false,
-	}
-
 	nodeInformer, err := informer.NewNodeInformer(e2eTestClient, 0)
 	require.NoError(t, err)
+
+	fqClient := &informer.FaultQuarantineClient{
+		Clientset:    e2eTestClient,
+		DryRunMode:   false,
+		NodeInformer: nodeInformer,
+	}
 
 	stopCh := make(chan struct{})
 	t.Cleanup(func() { close(stopCh) })
@@ -160,9 +161,7 @@ func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.Tom
 
 	require.Eventually(t, nodeInformer.HasSynced, 10*time.Second, 100*time.Millisecond, "NodeInformer should sync")
 
-	fqClient.SetNodeInformer(nodeInformer)
-
-	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(tomlConfig.RuleSets, nodeInformer)
+	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(tomlConfig.RuleSets, fqClient.NodeInformer)
 	require.NoError(t, err)
 
 	var cb breaker.CircuitBreaker
@@ -201,7 +200,7 @@ func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.Tom
 		DryRun:                false,
 	}
 
-	r := NewReconciler(cfg, fqClient, cb, nodeInformer)
+	r := NewReconciler(cfg, fqClient, cb)
 
 	if tomlConfig.LabelPrefix != "" {
 		r.SetLabelKeys(tomlConfig.LabelPrefix)
@@ -230,7 +229,7 @@ func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.Tom
 	r.precomputeTaintInitKeys(ruleSetEvals, rulesetsConfig)
 
 	// Setup manual uncordon callback
-	nodeInformer.SetOnManualUncordonCallback(r.handleManualUncordon)
+	fqClient.NodeInformer.SetOnManualUncordonCallback(r.handleManualUncordon)
 
 	// Create mock watcher
 	mockWatcher := storeclientsdk.NewFakeChangeStreamWatcher()
@@ -2353,7 +2352,7 @@ func TestE2E_CircuitBreakerBasic(t *testing.T) {
 
 	// Wait for all nodes to be visible
 	require.Eventually(t, func() bool {
-		totalNodes, _, err := r.nodeInformer.GetNodeCounts()
+		totalNodes, _, err := r.k8sClient.NodeInformer.GetNodeCounts()
 		return err == nil && totalNodes == 10
 	}, 5*time.Second, 100*time.Millisecond, "NodeInformer should see all 10 nodes")
 
@@ -2471,7 +2470,7 @@ func TestE2E_CircuitBreakerSlidingWindow(t *testing.T) {
 
 	// Wait for all nodes to be visible
 	require.Eventually(t, func() bool {
-		totalNodes, _, err := r.nodeInformer.GetNodeCounts()
+		totalNodes, _, err := r.k8sClient.NodeInformer.GetNodeCounts()
 		return err == nil && totalNodes == 10
 	}, 5*time.Second, 100*time.Millisecond, "NodeInformer should see all 10 nodes")
 
@@ -2558,7 +2557,7 @@ func TestE2E_CircuitBreakerUniqueNodeTracking(t *testing.T) {
 
 	// Wait for all nodes to be visible
 	require.Eventually(t, func() bool {
-		totalNodes, _, err := r.nodeInformer.GetNodeCounts()
+		totalNodes, _, err := r.k8sClient.NodeInformer.GetNodeCounts()
 		return err == nil && totalNodes == 10
 	}, 5*time.Second, 100*time.Millisecond, "NodeInformer should see all 10 nodes")
 
@@ -3135,13 +3134,14 @@ func TestE2E_DryRunMode(t *testing.T) {
 	}
 
 	// Setup with DryRun=true
-	fqClient := &informer.FaultQuarantineClient{
-		Clientset:  e2eTestClient,
-		DryRunMode: true, // Enable dry run
-	}
-
 	nodeInformer, err := informer.NewNodeInformer(e2eTestClient, 0)
 	require.NoError(t, err)
+
+	fqClient := &informer.FaultQuarantineClient{
+		Clientset:    e2eTestClient,
+		DryRunMode:   true, // Enable dry run
+		NodeInformer: nodeInformer,
+	}
 
 	stopCh := make(chan struct{})
 	defer close(stopCh)
@@ -3150,9 +3150,7 @@ func TestE2E_DryRunMode(t *testing.T) {
 
 	require.Eventually(t, nodeInformer.HasSynced, 10*time.Second, 100*time.Millisecond, "NodeInformer should sync")
 
-	fqClient.SetNodeInformer(nodeInformer)
-
-	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(tomlConfig.RuleSets, nodeInformer)
+	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(tomlConfig.RuleSets, fqClient.NodeInformer)
 	require.NoError(t, err)
 
 	cfg := ReconcilerConfig{
@@ -3161,7 +3159,7 @@ func TestE2E_DryRunMode(t *testing.T) {
 		DryRun:                true, // Enable dry run
 	}
 
-	r := NewReconciler(cfg, fqClient, nil, nodeInformer)
+	r := NewReconciler(cfg, fqClient, nil)
 	r.SetLabelKeys(tomlConfig.LabelPrefix)
 	fqClient.SetLabelKeys(r.cordonedReasonLabelKey, r.uncordonedReasonLabelKey)
 

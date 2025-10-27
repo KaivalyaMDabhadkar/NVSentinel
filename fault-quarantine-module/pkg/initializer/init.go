@@ -45,7 +45,7 @@ type InitializationParams struct {
 type Components struct {
 	Reconciler     *reconciler.Reconciler
 	EventWatcher   *mongodb.EventWatcher
-	Informer       *informer.NodeInformer
+	K8sClient      *informer.FaultQuarantineClient
 	CircuitBreaker breaker.CircuitBreaker
 }
 
@@ -84,19 +84,12 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 		slog.Info("Running in dry-run mode")
 	}
 
-	k8sClient, err := informer.NewFaultQuarantineClient(params.KubeconfigPath, params.DryRun)
+	k8sClient, err := informer.NewFaultQuarantineClient(params.KubeconfigPath, params.DryRun, 30*time.Minute)
 	if err != nil {
 		return nil, fmt.Errorf("error while initializing kubernetes client: %w", err)
 	}
 
-	slog.Info("Successfully initialized kubernetes client")
-
-	nodeInformer, err := initializeNodeInformer(k8sClient)
-	if err != nil {
-		return nil, fmt.Errorf("error while initializing node informer: %w", err)
-	}
-
-	slog.Info("Successfully initialized node informer")
+	slog.Info("Successfully initialized kubernetes client with embedded node informer")
 
 	var circuitBreaker breaker.CircuitBreaker
 
@@ -129,7 +122,6 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 		reconcilerCfg,
 		k8sClient,
 		circuitBreaker,
-		nodeInformer,
 	)
 
 	healthEventCollection, err := initializeMongoCollection(ctx, mongoConfig)
@@ -153,7 +145,7 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 	return &Components{
 		Reconciler:     reconcilerInstance,
 		EventWatcher:   eventWatcher,
-		Informer:       nodeInformer,
+		K8sClient:      k8sClient,
 		CircuitBreaker: circuitBreaker,
 	}, nil
 }
@@ -292,22 +284,6 @@ func initializeMongoCollection(
 	}
 
 	return collection, nil
-}
-
-func initializeNodeInformer(
-	k8sClient *informer.FaultQuarantineClient,
-) (*informer.NodeInformer, error) {
-	nodeInformer, err := informer.NewNodeInformer(
-		k8sClient.GetK8sClient(),
-		30*time.Minute,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create node informer: %w", err)
-	}
-
-	k8sClient.SetNodeInformer(nodeInformer)
-
-	return nodeInformer, nil
 }
 
 func initializeCircuitBreaker(
