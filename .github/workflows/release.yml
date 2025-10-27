@@ -39,7 +39,7 @@ jobs:
     uses: ./.github/workflows/prepare-environment.yml
 
   build-image-list:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu32
     timeout-minutes: 30
     needs: prepare-environment
     steps:

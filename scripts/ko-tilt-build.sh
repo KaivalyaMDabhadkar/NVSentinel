@@ -30,11 +30,23 @@ EXPECTED_REF="$2"
 
 cd "$MODULE_DIR"
 
-# Build with ko to a temporary registry with a unique tag to avoid conflicts
-TEMP_TAG="tilt-$(date +%s)-$$"
-IMAGE=$(KO_DOCKER_REPO=ttl.sh/${TEMP_TAG} ko build --bare --platform=linux/amd64,linux/arm64 ./)
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)
+    PLATFORM="linux/amd64"
+    ;;
+  aarch64|arm64)
+    PLATFORM="linux/arm64"
+    ;;
+  *)
+    echo "Error: Unsupported architecture: $ARCH" >&2
+    exit 1
+    ;;
+esac
 
-# Copy the image to the local registry with the expected tag
-crane cp "$IMAGE" "$EXPECTED_REF"
+REPO="${EXPECTED_REF%:*}"
+TAG="${EXPECTED_REF##*:}"
+
+KO_DOCKER_REPO="$REPO" ko build --bare --platform=${PLATFORM} --tags="$TAG" ./
 
 echo "$EXPECTED_REF"

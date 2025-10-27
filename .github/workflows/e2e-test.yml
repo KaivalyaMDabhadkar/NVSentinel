@@ -45,7 +45,6 @@ permissions:
   actions: read        # Required for artifact operations
 
 env:
-  # E2E-specific tool versions (not duplicated elsewhere)
   KIND_VERSION: '0.30.0'
   CTLPTL_VERSION: '0.8.43'
   TILT_VERSION: '0.35.2'
@@ -55,7 +54,6 @@ jobs:
     uses: ./.github/workflows/prepare-environment.yml
 
   e2e-test:
-    # Run E2E tests on both AMD64 and ARM64 architectures in parallel
     strategy:
       fail-fast: false  # Allow both architectures to complete even if one fails
       matrix:
@@ -227,12 +225,6 @@ jobs:
         run: |
           make cluster-create
 
-      - name: Override MongoDB image for ARM64
-        if: matrix.arch == 'arm64'
-        run: |
-          sed -i 's/repository: "bitnamilegacy\/mongodb"/repository: "dlavrenuek\/bitnami-mongodb-arm"/' distros/kubernetes/nvsentinel/values-tilt.yaml
-          sed -i 's/tag: "8.0.3-debian-12-r1"/tag: "8.0.4"/' distros/kubernetes/nvsentinel/values-tilt.yaml
-
       - name: Run E2E tests
         env:
           CI_COMMIT_REF_NAME: ${{ steps.ref-name.outputs.value }}
@@ -290,13 +282,8 @@ jobs:
       - name: Cleanup Docker resources
         if: always()
         run: |
-          # Remove all containers (running and stopped)
           docker rm -f $(docker ps -a -q) || true
-          # Remove all images
           docker rmi -f $(docker images -q -a) || true
-          # Remove all volumes
           docker volume prune -f || true
-          # Remove all networks (except default ones)
           docker network prune -f || true
-          # Clean up build cache
           docker builder prune -f || true

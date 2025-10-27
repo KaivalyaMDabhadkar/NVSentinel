@@ -42,7 +42,7 @@ jobs:
     uses: ./.github/workflows/prepare-environment.yml
 
   simple-lint:
-    runs-on: linux-amd64-cpu4
+    runs-on: linux-amd64-cpu16
     timeout-minutes: 30
     needs: prepare-environment
     strategy:
@@ -103,7 +103,7 @@ jobs:
         run: make helm-lint
 
   health-monitors-lint-test:
-    runs-on: linux-amd64-cpu4
+    runs-on: linux-amd64-cpu16
     timeout-minutes: 30
     needs: prepare-environment
     strategy:
@@ -132,7 +132,6 @@ jobs:
           black-version: ${{ needs.prepare-environment.outputs.black_version }}
           shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
           ko-version: ${{ needs.prepare-environment.outputs.ko_version }}
-          install-dcgm: ${{ matrix.install_dcgm || 'false' }}
 
       - name: Run lint and test
         run: make -C health-monitors/${{ matrix.component }} lint-test
@@ -148,7 +147,7 @@ jobs:
 
 
   modules-lint-test:
-    runs-on: linux-amd64-cpu4
+    runs-on: linux-amd64-cpu16
     timeout-minutes: 30
     needs: prepare-environment
     strategy:
@@ -196,7 +195,7 @@ jobs:
 
   consolidated-coverage-report:
     if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/')
-    runs-on: linux-amd64-cpu4
+    runs-on: linux-amd64-cpu16
     timeout-minutes: 15
     needs: [health-monitors-lint-test, modules-lint-test]
     steps:
@@ -393,7 +392,7 @@ jobs:
 
   consolidated-coverage-baseline:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    runs-on: linux-amd64-cpu4
+    runs-on: linux-amd64-cpu16
     timeout-minutes: 15
     needs: [health-monitors-lint-test, modules-lint-test]
     steps:

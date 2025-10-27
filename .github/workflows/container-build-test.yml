@@ -17,7 +17,6 @@ name: Container Build Validation
 on:
   push:
     branches:
-      - main
       - "pull-request/[0-9]+"
     paths:
       # Container-related files
@@ -35,12 +34,6 @@ on:
       - '.github/actions/build-container/**'
       - '.github/actions/setup-build-env/**'
   workflow_dispatch:
-    inputs:
-      components:
-        description: 'Comma-separated list of components to build (leave empty for all)'
-        required: false
-        default: ''
-        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -56,7 +49,7 @@ jobs:
     uses: ./.github/workflows/prepare-environment.yml
 
   container-build-test:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu32
     timeout-minutes: 45
     needs: prepare-environment
     strategy:
@@ -78,24 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check if component should be built
-        id: should-build
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            components="${{ github.event.inputs.components }}"
-            if [[ -z "$components" ]]; then
-              echo "build=true" >> $GITHUB_OUTPUT
-            elif [[ "$components" == *"${{ matrix.component }}"* ]]; then
-              echo "build=true" >> $GITHUB_OUTPUT
-            else
-              echo "build=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "build=true" >> $GITHUB_OUTPUT
-          fi
-
       - name: Setup build environment
-        if: steps.should-build.outputs.build == 'true'
         uses: ./.github/actions/setup-build-env
         with:
           go-version: ${{ needs.prepare-environment.outputs.go_version }}
@@ -111,22 +87,15 @@ jobs:
           ko-version: ${{ needs.prepare-environment.outputs.ko_version }}
 
       - name: Build container for ${{ matrix.component }}
-        if: steps.should-build.outputs.build == 'true'
         run: echo "Building container for ${{ matrix.component }}..."
 
-      - name: Skip component
-        if: steps.should-build.outputs.build == 'false'
-        run: echo "Skipping ${{ matrix.component }} (not in selected components list)"
-
       - name: Compute ref name with short SHA
-        if: steps.should-build.outputs.build == 'true'
         id: ref-name
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
           echo "value=${{ github.ref_name }}-${SHORT_SHA}" >> $GITHUB_OUTPUT
 
       - name: Execute build
-        if: steps.should-build.outputs.build == 'true'
         uses: ./.github/actions/build-container
         env:
           CI_COMMIT_REF_NAME: ${{ steps.ref-name.outputs.value }}
@@ -140,7 +109,7 @@ jobs:
 
   # Test ko-based builds (Go modules)
   ko-build-test:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu32
     timeout-minutes: 30
     needs: prepare-environment
     strategy:
@@ -188,7 +157,7 @@ jobs:
           KO_DOCKER_REPO: ko.local
 
   container-build-summary:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu32
     needs: [container-build-test, ko-build-test]
     if: always()
     steps:

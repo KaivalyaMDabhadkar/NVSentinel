@@ -167,8 +167,7 @@ global:
 
   # Image pull secrets for accessing private container registries
   # Must be created in the namespace before deploying NVSentinel
-  imagePullSecrets:
-    - name: nvidia-ngcuser-pull-secret
+  imagePullSecrets: []
 
   # MongoDB Store configuration - provides persistent storage for health events and state
   mongodbStore:

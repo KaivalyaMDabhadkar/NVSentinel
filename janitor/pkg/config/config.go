@@ -14,7 +14,31 @@
 
 package config
 
-import "time"
+import (
+	"fmt"
+	"time"
+
+	"github.com/spf13/viper"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// Config represents the janitor configuration structure
+type Config struct {
+	Global     GlobalConfig               `mapstructure:"global" json:"global"`
+	RebootNode RebootNodeControllerConfig `mapstructure:"rebootNodeController" json:"rebootNodeController"`
+}
+
+// GlobalConfig contains global janitor settings
+type GlobalConfig struct {
+	Timeout    time.Duration `mapstructure:"timeout" json:"timeout"`
+	ManualMode bool          `mapstructure:"manualMode" json:"manualMode"`
+	Nodes      NodeConfig    `mapstructure:"nodes" json:"nodes"`
+}
+
+// NodeConfig contains configuration for nodes
+type NodeConfig struct {
+	Exclusions []metav1.LabelSelector `mapstructure:"exclusions" json:"exclusions"`
+}
 
 // RebootNodeControllerConfig contains configuration for reboot node controller
 type RebootNodeControllerConfig struct {
@@ -22,4 +46,54 @@ type RebootNodeControllerConfig struct {
 	ManualMode bool
 	// Timeout for reboot operations
 	Timeout time.Duration
+	// NodeExclusions defines label selectors for nodes that should be excluded from reboot operations
+	// Nodes matching any of these label selectors will be rejected by the admission webhook
+	NodeExclusions []metav1.LabelSelector
+}
+
+// LoadConfig loads configuration from a YAML file using Viper
+func LoadConfig(configPath string) (*Config, error) {
+	v := viper.New()
+
+	if configPath != "" {
+		v.SetConfigFile(configPath)
+	} else {
+		v.SetConfigName("janitor-config")
+		v.SetConfigType("yaml")
+		v.AddConfigPath(".")
+		v.AddConfigPath("/etc/nvsentinel/janitor/")
+		v.AddConfigPath("$HOME/.nvsentinel/janitor/")
+	}
+
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok { //nolint:errorlint
+			// File not found, using defaults
+		} else {
+			return nil, fmt.Errorf("failed to read config file: %w", err)
+		}
+	}
+
+	var config Config
+	if err := v.Unmarshal(&config); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	config = applyEffectiveConfig(config)
+
+	return &config, nil
+}
+
+// applyEffectiveConfig applies inheritance and overrides to the configuration
+func applyEffectiveConfig(config Config) Config {
+	if config.RebootNode.Timeout == 0 {
+		config.RebootNode.Timeout = config.Global.Timeout
+	}
+
+	if config.Global.ManualMode {
+		config.RebootNode.ManualMode = true
+	}
+
+	config.RebootNode.NodeExclusions = config.Global.Nodes.Exclusions
+
+	return config
 }

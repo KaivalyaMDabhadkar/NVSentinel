@@ -1,0 +1,51 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "janitor.fullname" . }}-config
+  labels:
+    {{- include "janitor.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    global:
+      timeout: {{ .Values.config.timeout | default "30m" }}
+      manualMode: {{ .Values.config.manualMode | default false }}
+      {{- if .Values.config.nodes.exclusions }}
+      nodes:
+        exclusions:
+        {{- range .Values.config.nodes.exclusions }}
+          - matchLabels:
+            {{- range $key, $value := .matchLabels }}
+              {{ $key }}: {{ $value | quote }}
+            {{- end }}
+            {{- if .matchExpressions }}
+            matchExpressions:
+            {{- range .matchExpressions }}
+              - key: {{ .key }}
+                operator: {{ .operator }}
+                {{- if .values }}
+                values:
+                {{- range .values }}
+                  - {{ . | quote }}
+                {{- end }}
+                {{- end }}
+            {{- end }}
+            {{- end }}
+        {{- end }}
+      {{- end }}
+    
+    rebootNodeController:
+      timeout: {{ .Values.config.controllers.rebootNode.timeout | default .Values.config.timeout }}
+

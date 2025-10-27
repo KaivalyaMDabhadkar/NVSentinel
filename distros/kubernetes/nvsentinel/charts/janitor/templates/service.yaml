@@ -25,4 +25,8 @@ spec:
     - name: metrics
       port: {{ ((.Values.global).metricsPort) | default 8080 }}
       targetPort: metrics
+    - name: webhook
+      port: {{ .Values.webhook.port }}
+      targetPort: webhook
+      protocol: TCP
 

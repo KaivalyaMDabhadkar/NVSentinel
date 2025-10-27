@@ -15,6 +15,10 @@
 name: Prepare Environment
 
 on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
   workflow_call:
     outputs:
       # Tool versions outputs
@@ -54,7 +58,7 @@ on:
 
 jobs:
   load-versions:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu32
     timeout-minutes: 5
     outputs:
       go_version: ${{ steps.load-versions.outputs.go_version }}

@@ -14,8 +14,7 @@
 
 mongodb:
   global:
-    imagePullSecrets:
-      - nvidia-ngcuser-pull-secret
+    imagePullSecrets: []
   image:
     registry: docker.io
     repository: bitnamilegacy/mongodb
@@ -188,8 +187,7 @@ mongodb:
       registry: docker.io
       repository: bitnamilegacy/mongodb-exporter
       tag: 0.41.2-debian-12-r1
-      pullSecrets:
-      - nvidia-ngcuser-pull-secret
+      pullSecrets: []
     command:
       - /bin/bash
       - -ec

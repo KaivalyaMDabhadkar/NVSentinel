@@ -44,7 +44,7 @@ jobs:
     uses: ./.github/workflows/prepare-environment.yml
 
   build-image-list:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu32
     timeout-minutes: 60
     needs: prepare-environment
     outputs:
@@ -167,7 +167,7 @@ jobs:
   # Build images using ko and attest provenance
   # Once validated, this will replace the container-publish job above
   build-images:
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu32
     timeout-minutes: 60
     needs: prepare-environment
     permissions:
@@ -177,13 +177,14 @@ jobs:
       attestations: write
     env:
       KO_DOCKER_REPO: ghcr.io/${{ github.repository }}
-      VERSION: ${{ github.ref_name }}
       GIT_COMMIT: ${{ github.sha }}
     outputs:
       images: ${{ steps.ko-build.outputs.images }}
     steps:
       - name: Checkout Code
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
 
       - name: Setup build environment
         uses: ./.github/actions/setup-build-env
@@ -200,6 +201,18 @@ jobs:
           shellcheck-version: ${{ needs.prepare-environment.outputs.shellcheck_version }}
           ko-version: ${{ needs.prepare-environment.outputs.ko_version }}
 
+      - name: Compute ref name with short SHA
+        id: ref-name
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "value=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "value=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          else
+            SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+            echo "value=${{ github.ref_name }}-${SHORT_SHA}" >> $GITHUB_OUTPUT
+          fi
+
       # ko is already installed in the setup-ci-tools action
       - name: Authenticate to GHCR
         shell: bash
@@ -207,11 +220,13 @@ jobs:
 
       - name: Build Using Ko
         id: ko-build
+        env:
+          VERSION: ${{ steps.ref-name.outputs.value }}
         run: scripts/buildko.sh
 
   attest:
     needs: build-images
-    runs-on: ubuntu-latest
+    runs-on: linux-amd64-cpu32
     permissions:
       packages: write
       id-token: write

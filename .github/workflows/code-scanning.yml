@@ -35,7 +35,7 @@ jobs:
   codeql-pr-analysis:
     if: startsWith(github.ref, 'refs/heads/pull-request/')
     name: CodeQL PR Analysis
-    runs-on: linux-amd64-cpu4
+    runs-on: linux-amd64-cpu32
     timeout-minutes: 360
     needs: prepare-environment
     permissions:

@@ -40,6 +40,14 @@ spec:
         - name: janitor
           image: "{{ .Values.global.janitor.image.repository | default "ghcr.io/nvidia/nvsentinel/janitor" }}:{{ ((.Values.global).image).tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ ((.Values.global).janitor).image.pullPolicy | default "IfNotPresent" }}
+          args:
+            - "--metrics-bind-address=:{{ ((.Values.global).metricsPort) | default 2112 }}"
+            - "--health-probe-bind-address=:8081"
+            - "--config=/etc/nvsentinel/janitor/config.yaml"
+            - "--webhook-port={{ .Values.webhook.port }}"
+            - "--webhook-cert-path={{ .Values.webhook.certDir }}"
+            - "--webhook-cert-name=tls.crt"
+            - "--webhook-cert-key=tls.key"
           env:
             # Cloud Service Provider configuration
             - name: CSP
@@ -101,7 +109,26 @@ spec:
           ports:
             - name: metrics
               containerPort: {{ ((.Values.global).metricsPort) | default 2112 }}
+            - name: webhook
+              containerPort: {{ .Values.webhook.port }}
+              protocol: TCP
+          volumeMounts:
+            - name: config
+              mountPath: /etc/nvsentinel/janitor/config.yaml
+              subPath: config.yaml
+              readOnly: true
+            - name: webhook-certs
+              mountPath: {{ .Values.webhook.certDir }}
+              readOnly: true
       restartPolicy: Always
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "janitor.fullname" . }}-config
+        - name: webhook-certs
+          secret:
+            secretName: {{ include "janitor.fullname" . }}-webhook-cert
+            defaultMode: 420
       {{- with (((.Values.global).systemNodeSelector) | default .Values.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

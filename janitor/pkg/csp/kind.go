@@ -32,7 +32,7 @@ type kindClient struct{}
 func (c *kindClient) SendRebootSignal(ctx context.Context, node corev1.Node) (ResetSignalRequestRef, error) {
 	// nolint:gosec // G404: Using weak random for simulation is acceptable
 	// wait some random time to simulate a real csp (very short for fast tests)
-	time.Sleep(time.Duration(rand.IntN(3)) * time.Second)
+	time.Sleep(time.Duration(3+rand.IntN(3)) * time.Second)
 
 	return "", nil
 }

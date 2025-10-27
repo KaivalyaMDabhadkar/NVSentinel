@@ -23,10 +23,7 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    - from:
-        - podSelector: {}
-        - namespaceSelector: {}
-      ports:
+    - ports:
         - protocol: TCP
           port: {{ .Values.global.metricsPort }}
         - protocol: TCP

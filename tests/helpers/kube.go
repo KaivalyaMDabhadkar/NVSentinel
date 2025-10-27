@@ -580,3 +580,33 @@ func GetPodsOnNode(ctx context.Context, client *resources.Resources, nodeName st
 
 	return podList.Items, nil
 }
+
+// CreateRebootNodeCR creates a RebootNode custom resource for the specified node.
+// Returns the created CR object and any error that occurred.
+// If creation fails (e.g., webhook rejection), the error is returned for the caller to inspect.
+func CreateRebootNodeCR(
+	ctx context.Context,
+	c klient.Client,
+	nodeName string,
+	crName string,
+) (*unstructured.Unstructured, error) {
+	rebootNode := &unstructured.Unstructured{}
+	rebootNode.SetGroupVersionKind(schema.GroupVersionKind{
+		Group:   "janitor.dgxc.nvidia.com",
+		Version: "v1alpha1",
+		Kind:    "RebootNode",
+	})
+	rebootNode.SetName(crName)
+
+	err := unstructured.SetNestedField(rebootNode.Object, nodeName, "spec", "nodeName")
+	if err != nil {
+		return nil, fmt.Errorf("failed to set nodeName in spec: %w", err)
+	}
+
+	err = c.Resources().Create(ctx, rebootNode)
+	if err != nil {
+		return nil, err
+	}
+
+	return rebootNode, nil
+}
