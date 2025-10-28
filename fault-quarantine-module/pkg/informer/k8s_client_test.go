@@ -40,15 +40,12 @@ const (
 )
 
 var (
-	testClient     *kubernetes.Clientset
-	testContext    context.Context
-	testCancelFunc context.CancelFunc
-	testEnv        *envtest.Environment
+	testClient *kubernetes.Clientset
+	testEnv    *envtest.Environment
 )
 
 func TestMain(m *testing.M) {
 	var err error
-	testContext, testCancelFunc = context.WithCancel(context.Background())
 
 	testEnv = &envtest.Environment{}
 
@@ -64,7 +61,6 @@ func TestMain(m *testing.M) {
 
 	exitCode := m.Run()
 
-	testCancelFunc()
 	if err := testEnv.Stop(); err != nil {
 		log.Fatalf("Failed to stop test environment: %v", err)
 	}
@@ -323,7 +319,11 @@ func TestTaintAndCordonNode_NoChanges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
-	updatedNode, _ := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+
+	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get updated node: %v", err)
+	}
 
 	// envtest may add automatic taints, so we just verify no custom taints were added
 	// The function should not have added any custom taints
@@ -351,7 +351,10 @@ func TestUnTaintAndUnCordonNode_NoChanges(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	updatedNode, _ := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get updated node: %v", err)
+	}
 
 	// Function always uncordons, so node should be schedulable
 	if updatedNode.Spec.Unschedulable {
@@ -384,7 +387,10 @@ func TestUnTaintAndUnCordonNode_PartialTaintRemoval(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	updatedNode, _ := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get updated node: %v", err)
+	}
 
 	// Filter to test taints only (ignore automatic envtest taints)
 	var testTaints []v1.Taint
@@ -432,7 +438,11 @@ func TestUnTaintAndUnCordonNode_PartialAnnotationRemoval(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	updatedNode, _ := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get updated node: %v", err)
+	}
+
 	if updatedNode.Annotations["annotation1"] != "" {
 		t.Errorf("Expected annotation1 to be removed")
 	}
@@ -465,7 +475,10 @@ func TestTaintAndCordonNode_AlreadyTaintedCordoned(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	updatedNode, _ := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get updated node: %v", err)
+	}
 
 	// Filter to test taint only (ignore automatic envtest taints)
 	var testTaints []v1.Taint
@@ -498,7 +511,10 @@ func TestUnTaintAndUnCordonNode_AlreadyUntaintedUncordoned(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	updatedNode, _ := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get updated node: %v", err)
+	}
 
 	// Function always uncordons, so node should be schedulable
 	if updatedNode.Spec.Unschedulable {
@@ -544,7 +560,11 @@ func TestTaintAndCordonNode_OverwriteAnnotation(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	updatedNode, _ := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get updated node: %v", err)
+	}
+
 	if updatedNode.Annotations["existing-key"] != "new-value" {
 		t.Errorf("Annotation value was not updated correctly")
 	}
@@ -571,7 +591,10 @@ func TestUnTaintAndUnCordonNode_NonExistentTaintRemoval(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	updatedNode, _ := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get updated node: %v", err)
+	}
 
 	// Filter to test taint only (ignore automatic envtest taints)
 	var testTaints []v1.Taint
@@ -607,7 +630,11 @@ func TestUnTaintAndUnCordonNode_NonExistentAnnotationRemoval(t *testing.T) {
 		t.Fatalf("Expected no error, got %v", err)
 	}
 
-	updatedNode, _ := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("Failed to get updated node: %v", err)
+	}
+
 	// Original annotation should remain
 	if updatedNode.Annotations["annotation1"] != "val1" {
 		t.Errorf("Non-existent annotation removal should not affect existing annotations")

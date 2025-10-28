@@ -25,7 +25,7 @@ import (
 // FakeChangeStreamWatcher provides a fake implementation of the ChangeStreamWatcher
 // for testing purposes. It allows customization of behavior through function fields.
 type FakeChangeStreamWatcher struct {
-	// EventsChan is the channel that Events() returns
+	// EventsChan is the buffered channel (buffer size 10) that Events() returns
 	EventsChan chan bson.M
 
 	// Function fields allow customization of mock behavior
@@ -83,25 +83,23 @@ func (m *FakeChangeStreamWatcher) Events() <-chan bson.M {
 // Start executes the configured Start function and tracks the call.
 func (m *FakeChangeStreamWatcher) Start(ctx context.Context) {
 	m.mu.Lock()
-	m.StartCalled++
-	fn := m.StartFn
-	m.mu.Unlock()
+	defer m.mu.Unlock()
 
-	if fn != nil {
-		fn(ctx)
+	m.StartCalled++
+	if m.StartFn != nil {
+		m.StartFn(ctx)
 	}
 }
 
 // MarkProcessed executes the configured MarkProcessed function and tracks the call.
 func (m *FakeChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.MarkProcessedCalled++
 	m.LastMarkProcessedCtx = ctx
-	fn := m.MarkProcessedFn
-	m.mu.Unlock()
-
-	if fn != nil {
-		return fn(ctx)
+	if m.MarkProcessedFn != nil {
+		return m.MarkProcessedFn(ctx)
 	}
 
 	return nil
@@ -110,13 +108,12 @@ func (m *FakeChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
 // Close executes the configured Close function and tracks the call.
 func (m *FakeChangeStreamWatcher) Close(ctx context.Context) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.CloseCalled++
 	m.LastCloseCtx = ctx
-	fn := m.CloseFn
-	m.mu.Unlock()
-
-	if fn != nil {
-		return fn(ctx)
+	if m.CloseFn != nil {
+		return m.CloseFn(ctx)
 	}
 
 	return nil
@@ -129,15 +126,14 @@ func (m *FakeChangeStreamWatcher) GetUnprocessedEventCount(
 	additionalFilters ...bson.M,
 ) (int64, error) {
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.GetUnprocessedEventCountCalled++
 	m.LastGetUnprocessedEventCountCtx = ctx
 	m.LastGetUnprocessedEventCountID = lastProcessedID
 	m.LastGetUnprocessedEventCountFilters = additionalFilters
-	fn := m.GetUnprocessedEventCountFn
-	m.mu.Unlock()
-
-	if fn != nil {
-		return fn(ctx, lastProcessedID, additionalFilters...)
+	if m.GetUnprocessedEventCountFn != nil {
+		return m.GetUnprocessedEventCountFn(ctx, lastProcessedID, additionalFilters...)
 	}
 
 	return 0, nil

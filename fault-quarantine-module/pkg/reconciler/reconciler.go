@@ -26,6 +26,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/breaker"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
@@ -35,8 +37,6 @@ import (
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/informer"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/metrics"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/mongodb"
-	storeconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
-	"github.com/nvidia/nvsentinel/statemanager"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -154,7 +154,7 @@ func (r *Reconciler) Start(ctx context.Context) error {
 	}
 
 	r.eventWatcher.SetProcessEventCallback(
-		func(ctx context.Context, event *storeconnector.HealthEventWithStatus) *storeconnector.Status {
+		func(ctx context.Context, event *model.HealthEventWithStatus) *model.Status {
 			return r.ProcessEvent(ctx, event, ruleSetEvals, rulesetsConfig)
 		},
 	)
@@ -295,10 +295,10 @@ func (r *Reconciler) checkCircuitBreakerAtStartup(ctx context.Context) error {
 // ProcessEvent processes a single health event
 func (r *Reconciler) ProcessEvent(
 	ctx context.Context,
-	event *storeconnector.HealthEventWithStatus,
+	event *model.HealthEventWithStatus,
 	ruleSetEvals []evaluator.RuleSetEvaluatorIface,
 	rulesetsConfig rulesetsConfig,
-) *storeconnector.Status {
+) *model.Status {
 	if shouldHalt := r.checkCircuitBreakerAndHalt(ctx); shouldHalt {
 		return nil
 	}
@@ -311,9 +311,9 @@ func (r *Reconciler) ProcessEvent(
 		// Event was skipped (no quarantine action taken)
 		slog.Debug("Skipped processing event for node, no status update needed", "node", event.HealthEvent.NodeName)
 		metrics.TotalEventsSkipped.Inc()
-	} else if *isNodeQuarantined == storeconnector.Quarantined ||
-		*isNodeQuarantined == storeconnector.UnQuarantined ||
-		*isNodeQuarantined == storeconnector.AlreadyQuarantined {
+	} else if *isNodeQuarantined == model.Quarantined ||
+		*isNodeQuarantined == model.UnQuarantined ||
+		*isNodeQuarantined == model.AlreadyQuarantined {
 		metrics.TotalEventsSuccessfullyProcessed.Inc()
 	}
 
@@ -346,10 +346,10 @@ func (r *Reconciler) checkCircuitBreakerAndHalt(ctx context.Context) bool {
 
 func (r *Reconciler) handleEvent(
 	ctx context.Context,
-	event *storeconnector.HealthEventWithStatus,
+	event *model.HealthEventWithStatus,
 	ruleSetEvals []evaluator.RuleSetEvaluatorIface,
 	rulesetsConfig rulesetsConfig,
-) *storeconnector.Status {
+) *model.Status {
 	annotations, quarantineAnnotationExists := r.hasExistingQuarantine(event.HealthEvent.NodeName)
 
 	if quarantineAnnotationExists {
@@ -418,15 +418,15 @@ func (r *Reconciler) handleAlreadyQuarantinedNode(
 	ctx context.Context,
 	event *protos.HealthEvent,
 	ruleSetEvals []evaluator.RuleSetEvaluatorIface,
-) *storeconnector.Status {
-	var status storeconnector.Status
+) *model.Status {
+	var status model.Status
 
 	// Delegate to handleQuarantinedNode which decides whether to keep the node
 	// quarantined or un-quarantine based on the incoming event
 	if r.handleQuarantinedNode(ctx, event, ruleSetEvals) {
-		status = storeconnector.AlreadyQuarantined
+		status = model.AlreadyQuarantined
 	} else {
-		status = storeconnector.UnQuarantined
+		status = model.UnQuarantined
 	}
 
 	return &status
@@ -434,7 +434,7 @@ func (r *Reconciler) handleAlreadyQuarantinedNode(
 
 // evaluateRulesets evaluates all rulesets against the health event in parallel
 func (r *Reconciler) evaluateRulesets(
-	event *storeconnector.HealthEventWithStatus,
+	event *model.HealthEventWithStatus,
 	ruleSetEvals []evaluator.RuleSetEvaluatorIface,
 	rulesetsConfig rulesetsConfig,
 	taintAppliedMap map[keyValTaint]string,
@@ -602,13 +602,13 @@ func (r *Reconciler) prepareAnnotations(
 // applyQuarantine applies quarantine actions to a node (taints, cordon, annotations)
 func (r *Reconciler) applyQuarantine(
 	ctx context.Context,
-	event *storeconnector.HealthEventWithStatus,
+	event *model.HealthEventWithStatus,
 	annotations map[string]string,
 	taintsToBeApplied []config.Taint,
 	annotationsMap map[string]string,
 	labelsMap *sync.Map,
 	isCordoned *atomic.Bool,
-) *storeconnector.Status {
+) *model.Status {
 	// Record an event to sliding window before actually quarantining
 	r.recordCordonEventInCircuitBreaker(event)
 
@@ -665,13 +665,13 @@ func (r *Reconciler) applyQuarantine(
 
 	r.updateQuarantineMetrics(event.HealthEvent.NodeName, taintsToBeApplied, isCordoned)
 
-	status := storeconnector.Quarantined
+	status := model.Quarantined
 
 	return &status
 }
 
 // recordCordonEventInCircuitBreaker records a cordon event in the circuit breaker if enabled
-func (r *Reconciler) recordCordonEventInCircuitBreaker(event *storeconnector.HealthEventWithStatus) {
+func (r *Reconciler) recordCordonEventInCircuitBreaker(event *model.HealthEventWithStatus) {
 	if r.config.CircuitBreakerEnabled &&
 		(event.HealthEvent.QuarantineOverrides == nil || !event.HealthEvent.QuarantineOverrides.Force) {
 		r.cb.AddCordonEvent(event.HealthEvent.NodeName)

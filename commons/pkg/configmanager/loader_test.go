@@ -59,3 +59,36 @@ enabled = true
 		t.Error("expected enabled to be true")
 	}
 }
+
+func TestLoadTOMLConfigNonExistentFile(t *testing.T) {
+	t.Parallel()
+
+	var cfg testTOMLConfig
+
+	err := LoadTOMLConfig("/path/that/does/not/exist/config.toml", &cfg)
+	if err == nil {
+		t.Fatal("expected error for non-existent file, got nil")
+	}
+}
+
+func TestLoadTOMLConfigInvalidSyntax(t *testing.T) {
+	t.Parallel()
+
+	invalidTOML := `name = "test"
+port = this is not valid toml
+enabled = true
+`
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "invalid_config.toml")
+	if err := os.WriteFile(configPath, []byte(invalidTOML), 0600); err != nil {
+		t.Fatalf("failed to write test config: %v", err)
+	}
+
+	var cfg testTOMLConfig
+
+	err := LoadTOMLConfig(configPath, &cfg)
+	if err == nil {
+		t.Fatal("expected error for invalid TOML syntax, got nil")
+	}
+}

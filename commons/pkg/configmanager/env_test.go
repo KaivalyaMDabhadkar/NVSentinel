@@ -16,7 +16,6 @@ package configmanager
 
 import (
 	"fmt"
-	"os"
 	"testing"
 )
 
@@ -227,8 +226,4 @@ func TestGetEnvVarAllSupportedTypes(t *testing.T) {
 			t.Errorf("string test failed: %v, got %s", err, value)
 		}
 	})
-}
-
-func TestMain(m *testing.M) {
-	os.Exit(m.Run())
 }

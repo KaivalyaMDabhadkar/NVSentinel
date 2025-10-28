@@ -20,8 +20,8 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/metrics"
-	storeconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
 	"github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -36,8 +36,8 @@ type EventWatcher struct {
 	watcher              *storewatcher.ChangeStreamWatcher
 	processEventCallback func(
 		ctx context.Context,
-		event *storeconnector.HealthEventWithStatus,
-	) *storeconnector.Status
+		event *model.HealthEventWithStatus,
+	) *model.Status
 	unprocessedEventsMetricUpdateInterval time.Duration
 	lastProcessedObjectID                 LastProcessedObjectIDStore
 }
@@ -52,8 +52,8 @@ type EventWatcherInterface interface {
 	SetProcessEventCallback(
 		callback func(
 			ctx context.Context,
-			event *storeconnector.HealthEventWithStatus,
-		) *storeconnector.Status,
+			event *model.HealthEventWithStatus,
+		) *model.Status,
 	)
 }
 
@@ -78,8 +78,8 @@ func NewEventWatcher(
 func (w *EventWatcher) SetProcessEventCallback(
 	callback func(
 		ctx context.Context,
-		event *storeconnector.HealthEventWithStatus,
-	) *storeconnector.Status,
+		event *model.HealthEventWithStatus,
+	) *model.Status,
 ) {
 	w.processEventCallback = callback
 }
@@ -147,7 +147,7 @@ func (w *EventWatcher) watchEvents(ctx context.Context, watcher *storewatcher.Ch
 }
 
 func (w *EventWatcher) processEvent(ctx context.Context, event bson.M) error {
-	healthEventWithStatus := storeconnector.HealthEventWithStatus{}
+	healthEventWithStatus := model.HealthEventWithStatus{}
 	err := storewatcher.UnmarshalFullDocumentFromEvent(
 		event,
 		&healthEventWithStatus,
@@ -215,7 +215,7 @@ func (w *EventWatcher) updateUnprocessedEventsMetric(ctx context.Context,
 func (w *EventWatcher) updateNodeQuarantineStatus(
 	ctx context.Context,
 	event bson.M,
-	nodeQuarantinedStatus *storeconnector.Status,
+	nodeQuarantinedStatus *model.Status,
 ) error {
 	document, ok := event["fullDocument"].(bson.M)
 	if !ok {

@@ -24,6 +24,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/breaker"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
@@ -31,8 +33,6 @@ import (
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/evaluator"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/healthEventsAnnotation"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/informer"
-	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
-	"github.com/nvidia/nvsentinel/statemanager"
 	storeclientsdk "github.com/nvidia/nvsentinel/store-client-sdk/pkg/storewatcher"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,7 +110,7 @@ func createE2ETestNode(ctx context.Context, t *testing.T, name string, annotatio
 	require.NoError(t, err, "Failed to create test node %s", name)
 }
 
-func createHealthEventBSON(eventID primitive.ObjectID, nodeName, checkName string, isHealthy, isFatal bool, entities []*protos.Entity, quarantineStatus store.Status) bson.M {
+func createHealthEventBSON(eventID primitive.ObjectID, nodeName, checkName string, isHealthy, isFatal bool, entities []*protos.Entity, quarantineStatus model.Status) bson.M {
 	entitiesBSON := []interface{}{}
 	for _, entity := range entities {
 		entitiesBSON = append(entitiesBSON, bson.M{
@@ -140,9 +140,31 @@ func createHealthEventBSON(eventID primitive.ObjectID, nodeName, checkName strin
 	}
 }
 
-type StatusGetter func(eventID primitive.ObjectID) *store.Status
+type StatusGetter func(eventID primitive.ObjectID) *model.Status
 
+// E2EReconcilerConfig holds configuration options for test reconciler setup
+type E2EReconcilerConfig struct {
+	TomlConfig           config.TomlConfig
+	CircuitBreakerConfig *breaker.CircuitBreakerConfig
+	DryRun               bool
+}
+
+// setupE2EReconciler creates a test reconciler with mock watcher
+// Returns: (reconciler, mockWatcher, statusGetter, circuitBreaker)
+// Note: circuitBreaker will be nil when cbConfig is nil (circuit breaker disabled)
 func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.TomlConfig, cbConfig *breaker.CircuitBreakerConfig) (*Reconciler, *storeclientsdk.FakeChangeStreamWatcher, StatusGetter, breaker.CircuitBreaker) {
+	t.Helper()
+	return setupE2EReconcilerWithOptions(t, ctx, E2EReconcilerConfig{
+		TomlConfig:           tomlConfig,
+		CircuitBreakerConfig: cbConfig,
+		DryRun:               false,
+	})
+}
+
+// setupE2EReconcilerWithOptions creates a test reconciler with full configuration control
+// Returns: (reconciler, mockWatcher, statusGetter, circuitBreaker)
+// Note: circuitBreaker will be nil when cbConfig is nil (circuit breaker disabled)
+func setupE2EReconcilerWithOptions(t *testing.T, ctx context.Context, cfg E2EReconcilerConfig) (*Reconciler, *storeclientsdk.FakeChangeStreamWatcher, StatusGetter, breaker.CircuitBreaker) {
 	t.Helper()
 
 	nodeInformer, err := informer.NewNodeInformer(e2eTestClient, 0)
@@ -150,7 +172,7 @@ func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.Tom
 
 	fqClient := &informer.FaultQuarantineClient{
 		Clientset:    e2eTestClient,
-		DryRunMode:   false,
+		DryRunMode:   cfg.DryRun,
 		NodeInformer: nodeInformer,
 	}
 
@@ -161,11 +183,12 @@ func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.Tom
 
 	require.Eventually(t, nodeInformer.HasSynced, 10*time.Second, 100*time.Millisecond, "NodeInformer should sync")
 
-	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(tomlConfig.RuleSets, fqClient.NodeInformer)
+	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(cfg.TomlConfig.RuleSets, fqClient.NodeInformer)
 	require.NoError(t, err)
 
 	var cb breaker.CircuitBreaker
-	if cbConfig != nil {
+	if cfg.CircuitBreakerConfig != nil {
+		cbConfig := cfg.CircuitBreakerConfig
 		// Set defaults if not provided
 		percentage := cbConfig.Percentage
 		if percentage == 0 {
@@ -194,16 +217,16 @@ func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.Tom
 		require.NoError(t, err, "Failed to create circuit breaker")
 	}
 
-	cfg := ReconcilerConfig{
-		TomlConfig:            tomlConfig,
-		CircuitBreakerEnabled: cbConfig != nil,
-		DryRun:                false,
+	reconcilerCfg := ReconcilerConfig{
+		TomlConfig:            cfg.TomlConfig,
+		CircuitBreakerEnabled: cfg.CircuitBreakerConfig != nil,
+		DryRun:                cfg.DryRun,
 	}
 
-	r := NewReconciler(cfg, fqClient, cb)
+	r := NewReconciler(reconcilerCfg, fqClient, cb)
 
-	if tomlConfig.LabelPrefix != "" {
-		r.SetLabelKeys(tomlConfig.LabelPrefix)
+	if cfg.TomlConfig.LabelPrefix != "" {
+		r.SetLabelKeys(cfg.TomlConfig.LabelPrefix)
 		fqClient.SetLabelKeys(r.cordonedReasonLabelKey, r.uncordonedReasonLabelKey)
 	}
 
@@ -214,7 +237,7 @@ func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.Tom
 		RuleSetPriorityMap: make(map[string]int),
 	}
 
-	for _, ruleSet := range tomlConfig.RuleSets {
+	for _, ruleSet := range cfg.TomlConfig.RuleSets {
 		if ruleSet.Taint.Key != "" {
 			rulesetsConfig.TaintConfigMap[ruleSet.Name] = &ruleSet.Taint
 		}
@@ -234,19 +257,24 @@ func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.Tom
 	// Create mock watcher
 	mockWatcher := storeclientsdk.NewFakeChangeStreamWatcher()
 
+	// Ensure the event channel is closed when test completes to terminate the processing goroutine
+	t.Cleanup(func() {
+		close(mockWatcher.EventsChan)
+	})
+
 	// Store event statuses for verification (mimics MongoDB status updates)
 	var statusMu sync.Mutex
-	eventStatuses := make(map[primitive.ObjectID]*store.Status)
+	eventStatuses := make(map[primitive.ObjectID]*model.Status)
 
 	// Setup the reconciler with the callback (mimics Start())
-	processEventFunc := func(ctx context.Context, event *store.HealthEventWithStatus) *store.Status {
+	processEventFunc := func(ctx context.Context, event *model.HealthEventWithStatus) *model.Status {
 		return r.ProcessEvent(ctx, event, ruleSetEvals, rulesetsConfig)
 	}
 
 	// Start event processing goroutine (mimics production event watcher)
 	go func() {
 		for event := range mockWatcher.Events() {
-			healthEventWithStatus := store.HealthEventWithStatus{}
+			healthEventWithStatus := model.HealthEventWithStatus{}
 			if err := storeclientsdk.UnmarshalFullDocumentFromEvent(event, &healthEventWithStatus); err != nil {
 				continue
 			}
@@ -269,7 +297,7 @@ func setupE2EReconciler(t *testing.T, ctx context.Context, tomlConfig config.Tom
 	}()
 
 	// Return status getter for tests
-	getStatus := func(eventID primitive.ObjectID) *store.Status {
+	getStatus := func(eventID primitive.ObjectID) *model.Status {
 		statusMu.Lock()
 		defer statusMu.Unlock()
 		return eventStatuses[eventID]
@@ -409,7 +437,7 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Wait for quarantine
@@ -452,13 +480,13 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is UnQuarantined
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID2)
-		return status != nil && *status == store.UnQuarantined
+		return status != nil && *status == model.UnQuarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be UnQuarantined")
 
 	// Wait for unquarantine
@@ -531,13 +559,13 @@ func TestE2E_EntityLevelTracking(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is Quarantined for first failure
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.Quarantined
+		return status != nil && *status == model.Quarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be Quarantined")
 
 	require.Eventually(t, func() bool {
@@ -554,13 +582,13 @@ func TestE2E_EntityLevelTracking(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is AlreadyQuarantined for second failure
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID2)
-		return status != nil && *status == store.AlreadyQuarantined
+		return status != nil && *status == model.AlreadyQuarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be AlreadyQuarantined")
 
 	require.Eventually(t, func() bool {
@@ -587,13 +615,13 @@ func TestE2E_EntityLevelTracking(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is AlreadyQuarantined (partial recovery, node stays quarantined)
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID3)
-		return status != nil && *status == store.AlreadyQuarantined
+		return status != nil && *status == model.AlreadyQuarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be AlreadyQuarantined for partial recovery")
 
 	require.Eventually(t, func() bool {
@@ -636,13 +664,13 @@ func TestE2E_EntityLevelTracking(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is UnQuarantined (complete recovery)
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID4)
-		return status != nil && *status == store.UnQuarantined
+		return status != nil && *status == model.UnQuarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be UnQuarantined")
 
 	require.Eventually(t, func() bool {
@@ -701,7 +729,7 @@ func TestE2E_MultipleChecksOnSameNode(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -717,7 +745,7 @@ func TestE2E_MultipleChecksOnSameNode(t *testing.T) {
 		false,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -743,7 +771,7 @@ func TestE2E_MultipleChecksOnSameNode(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -763,7 +791,7 @@ func TestE2E_MultipleChecksOnSameNode(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -813,7 +841,7 @@ func TestE2E_CheckLevelHealthyEvent(t *testing.T) {
 			{EntityType: "GPU", EntityValue: "0"},
 			{EntityType: "GPU", EntityValue: "1"},
 		},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -833,7 +861,7 @@ func TestE2E_CheckLevelHealthyEvent(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{}, // Empty - means all entities healthy
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -880,7 +908,7 @@ func TestE2E_DuplicateEntityEvents(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -901,7 +929,7 @@ func TestE2E_DuplicateEntityEvents(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Use Never to verify annotation doesn't change for duplicate
@@ -963,7 +991,7 @@ func TestE2E_HealthyEventWithoutQuarantine(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is nil (healthy event without prior quarantine is skipped)
@@ -1025,7 +1053,7 @@ func TestE2E_PartialEntityRecovery(t *testing.T) {
 			false,
 			true,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -1046,7 +1074,7 @@ func TestE2E_PartialEntityRecovery(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -1100,7 +1128,7 @@ func TestE2E_AllGPUsFailThenRecover(t *testing.T) {
 			false,
 			true,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -1122,7 +1150,7 @@ func TestE2E_AllGPUsFailThenRecover(t *testing.T) {
 			true,
 			false,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -1168,7 +1196,7 @@ func TestE2E_SyslogMultipleEntityTypes(t *testing.T) {
 		"fullDocument": bson.M{
 			"_id": primitive.NewObjectID(),
 			"healtheventstatus": bson.M{
-				"nodequarantined": store.StatusInProgress,
+				"nodequarantined": model.StatusInProgress,
 			},
 			"healthevent": bson.M{
 				"nodename":       nodeName,
@@ -1208,7 +1236,7 @@ func TestE2E_SyslogMultipleEntityTypes(t *testing.T) {
 		"fullDocument": bson.M{
 			"_id": primitive.NewObjectID(),
 			"healtheventstatus": bson.M{
-				"nodequarantined": store.StatusInProgress,
+				"nodequarantined": model.StatusInProgress,
 			},
 			"healthevent": bson.M{
 				"nodename":         nodeName,
@@ -1359,7 +1387,7 @@ func TestE2E_BackwardCompatibilityOldFormat(t *testing.T) {
 		false,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Should convert to new format and append
@@ -1380,7 +1408,7 @@ func TestE2E_BackwardCompatibilityOldFormat(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -1400,7 +1428,7 @@ func TestE2E_BackwardCompatibilityOldFormat(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -1449,7 +1477,7 @@ func TestE2E_MixedHealthyUnhealthyFlapping(t *testing.T) {
 			false,
 			true,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 
 		require.Eventually(t, func() bool {
@@ -1465,7 +1493,7 @@ func TestE2E_MixedHealthyUnhealthyFlapping(t *testing.T) {
 			true,
 			false,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 
 		require.Eventually(t, func() bool {
@@ -1527,7 +1555,7 @@ func TestE2E_MultipleNodesSimultaneous(t *testing.T) {
 			false,
 			true,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -1593,7 +1621,7 @@ func TestE2E_HealthyEventForNonMatchingCheck(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -1609,7 +1637,7 @@ func TestE2E_HealthyEventForNonMatchingCheck(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Node should remain quarantined (XID error still active, healthy NVLink event doesn't unquarantine)
@@ -1679,7 +1707,7 @@ func TestE2E_MultipleRulesetsWithPriorities(t *testing.T) {
 		false,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -1737,7 +1765,7 @@ func TestE2E_NonFatalEventDoesNotQuarantine(t *testing.T) {
 		false,
 		false, // Not fatal
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify node is never quarantined (rule doesn't match)
@@ -1792,7 +1820,7 @@ func TestE2E_OutOfOrderEvents(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify node is never quarantined (healthy event without prior quarantine is skipped)
@@ -1812,7 +1840,7 @@ func TestE2E_OutOfOrderEvents(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -1859,7 +1887,7 @@ func TestE2E_SkipRedundantCordoning(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -1876,7 +1904,7 @@ func TestE2E_SkipRedundantCordoning(t *testing.T) {
 		false,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify node remains cordoned (doesn't uncordon)
@@ -1929,7 +1957,7 @@ func TestE2E_NodeAlreadyCordonedManually(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify FQM adds taints and annotations to manually cordoned node
@@ -2011,7 +2039,7 @@ func TestE2E_NodeAlreadyQuarantinedStillUnhealthy(t *testing.T) {
 		"fullDocument": bson.M{
 			"_id": primitive.NewObjectID(),
 			"healtheventstatus": bson.M{
-				"nodequarantined": store.StatusInProgress,
+				"nodequarantined": model.StatusInProgress,
 			},
 			"healthevent": bson.M{
 				"nodename":       nodeName,
@@ -2092,7 +2120,7 @@ func TestE2E_NodeAlreadyQuarantinedBecomesHealthy(t *testing.T) {
 		"fullDocument": bson.M{
 			"_id": primitive.NewObjectID(),
 			"healtheventstatus": bson.M{
-				"nodequarantined": store.StatusInProgress,
+				"nodequarantined": model.StatusInProgress,
 			},
 			"healthevent": bson.M{
 				"nodename":       nodeName,
@@ -2172,7 +2200,7 @@ func TestE2E_RulesetNotMatching(t *testing.T) {
 		false,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify node never gets quarantined (rule doesn't match)
@@ -2192,7 +2220,7 @@ func TestE2E_RulesetNotMatching(t *testing.T) {
 		false,
 		false, // Not fatal
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify node never gets quarantined (isFatal requirement not met)
@@ -2244,7 +2272,7 @@ func TestE2E_PartialAnnotationUpdate(t *testing.T) {
 			false,
 			true,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -2270,7 +2298,7 @@ func TestE2E_PartialAnnotationUpdate(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	require.Eventually(t, func() bool {
@@ -2350,7 +2378,9 @@ func TestE2E_CircuitBreakerBasic(t *testing.T) {
 	// Verify circuit breaker is initialized
 	require.NotNil(t, cb, "Circuit breaker should be initialized")
 
-	// Wait for all nodes to be visible
+	// BLOCKING: Wait for all 10 nodes to be visible in NodeInformer cache
+	// This is critical for circuit breaker percentage calculations to be accurate
+	// Test will fail if nodes aren't visible within 5 seconds
 	require.Eventually(t, func() bool {
 		totalNodes, _, err := r.k8sClient.NodeInformer.GetNodeCounts()
 		return err == nil && totalNodes == 10
@@ -2365,7 +2395,7 @@ func TestE2E_CircuitBreakerBasic(t *testing.T) {
 			false,
 			false,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -2393,7 +2423,7 @@ func TestE2E_CircuitBreakerBasic(t *testing.T) {
 		false,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Wait for 5th node to be cordoned
@@ -2414,7 +2444,7 @@ func TestE2E_CircuitBreakerBasic(t *testing.T) {
 		false,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify 6th node never gets cordoned (circuit breaker blocks it)
@@ -2468,7 +2498,9 @@ func TestE2E_CircuitBreakerSlidingWindow(t *testing.T) {
 
 	require.NotNil(t, cb, "Circuit breaker should be initialized")
 
-	// Wait for all nodes to be visible
+	// BLOCKING: Wait for all 10 nodes to be visible in NodeInformer cache
+	// This is critical for circuit breaker percentage calculations to be accurate
+	// Test will fail if nodes aren't visible within 5 seconds
 	require.Eventually(t, func() bool {
 		totalNodes, _, err := r.k8sClient.NodeInformer.GetNodeCounts()
 		return err == nil && totalNodes == 10
@@ -2483,7 +2515,7 @@ func TestE2E_CircuitBreakerSlidingWindow(t *testing.T) {
 			false,
 			false,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -2555,7 +2587,9 @@ func TestE2E_CircuitBreakerUniqueNodeTracking(t *testing.T) {
 
 	require.NotNil(t, cb, "Circuit breaker should be initialized")
 
-	// Wait for all nodes to be visible
+	// BLOCKING: Wait for all 10 nodes to be visible in NodeInformer cache
+	// This is critical for circuit breaker percentage calculations to be accurate
+	// Test will fail if nodes aren't visible within 5 seconds
 	require.Eventually(t, func() bool {
 		totalNodes, _, err := r.k8sClient.NodeInformer.GetNodeCounts()
 		return err == nil && totalNodes == 10
@@ -2570,7 +2604,7 @@ func TestE2E_CircuitBreakerUniqueNodeTracking(t *testing.T) {
 			false,
 			false,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -2593,7 +2627,7 @@ func TestE2E_CircuitBreakerUniqueNodeTracking(t *testing.T) {
 			false,
 			false,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -2651,7 +2685,7 @@ func TestE2E_QuarantineOverridesForce(t *testing.T) {
 		"fullDocument": bson.M{
 			"_id": eventID1,
 			"healtheventstatus": bson.M{
-				"nodequarantined": store.StatusInProgress,
+				"nodequarantined": model.StatusInProgress,
 			},
 			"healthevent": bson.M{
 				"nodename":       nodeName,
@@ -2674,7 +2708,7 @@ func TestE2E_QuarantineOverridesForce(t *testing.T) {
 	// Verify status is Quarantined (even though rule doesn't match)
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.Quarantined
+		return status != nil && *status == model.Quarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be Quarantined with force override")
 
 	// Verify node is cordoned with special labels
@@ -2735,13 +2769,13 @@ func TestE2E_NodeRuleEvaluator(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is Quarantined (Node rule matched)
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.Quarantined
+		return status != nil && *status == model.Quarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be Quarantined when Node rule matches")
 
 	require.Eventually(t, func() bool {
@@ -2792,7 +2826,7 @@ func TestE2E_NodeRuleDoesNotMatch(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is nil (rule didn't match)
@@ -2849,13 +2883,13 @@ func TestE2E_TaintWithoutCordon(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is Quarantined
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.Quarantined
+		return status != nil && *status == model.Quarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be Quarantined")
 
 	// Verify node is tainted but NOT cordoned
@@ -2921,13 +2955,13 @@ func TestE2E_CordonWithoutTaint(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is Quarantined
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.Quarantined
+		return status != nil && *status == model.Quarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be Quarantined")
 
 	// Verify node is cordoned but has NO FQ taints
@@ -3003,13 +3037,13 @@ func TestE2E_ManualUncordonAnnotationCleanup(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is Quarantined
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.Quarantined
+		return status != nil && *status == model.Quarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be Quarantined")
 
 	// Verify manual uncordon annotation is removed and FQ annotations added
@@ -3090,13 +3124,13 @@ func TestE2E_UnhealthyEventOnQuarantinedNodeNoRuleMatch(t *testing.T) {
 		false,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is AlreadyQuarantined (node stays quarantined but event doesn't match rules)
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.AlreadyQuarantined
+		return status != nil && *status == model.AlreadyQuarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be AlreadyQuarantined")
 
 	// Verify annotation is NOT updated (event doesn't match rules, so not added)
@@ -3133,80 +3167,12 @@ func TestE2E_DryRunMode(t *testing.T) {
 		},
 	}
 
-	// Setup with DryRun=true
-	nodeInformer, err := informer.NewNodeInformer(e2eTestClient, 0)
-	require.NoError(t, err)
-
-	fqClient := &informer.FaultQuarantineClient{
-		Clientset:    e2eTestClient,
-		DryRunMode:   true, // Enable dry run
-		NodeInformer: nodeInformer,
-	}
-
-	stopCh := make(chan struct{})
-	defer close(stopCh)
-
-	go nodeInformer.Run(stopCh)
-
-	require.Eventually(t, nodeInformer.HasSynced, 10*time.Second, 100*time.Millisecond, "NodeInformer should sync")
-
-	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(tomlConfig.RuleSets, fqClient.NodeInformer)
-	require.NoError(t, err)
-
-	cfg := ReconcilerConfig{
-		TomlConfig:            tomlConfig,
-		CircuitBreakerEnabled: false,
-		DryRun:                true, // Enable dry run
-	}
-
-	r := NewReconciler(cfg, fqClient, nil)
-	r.SetLabelKeys(tomlConfig.LabelPrefix)
-	fqClient.SetLabelKeys(r.cordonedReasonLabelKey, r.uncordonedReasonLabelKey)
-
-	rulesetsConfig := rulesetsConfig{
-		TaintConfigMap:     map[string]*config.Taint{"gpu-xid-errors": &tomlConfig.RuleSets[0].Taint},
-		CordonConfigMap:    map[string]bool{"gpu-xid-errors": true},
-		RuleSetPriorityMap: map[string]int{"gpu-xid-errors": 10},
-	}
-
-	r.precomputeTaintInitKeys(ruleSetEvals, rulesetsConfig)
-
-	var statusMu sync.Mutex
-	eventStatuses := make(map[primitive.ObjectID]*store.Status)
-
-	mockWatcher := storeclientsdk.NewFakeChangeStreamWatcher()
-
-	processEventFunc := func(ctx context.Context, event *store.HealthEventWithStatus) *store.Status {
-		return r.ProcessEvent(ctx, event, ruleSetEvals, rulesetsConfig)
-	}
-
-	go func() {
-		for event := range mockWatcher.Events() {
-			healthEventWithStatus := store.HealthEventWithStatus{}
-			if err := storeclientsdk.UnmarshalFullDocumentFromEvent(event, &healthEventWithStatus); err != nil {
-				continue
-			}
-
-			var eventID primitive.ObjectID
-			if fullDoc, ok := event["fullDocument"].(bson.M); ok {
-				if id, ok := fullDoc["_id"].(primitive.ObjectID); ok {
-					eventID = id
-				}
-			}
-
-			status := processEventFunc(ctx, &healthEventWithStatus)
-
-			statusMu.Lock()
-			eventStatuses[eventID] = status
-			statusMu.Unlock()
-		}
-	}()
-
-	getStatus := func(eventID primitive.ObjectID) *store.Status {
-		statusMu.Lock()
-		defer statusMu.Unlock()
-		return eventStatuses[eventID]
-	}
+	// Setup with DryRun=true (circuit breaker disabled)
+	_, mockWatcher, getStatus, _ := setupE2EReconcilerWithOptions(t, ctx, E2EReconcilerConfig{
+		TomlConfig:           tomlConfig,
+		CircuitBreakerConfig: nil,
+		DryRun:               true,
+	})
 
 	eventID1 := primitive.NewObjectID()
 	mockWatcher.EventsChan <- createHealthEventBSON(
@@ -3216,13 +3182,13 @@ func TestE2E_DryRunMode(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is Quarantined (dry run still returns status)
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.Quarantined
+		return status != nil && *status == model.Quarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be Quarantined in dry run")
 
 	// Verify node is NOT actually cordoned or tainted (dry run)
@@ -3285,13 +3251,13 @@ func TestE2E_TaintOnlyThenCordonRule(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is Quarantined
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.Quarantined
+		return status != nil && *status == model.Quarantined
 	}, 5*time.Second, 100*time.Millisecond, "Status should be Quarantined")
 
 	// Verify node has BOTH taint AND cordon
@@ -3358,7 +3324,7 @@ func TestE2E_ConflictRetryOnConcurrentUpdate(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Wait for quarantine to start
@@ -3367,21 +3333,42 @@ func TestE2E_ConflictRetryOnConcurrentUpdate(t *testing.T) {
 		return node.Spec.Unschedulable
 	}, 10*time.Second, 200*time.Millisecond, "Node should be quarantined")
 
-	// Simulate concurrent update by adding a custom annotation from "another process"
-	// This creates a conflict scenario when reconciler tries to update
+	// Start concurrent updates that will create conflicts during the second event processing
+	stopConflicts := make(chan struct{})
+	var conflictWg sync.WaitGroup
+	conflictWg.Add(1)
+
 	go func() {
-		for i := 0; i < 5; i++ {
-			time.Sleep(50 * time.Millisecond)
-			node, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-			if err == nil {
-				if node.Annotations == nil {
-					node.Annotations = make(map[string]string)
+		defer conflictWg.Done()
+		ticker := time.NewTicker(30 * time.Millisecond)
+		defer ticker.Stop()
+
+		updateCount := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopConflicts:
+				return
+			case <-ticker.C:
+				node, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+				if err == nil {
+					if node.Annotations == nil {
+						node.Annotations = make(map[string]string)
+					}
+					node.Annotations["external-process-annotation"] = fmt.Sprintf("update-%d", updateCount)
+					_, _ = e2eTestClient.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+					updateCount++
 				}
-				node.Annotations["external-process-annotation"] = fmt.Sprintf("update-%d", i)
-				_, _ = e2eTestClient.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
 			}
 		}
 	}()
+
+	// Ensure conflicts are stopped when test completes
+	t.Cleanup(func() {
+		close(stopConflicts)
+		conflictWg.Wait()
+	})
 
 	// Send second event while concurrent updates are happening
 	eventID2 := primitive.NewObjectID()
@@ -3392,13 +3379,13 @@ func TestE2E_ConflictRetryOnConcurrentUpdate(t *testing.T) {
 		false,
 		true,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is AlreadyQuarantined (even with concurrent updates/conflicts)
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID2)
-		return status != nil && *status == store.AlreadyQuarantined
+		return status != nil && *status == model.AlreadyQuarantined
 	}, 10*time.Second, 100*time.Millisecond, "Status should be AlreadyQuarantined despite conflicts")
 
 	// Verify both GPU entities are tracked (retry logic handled conflicts)
@@ -3471,20 +3458,42 @@ func TestE2E_ConflictRetryOnUnquarantine(t *testing.T) {
 
 	_, mockWatcher, getStatus, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
 
-	// Simulate concurrent updates during unquarantine process
+	// Start concurrent updates that will create conflicts during unquarantine
+	stopConflicts := make(chan struct{})
+	var conflictWg sync.WaitGroup
+	conflictWg.Add(1)
+
 	go func() {
-		for i := 0; i < 5; i++ {
-			time.Sleep(50 * time.Millisecond)
-			node, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-			if err == nil {
-				if node.Annotations == nil {
-					node.Annotations = make(map[string]string)
+		defer conflictWg.Done()
+		ticker := time.NewTicker(30 * time.Millisecond)
+		defer ticker.Stop()
+
+		updateCount := 0
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-stopConflicts:
+				return
+			case <-ticker.C:
+				node, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+				if err == nil {
+					if node.Annotations == nil {
+						node.Annotations = make(map[string]string)
+					}
+					node.Annotations["concurrent-update"] = fmt.Sprintf("value-%d", updateCount)
+					_, _ = e2eTestClient.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+					updateCount++
 				}
-				node.Annotations["concurrent-update"] = fmt.Sprintf("value-%d", i)
-				_, _ = e2eTestClient.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
 			}
 		}
 	}()
+
+	// Ensure conflicts are stopped when test completes
+	t.Cleanup(func() {
+		close(stopConflicts)
+		conflictWg.Wait()
+	})
 
 	// Send healthy event to unquarantine while concurrent updates happen
 	eventID1 := primitive.NewObjectID()
@@ -3493,7 +3502,7 @@ func TestE2E_ConflictRetryOnUnquarantine(t *testing.T) {
 		"fullDocument": bson.M{
 			"_id": eventID1,
 			"healtheventstatus": bson.M{
-				"nodequarantined": store.StatusInProgress,
+				"nodequarantined": model.StatusInProgress,
 			},
 			"healthevent": bson.M{
 				"nodename":       nodeName,
@@ -3512,7 +3521,7 @@ func TestE2E_ConflictRetryOnUnquarantine(t *testing.T) {
 	// Verify status is UnQuarantined (retry logic handled conflicts)
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.UnQuarantined
+		return status != nil && *status == model.UnQuarantined
 	}, 10*time.Second, 100*time.Millisecond, "Status should be UnQuarantined despite conflicts")
 
 	// Verify node is unquarantined (retry succeeded)
@@ -3581,7 +3590,7 @@ func TestE2E_MultipleConflictsOnPartialRecovery(t *testing.T) {
 			false,
 			true,
 			[]*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", i)}},
-			store.StatusInProgress,
+			model.StatusInProgress,
 		)
 	}
 
@@ -3606,6 +3615,8 @@ func TestE2E_MultipleConflictsOnPartialRecovery(t *testing.T) {
 
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-stopConflicts:
 				return
 			case <-ticker.C:
@@ -3621,6 +3632,12 @@ func TestE2E_MultipleConflictsOnPartialRecovery(t *testing.T) {
 		}
 	}()
 
+	// Ensure conflicts are stopped if test fails before manual cleanup
+	t.Cleanup(func() {
+		close(stopConflicts)
+		wg.Wait()
+	})
+
 	// Recover GPU 1 while conflicts are happening
 	eventID1 := primitive.NewObjectID()
 	mockWatcher.EventsChan <- createHealthEventBSON(
@@ -3630,13 +3647,13 @@ func TestE2E_MultipleConflictsOnPartialRecovery(t *testing.T) {
 		true,
 		false,
 		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
-		store.StatusInProgress,
+		model.StatusInProgress,
 	)
 
 	// Verify status is AlreadyQuarantined (partial recovery with conflicts)
 	require.Eventually(t, func() bool {
 		status := getStatus(eventID1)
-		return status != nil && *status == store.AlreadyQuarantined
+		return status != nil && *status == model.AlreadyQuarantined
 	}, 10*time.Second, 100*time.Millisecond, "Status should be AlreadyQuarantined despite conflicts")
 
 	// Verify GPU 1 removed from annotation (retry logic worked)
@@ -3662,10 +3679,6 @@ func TestE2E_MultipleConflictsOnPartialRecovery(t *testing.T) {
 
 		return healthEventsMap.Count() == 2 && !found
 	}, 10*time.Second, 200*time.Millisecond, "GPU 1 should be removed despite concurrent conflicts")
-
-	// Stop concurrent updates
-	close(stopConflicts)
-	wg.Wait()
 
 	// Final verification: FQ annotation updated correctly AND external annotation preserved
 	node, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})

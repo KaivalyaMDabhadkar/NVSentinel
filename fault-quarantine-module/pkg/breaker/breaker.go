@@ -206,6 +206,8 @@ func (b *slidingWindowBreaker) IsTripped(ctx context.Context) (bool, error) {
 	b.mu.Lock()
 	b.slideWindow(now)
 	recentCordonedNodes := b.sumBuckets()
+	b.mu.Unlock()
+
 	threshold := int(math.Ceil(float64(totalNodes) * b.cfg.TripPercentage / 100))
 	shouldTrip := recentCordonedNodes >= threshold
 
@@ -215,7 +217,6 @@ func (b *slidingWindowBreaker) IsTripped(ctx context.Context) (bool, error) {
 		"tripPercentage", b.cfg.TripPercentage)
 
 	metrics.SetFaultQuarantineBreakerUtilization(float64(recentCordonedNodes) / float64(totalNodes))
-	b.mu.Unlock()
 
 	if shouldTrip {
 		err := b.ForceState(ctx, StateTripped)
