@@ -854,23 +854,31 @@ func (r *Reconciler) addEventToAnnotation(
 			node.Annotations = make(map[string]string)
 		}
 
-		// Parse existing annotation (with backward compatibility)
 		healthEventsMap := healthEventsAnnotation.NewHealthEventsAnnotationMap()
 		existingAnnotation := node.Annotations[common.QuarantineHealthEventAnnotationKey]
 
 		if existingAnnotation != "" {
 			if err := json.Unmarshal([]byte(existingAnnotation), healthEventsMap); err != nil {
-				// Try old format for backward compatibility
 				var singleEvent protos.HealthEvent
 				if err2 := json.Unmarshal([]byte(existingAnnotation), &singleEvent); err2 == nil {
 					healthEventsMap.AddOrUpdateEvent(&singleEvent)
+				} else {
+					return fmt.Errorf("failed to parse existing annotation (tried both formats): %w", err)
 				}
 			}
 		}
 
-		healthEventsMap.AddOrUpdateEvent(event)
+		added := healthEventsMap.AddOrUpdateEvent(event)
+		if !added {
+			slog.Debug("Event already exists for node, no annotation update needed", "node", event.NodeName)
+			return nil
+		}
 
-		annotationBytes, _ := json.Marshal(healthEventsMap)
+		annotationBytes, err := json.Marshal(healthEventsMap)
+		if err != nil {
+			return fmt.Errorf("failed to marshal health events: %w", err)
+		}
+
 		node.Annotations[common.QuarantineHealthEventAnnotationKey] = string(annotationBytes)
 
 		slog.Debug("Added/updated event for node", "node", event.NodeName, "totalEntityLevelEvents", healthEventsMap.Count())
@@ -896,21 +904,27 @@ func (r *Reconciler) removeEventFromAnnotation(
 			return nil
 		}
 
-		// Parse existing annotation (with backward compatibility)
 		healthEventsMap := healthEventsAnnotation.NewHealthEventsAnnotationMap()
 		if err := json.Unmarshal([]byte(existingAnnotation), healthEventsMap); err != nil {
-			// Try old format for backward compatibility
 			var singleEvent protos.HealthEvent
 			if err2 := json.Unmarshal([]byte(existingAnnotation), &singleEvent); err2 == nil {
 				healthEventsMap.AddOrUpdateEvent(&singleEvent)
 			} else {
-				return fmt.Errorf("failed to parse annotation: %w", err)
+				return fmt.Errorf("failed to parse existing annotation (tried both formats): %w", err)
 			}
 		}
 
-		healthEventsMap.RemoveEvent(event)
+		removed := healthEventsMap.RemoveEvent(event)
+		if removed == 0 {
+			slog.Debug("No matching entities to remove for node, no annotation update needed", "node", event.NodeName)
+			return nil
+		}
 
-		annotationBytes, _ := json.Marshal(healthEventsMap)
+		annotationBytes, err := json.Marshal(healthEventsMap)
+		if err != nil {
+			return fmt.Errorf("failed to marshal health events after removal: %w", err)
+		}
+
 		node.Annotations[common.QuarantineHealthEventAnnotationKey] = string(annotationBytes)
 
 		slog.Debug("Removed entities for node", "node", event.NodeName, "remainingEntityLevelEvents", healthEventsMap.Count())
@@ -1085,11 +1099,18 @@ func (r *Reconciler) cleanupManualUncordonAnnotation(ctx context.Context, nodeNa
 	if _, hasManualUncordon := annotations[common.QuarantinedNodeUncordonedManuallyAnnotationKey]; hasManualUncordon {
 		slog.Info("Removing manual uncordon annotation from node before applying new quarantine", "node", nodeName)
 
-		// Remove the manual uncordon annotation via direct node update (not uncordoning)
 		updateFn := func(node *corev1.Node) error {
-			if node.Annotations != nil {
-				delete(node.Annotations, common.QuarantinedNodeUncordonedManuallyAnnotationKey)
+			if node.Annotations == nil {
+				slog.Debug("Node has no annotations, manual uncordon annotation already absent", "node", nodeName)
+				return nil
 			}
+
+			if _, exists := node.Annotations[common.QuarantinedNodeUncordonedManuallyAnnotationKey]; !exists {
+				slog.Debug("Manual uncordon annotation already removed from node", "node", nodeName)
+				return nil
+			}
+
+			delete(node.Annotations, common.QuarantinedNodeUncordonedManuallyAnnotationKey)
 
 			return nil
 		}
