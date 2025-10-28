@@ -16,6 +16,7 @@ package configmanager
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -125,13 +126,26 @@ func parseAndConvert[T any](value any, err error) (T, error) {
 }
 
 func parseInt(valueStr string) (int, error) {
-	return strconv.Atoi(valueStr)
+	v, err := strconv.ParseInt(valueStr, 10, 64)
+	if err != nil {
+		return 0, err
+	}
+
+	if v < math.MinInt || v > math.MaxInt {
+		return 0, fmt.Errorf("value %d out of range for int type", v)
+	}
+
+	return int(v), nil
 }
 
 func parseUint(valueStr string) (uint, error) {
-	v, err := strconv.ParseUint(valueStr, 10, 0)
+	v, err := strconv.ParseUint(valueStr, 10, 64)
 	if err != nil {
 		return 0, err
+	}
+
+	if v > math.MaxUint {
+		return 0, fmt.Errorf("value %d out of range for uint type", v)
 	}
 
 	return uint(v), nil
@@ -202,13 +216,13 @@ func ReadEnvVars(specs []EnvVarSpec) (map[string]string, []error) {
 		value, exists := os.LookupEnv(spec.Name)
 
 		if !exists {
-			value, err := handleMissingEnvVar(spec)
+			defaultVal, err := handleMissingEnvVar(spec)
 			if err != nil {
 				errors = append(errors, err)
 			}
 
-			if value != "" {
-				results[spec.Name] = value
+			if defaultVal != "" {
+				results[spec.Name] = defaultVal
 			}
 
 			continue

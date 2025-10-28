@@ -16,6 +16,8 @@ package configmanager
 
 import (
 	"fmt"
+	"math"
+	"strconv"
 	"testing"
 )
 
@@ -224,6 +226,162 @@ func TestGetEnvVarAllSupportedTypes(t *testing.T) {
 		value, err := GetEnvVar[string]("TEST_STRING_TYPE")
 		if err != nil || value != "hello world" {
 			t.Errorf("string test failed: %v, got %s", err, value)
+		}
+	})
+}
+
+func TestParseIntBoundsChecking(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		expectError bool
+	}{
+		{
+			name:        "valid positive int",
+			input:       "42",
+			expectError: false,
+		},
+		{
+			name:        "valid negative int",
+			input:       "-42",
+			expectError: false,
+		},
+		{
+			name:        "max int",
+			input:       strconv.FormatInt(int64(math.MaxInt), 10),
+			expectError: false,
+		},
+		{
+			name:        "min int",
+			input:       strconv.FormatInt(int64(math.MinInt), 10),
+			expectError: false,
+		},
+		{
+			name:        "invalid non-numeric string",
+			input:       "not-a-number",
+			expectError: true,
+		},
+		{
+			name:        "empty string",
+			input:       "",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseInt(tt.input)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error but got none for input %q", tt.input)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error for input %q: %v", tt.input, err)
+				}
+				expectedInt, _ := strconv.Atoi(tt.input)
+				if result != expectedInt {
+					t.Errorf("expected %d, got %d", expectedInt, result)
+				}
+			}
+		})
+	}
+}
+
+func TestParseUintBoundsChecking(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		expectError bool
+	}{
+		{
+			name:        "valid uint",
+			input:       "42",
+			expectError: false,
+		},
+		{
+			name:        "zero",
+			input:       "0",
+			expectError: false,
+		},
+		{
+			name:        "max uint",
+			input:       strconv.FormatUint(uint64(math.MaxUint), 10),
+			expectError: false,
+		},
+		{
+			name:        "negative number",
+			input:       "-1",
+			expectError: true,
+		},
+		{
+			name:        "invalid non-numeric string",
+			input:       "not-a-number",
+			expectError: true,
+		},
+		{
+			name:        "empty string",
+			input:       "",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := parseUint(tt.input)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("expected error but got none for input %q", tt.input)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("unexpected error for input %q: %v", tt.input, err)
+				}
+				expectedUint, _ := strconv.ParseUint(tt.input, 10, 64)
+				if result != uint(expectedUint) {
+					t.Errorf("expected %d, got %d", expectedUint, result)
+				}
+			}
+		})
+	}
+}
+
+func TestGetEnvVarBoundsValidation(t *testing.T) {
+	t.Run("int within valid range", func(t *testing.T) {
+		t.Setenv("TEST_VALID_INT", "100")
+		value, err := GetEnvVar[int]("TEST_VALID_INT")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if value != 100 {
+			t.Errorf("expected 100, got %d", value)
+		}
+	})
+
+	t.Run("uint within valid range", func(t *testing.T) {
+		t.Setenv("TEST_VALID_UINT", "100")
+		value, err := GetEnvVar[uint]("TEST_VALID_UINT")
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if value != 100 {
+			t.Errorf("expected 100, got %d", value)
+		}
+	})
+
+	t.Run("negative uint should fail", func(t *testing.T) {
+		t.Setenv("TEST_NEGATIVE_UINT", "-1")
+		_, err := GetEnvVar[uint]("TEST_NEGATIVE_UINT")
+		if err == nil {
+			t.Error("expected error for negative uint but got none")
+		}
+	})
+
+	t.Run("invalid int string should fail", func(t *testing.T) {
+		t.Setenv("TEST_INVALID_INT", "not-a-number")
+		_, err := GetEnvVar[int]("TEST_INVALID_INT")
+		if err == nil {
+			t.Error("expected error for invalid int string but got none")
 		}
 	})
 }

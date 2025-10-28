@@ -964,8 +964,8 @@ func (r *Reconciler) performUncordon(
 	}
 
 	if !isUnCordon {
-		slog.Error("performUncordon called but node is not cordoned", "node", event.NodeName)
-		return true
+		slog.Warn("Node is not cordoned but has quarantine taints/annotations, proceeding with cleanup",
+			"node", event.NodeName)
 	}
 
 	// Add the main quarantine annotation to removal list

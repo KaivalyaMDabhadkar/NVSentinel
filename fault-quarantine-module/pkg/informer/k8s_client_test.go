@@ -26,6 +26,7 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 )
@@ -85,15 +86,14 @@ func setupTestClient(t *testing.T) *FaultQuarantineClient {
 
 	go nodeInformer.Run(stopCh)
 
-	for i := 0; i < 100; i++ {
-		if nodeInformer.HasSynced() {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-	if !nodeInformer.HasSynced() {
-		t.Fatalf("NodeInformer failed to sync")
+	err = wait.PollUntilContextTimeout(ctx, 50*time.Millisecond, 5*time.Second, true, func(ctx context.Context) (bool, error) {
+		return nodeInformer.HasSynced(), nil
+	})
+	if err != nil {
+		t.Fatalf("NodeInformer failed to sync: %v", err)
 	}
 
 	client.NodeInformer = nodeInformer

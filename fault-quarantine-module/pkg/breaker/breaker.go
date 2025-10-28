@@ -206,10 +206,9 @@ func (b *slidingWindowBreaker) IsTripped(ctx context.Context) (bool, error) {
 	b.mu.Lock()
 	b.slideWindow(now)
 	recentCordonedNodes := b.sumBuckets()
-	b.mu.Unlock()
-
 	threshold := int(math.Ceil(float64(totalNodes) * b.cfg.TripPercentage / 100))
 	shouldTrip := recentCordonedNodes >= threshold
+	b.mu.Unlock()
 
 	slog.Debug("Recent cordoned nodes status",
 		"recentCordonedNodes", recentCordonedNodes,
@@ -318,7 +317,7 @@ func (b *slidingWindowBreaker) getTotalNodesWithRetry(ctx context.Context) (int,
 	result = resultError
 	errorType = "zero_nodes"
 
-	return 0, b.logRetriesExhausted(maxRetries, initialDelay, maxDelay)
+	return 0, b.logRetriesExhausted(ctx, maxRetries, initialDelay, maxDelay)
 }
 
 // getRetryConfig extracts and validates retry configuration with defaults
@@ -410,8 +409,8 @@ func (b *slidingWindowBreaker) calculateBackoffDelay(attempt int,
 
 // logRetriesExhausted logs a summary when all retries are exhausted.
 // Returns ErrRetryExhausted wrapped with context for pod restart.
-func (b *slidingWindowBreaker) logRetriesExhausted(maxRetries int, initialDelay, maxDelay time.Duration) error {
-	ctx := context.Background()
+func (b *slidingWindowBreaker) logRetriesExhausted(ctx context.Context, maxRetries int,
+	initialDelay, maxDelay time.Duration) error {
 	actualNodes, err := b.cfg.K8sClient.GetTotalNodes(ctx)
 
 	if err != nil {

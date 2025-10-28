@@ -1286,7 +1286,9 @@ func TestE2E_ManualUncordon(t *testing.T) {
 		LabelPrefix: "k8s.nvidia.com/",
 	}
 
-	_, _, _, _ = setupE2EReconciler(t, ctx, tomlConfig, nil)
+	// Setup reconciler to watch for manual uncordon events
+	// The node informer callbacks are registered during setup and will detect the manual uncordon
+	setupE2EReconciler(t, ctx, tomlConfig, nil)
 
 	// Manually uncordon the node
 	quarantinedNode, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})

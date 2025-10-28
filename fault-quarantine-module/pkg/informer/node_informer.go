@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"reflect"
 	"time"
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
@@ -185,7 +184,7 @@ func (ni *NodeInformer) handleAddNode(obj interface{}) {
 	if !ok {
 		slog.Error("Add event received unexpected type",
 			"expected", "*v1.Node",
-			"actualType", reflect.TypeOf(obj))
+			"actualType", fmt.Sprintf("%T", obj))
 
 		return
 	}
@@ -235,23 +234,9 @@ func (ni *NodeInformer) detectAndHandleManualUncordon(oldNode, newNode *v1.Node)
 	return true
 }
 
-// handleUpdateNode recalculates counts when a node is updated.
+// handleUpdateNode detects and handles manual uncordon of quarantined nodes.
 func (ni *NodeInformer) handleUpdateNode(oldNode, newNode *v1.Node) {
-	// Check for manual uncordon and handle it
-	if ni.detectAndHandleManualUncordon(oldNode, newNode) {
-		// Return early as the manual uncordon handler will take care of everything
-		return
-	}
-
-	if oldNode.Spec.Unschedulable != newNode.Spec.Unschedulable ||
-		oldNode.Annotations[common.QuarantineHealthEventIsCordonedAnnotationKey] !=
-			newNode.Annotations[common.QuarantineHealthEventIsCordonedAnnotationKey] {
-		slog.Debug("Node updated", "node", newNode.Name,
-			"oldUnschedulable", oldNode.Spec.Unschedulable,
-			"newUnschedulable", newNode.Spec.Unschedulable)
-	} else {
-		slog.Debug("Node update ignored (no relevant change)", "node", newNode.Name)
-	}
+	ni.detectAndHandleManualUncordon(oldNode, newNode)
 }
 
 // SetOnQuarantinedNodeDeletedCallback sets the callback function for when a quarantined node is deleted
@@ -272,7 +257,7 @@ func (ni *NodeInformer) handleDeleteNode(obj interface{}) {
 		if !ok {
 			slog.Error("Delete event received unexpected type",
 				"expected", "*v1.Node or DeletedFinalStateUnknown",
-				"actualType", reflect.TypeOf(obj))
+				"actualType", fmt.Sprintf("%T", obj))
 
 			return
 		}
@@ -281,7 +266,7 @@ func (ni *NodeInformer) handleDeleteNode(obj interface{}) {
 		if !ok {
 			slog.Error("Delete event tombstone contained unexpected type",
 				"expected", "*v1.Node",
-				"actualType", reflect.TypeOf(tombstone.Obj))
+				"actualType", fmt.Sprintf("%T", tombstone.Obj))
 
 			return
 		}

@@ -98,6 +98,7 @@ func (m *FakeChangeStreamWatcher) MarkProcessed(ctx context.Context) error {
 
 	m.MarkProcessedCalled++
 	m.LastMarkProcessedCtx = ctx
+
 	if m.MarkProcessedFn != nil {
 		return m.MarkProcessedFn(ctx)
 	}
@@ -112,6 +113,7 @@ func (m *FakeChangeStreamWatcher) Close(ctx context.Context) error {
 
 	m.CloseCalled++
 	m.LastCloseCtx = ctx
+
 	if m.CloseFn != nil {
 		return m.CloseFn(ctx)
 	}
@@ -132,6 +134,7 @@ func (m *FakeChangeStreamWatcher) GetUnprocessedEventCount(
 	m.LastGetUnprocessedEventCountCtx = ctx
 	m.LastGetUnprocessedEventCountID = lastProcessedID
 	m.LastGetUnprocessedEventCountFilters = additionalFilters
+
 	if m.GetUnprocessedEventCountFn != nil {
 		return m.GetUnprocessedEventCountFn(ctx, lastProcessedID, additionalFilters...)
 	}
