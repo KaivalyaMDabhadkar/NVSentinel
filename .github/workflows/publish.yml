@@ -141,9 +141,7 @@ jobs:
           container_name: ${{ matrix.container_name }}
           tag_suffix: ${{ matrix.tag_suffix }}
 
-
   # Build images using ko and attest provenance
-  # Once validated, this will replace the container-publish job above
   build-images:
     runs-on: linux-amd64-cpu32
     timeout-minutes: 60
