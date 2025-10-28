@@ -35,7 +35,7 @@ const (
 	cordonedReasonLabelKey      = "test-cordon-reason"
 	cordonedTimestampLabelKey   = "test-cordon-timestamp"
 	uncordonedByLabelKey        = "test-uncordon-by"
-	uncordonedReasonLabelkey    = "test-uncordon-reason"
+	uncordonedReasonLabelKey    = "test-uncordon-reason"
 	uncordonedTimestampLabelKey = "test-uncordon-timestamp"
 )
 
@@ -101,7 +101,7 @@ func setupTestClient(t *testing.T) *FaultQuarantineClient {
 	}
 
 	client.NodeInformer = nodeInformer
-	client.SetLabelKeys(cordonedReasonLabelKey, uncordonedReasonLabelkey)
+	client.SetLabelKeys(cordonedReasonLabelKey, uncordonedReasonLabelKey)
 
 	return client
 }
@@ -290,8 +290,8 @@ func TestUnTaintAndUnCordonNodeAndRemoveAnnotations(t *testing.T) {
 	if updatedNode.Labels[uncordonedByLabelKey] != common.ServiceName {
 		t.Errorf("Expected uncordon-by label to be %s, got %s", common.ServiceName, updatedNode.Labels[uncordonedByLabelKey])
 	}
-	if updatedNode.Labels[uncordonedReasonLabelkey] != "gpu-error-removed" {
-		t.Errorf("Expected uncordon-reason label to be gpu-error-removed, got %s", updatedNode.Labels[uncordonedReasonLabelkey])
+	if updatedNode.Labels[uncordonedReasonLabelKey] != "gpu-error-removed" {
+		t.Errorf("Expected uncordon-reason label to be gpu-error-removed, got %s", updatedNode.Labels[uncordonedReasonLabelKey])
 	}
 	if updatedNode.Labels[uncordonedTimestampLabelKey] == "" {
 		t.Errorf("Expected uncordon-timestamp label to be set")

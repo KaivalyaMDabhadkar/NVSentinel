@@ -59,6 +59,39 @@ func TestReadEnvVars(t *testing.T) {
 	if results["TEST_VAR_3"] != "default" {
 		t.Errorf("expected default, got %s", results["TEST_VAR_3"])
 	}
+
+	if _, exists := results["TEST_VAR_4"]; exists {
+		t.Error("TEST_VAR_4 should not be in results map when required and missing")
+	}
+}
+
+func TestReadEnvVarsOptionalWithEmptyDefault(t *testing.T) {
+	specs := []EnvVarSpec{
+		{
+			Name:         "MISSING_OPTIONAL_EMPTY_DEFAULT",
+			Optional:     true,
+			DefaultValue: "",
+		},
+		{
+			Name:         "MISSING_OPTIONAL_WITH_DEFAULT",
+			Optional:     true,
+			DefaultValue: "some_value",
+		},
+	}
+
+	results, errors := ReadEnvVars(specs)
+
+	if len(errors) != 0 {
+		t.Errorf("expected 0 errors, got %d", len(errors))
+	}
+
+	if _, exists := results["MISSING_OPTIONAL_EMPTY_DEFAULT"]; exists {
+		t.Error("optional var with empty default should not be in results map")
+	}
+
+	if val, exists := results["MISSING_OPTIONAL_WITH_DEFAULT"]; !exists || val != "some_value" {
+		t.Errorf("optional var with non-empty default should be in results map with value 'some_value', got %v", val)
+	}
 }
 
 func TestGetEnvVar(t *testing.T) {

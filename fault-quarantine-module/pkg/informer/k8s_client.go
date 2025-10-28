@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/breaker"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/config"
 	v1 "k8s.io/api/core/v1"
@@ -75,7 +76,7 @@ func NewFaultQuarantineClient(kubeconfig string, dryRun bool,
 }
 
 func (c *FaultQuarantineClient) EnsureCircuitBreakerConfigMap(ctx context.Context,
-	name, namespace string, initialStatus string) error {
+	name, namespace string, initialStatus breaker.State) error {
 	slog.Info("Ensuring circuit breaker config map",
 		"name", name, "namespace", namespace, "initialStatus", initialStatus)
 
@@ -94,7 +95,7 @@ func (c *FaultQuarantineClient) EnsureCircuitBreakerConfigMap(ctx context.Contex
 
 	cm := &v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Data:       map[string]string{"status": initialStatus},
+		Data:       map[string]string{"status": string(initialStatus)},
 	}
 
 	_, err = cmClient.Create(ctx, cm, metav1.CreateOptions{})
@@ -148,8 +149,11 @@ func (c *FaultQuarantineClient) UpdateNode(ctx context.Context, nodeName string,
 	})
 }
 
-func (c *FaultQuarantineClient) ReadCircuitBreakerState(ctx context.Context, name, namespace string) (string, error) {
-	slog.Info("Reading circuit breaker state from config map", "name", name, "namespace", namespace)
+func (c *FaultQuarantineClient) ReadCircuitBreakerState(
+	ctx context.Context, name, namespace string,
+) (breaker.State, error) {
+	slog.Info("Reading circuit breaker state from config map",
+		"name", name, "namespace", namespace)
 
 	cm, err := c.Clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
@@ -160,10 +164,12 @@ func (c *FaultQuarantineClient) ReadCircuitBreakerState(ctx context.Context, nam
 		return "", nil
 	}
 
-	return cm.Data["status"], nil
+	return breaker.State(cm.Data["status"]), nil
 }
 
-func (c *FaultQuarantineClient) WriteCircuitBreakerState(ctx context.Context, name, namespace, status string) error {
+func (c *FaultQuarantineClient) WriteCircuitBreakerState(
+	ctx context.Context, name, namespace string, status breaker.State,
+) error {
 	cmClient := c.Clientset.CoreV1().ConfigMaps(namespace)
 
 	return retry.OnError(customBackoff, errors.IsConflict, func() error {
@@ -177,7 +183,7 @@ func (c *FaultQuarantineClient) WriteCircuitBreakerState(ctx context.Context, na
 			cm.Data = map[string]string{}
 		}
 
-		cm.Data["status"] = status
+		cm.Data["status"] = string(status)
 
 		_, err = cmClient.Update(ctx, cm, metav1.UpdateOptions{})
 		if err != nil {

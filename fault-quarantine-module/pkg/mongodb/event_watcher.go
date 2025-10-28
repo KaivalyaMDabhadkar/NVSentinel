@@ -18,7 +18,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/metrics"
@@ -92,7 +91,6 @@ func (w *EventWatcher) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create change stream watcher: %w", err)
 	}
-	defer watcher.Close(ctx)
 
 	w.watcher = watcher
 
@@ -101,19 +99,35 @@ func (w *EventWatcher) Start(ctx context.Context) error {
 
 	go w.updateUnprocessedEventsMetric(ctx, watcher)
 
+	watchDoneCh := make(chan error, 1)
+
 	go func() {
-		w.watchEvents(ctx, watcher)
-		slog.Error("MongoDB event watcher goroutine exited unexpectedly, event processing has stopped")
-		os.Exit(1)
+		err := w.watchEvents(ctx, watcher)
+		if err != nil {
+			slog.Error("MongoDB event watcher goroutine failed", "error", err)
+			watchDoneCh <- err
+		} else {
+			slog.Error("MongoDB event watcher goroutine exited unexpectedly, event processing has stopped")
+			watchDoneCh <- fmt.Errorf("event watcher channel closed unexpectedly")
+		}
 	}()
 
-	<-ctx.Done()
-	slog.Info("Context cancelled, stopping MongoDB event watcher")
+	select {
+	case <-ctx.Done():
+		slog.Info("Context cancelled, stopping MongoDB event watcher")
+	case err := <-watchDoneCh:
+		slog.Error("Event watcher terminated unexpectedly, initiating shutdown", "error", err)
+		watcher.Close(ctx)
+
+		return fmt.Errorf("event watcher terminated: %w", err)
+	}
+
+	watcher.Close(ctx)
 
 	return nil
 }
 
-func (w *EventWatcher) watchEvents(ctx context.Context, watcher *storewatcher.ChangeStreamWatcher) {
+func (w *EventWatcher) watchEvents(ctx context.Context, watcher *storewatcher.ChangeStreamWatcher) error {
 	for event := range watcher.Events() {
 		metrics.TotalEventsReceived.Inc()
 
@@ -124,9 +138,12 @@ func (w *EventWatcher) watchEvents(ctx context.Context, watcher *storewatcher.Ch
 		if err := w.watcher.MarkProcessed(ctx); err != nil {
 			metrics.ProcessingErrors.WithLabelValues("mark_processed_error").Inc()
 			slog.Error("Error updating resume token", "error", err)
-			os.Exit(1)
+
+			return fmt.Errorf("failed to mark event as processed: %w", err)
 		}
 	}
+
+	return nil
 }
 
 func (w *EventWatcher) processEvent(ctx context.Context, event bson.M) error {

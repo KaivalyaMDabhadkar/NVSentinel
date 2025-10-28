@@ -207,7 +207,7 @@ func ReadEnvVars(specs []EnvVarSpec) (map[string]string, []error) {
 				errors = append(errors, err)
 			}
 
-			if value != "" || spec.Optional {
+			if value != "" {
 				results[spec.Name] = value
 			}
 

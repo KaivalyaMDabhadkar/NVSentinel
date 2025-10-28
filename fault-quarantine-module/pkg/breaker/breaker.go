@@ -62,17 +62,16 @@ func NewSlidingWindowBreaker(ctx context.Context, cfg Config) (CircuitBreaker, e
 		b.indexToNodes[i] = make(map[string]bool)
 	}
 
-	err := cfg.K8sClient.EnsureCircuitBreakerConfigMap(ctx, cfg.ConfigMapName, cfg.ConfigMapNamespace, string(StateClosed))
+	err := cfg.K8sClient.EnsureCircuitBreakerConfigMap(ctx, cfg.ConfigMapName, cfg.ConfigMapNamespace, StateClosed)
 	if err != nil {
 		slog.Error("Error ensuring circuit breaker config map", "error", err)
 		return nil, fmt.Errorf("error ensuring circuit breaker config map: %w", err)
 	}
 
-	stateStr, err := cfg.K8sClient.ReadCircuitBreakerState(ctx, cfg.ConfigMapName, cfg.ConfigMapNamespace)
+	state, err := cfg.K8sClient.ReadCircuitBreakerState(ctx, cfg.ConfigMapName, cfg.ConfigMapNamespace)
 	if err == nil {
-		s := State(stateStr)
-		if s == StateClosed || s == StateTripped {
-			b.state = s
+		if state == StateClosed || state == StateTripped {
+			b.state = state
 		}
 	}
 
@@ -244,7 +243,7 @@ func (b *slidingWindowBreaker) ForceState(ctx context.Context, s State) error {
 	b.mu.Unlock()
 
 	err := b.cfg.K8sClient.WriteCircuitBreakerState(
-		ctx, b.cfg.ConfigMapName, b.cfg.ConfigMapNamespace, string(s))
+		ctx, b.cfg.ConfigMapName, b.cfg.ConfigMapNamespace, s)
 	if err != nil {
 		slog.Error("Error writing circuit breaker state", "error", err)
 		return err

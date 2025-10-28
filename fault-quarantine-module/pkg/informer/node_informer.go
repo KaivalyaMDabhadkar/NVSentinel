@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
-	"sync"
 	"time"
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
@@ -42,10 +41,6 @@ type NodeInformer struct {
 	informer       cache.SharedIndexInformer
 	lister         corelisters.NodeLister
 	informerSynced cache.InformerSynced
-
-	// Mutex protects access to the counts below
-	mutex      sync.RWMutex
-	totalNodes int
 
 	// onQuarantinedNodeDeleted is called when a quarantined node with annotations is deleted
 	onQuarantinedNodeDeleted func(nodeName string)
@@ -155,9 +150,8 @@ func (ni *NodeInformer) GetNodeCounts() (totalNodes int, quarantinedNodesMap map
 		return 0, nil, fmt.Errorf("node informer cache not synced yet")
 	}
 
-	ni.mutex.RLock()
-	total := ni.totalNodes
-	ni.mutex.RUnlock()
+	allObjs := ni.informer.GetIndexer().List()
+	total := len(allObjs)
 
 	quarantinedObjs, err := ni.informer.GetIndexer().ByIndex(quarantineAnnotationIndexName, "quarantined")
 	if err != nil {
@@ -185,7 +179,7 @@ func (ni *NodeInformer) ListNodes() ([]*v1.Node, error) {
 	return ni.lister.List(labels.Everything())
 }
 
-// handleAddNode recalculates counts when a node is added.
+// handleAddNode logs when a node is added.
 func (ni *NodeInformer) handleAddNode(obj interface{}) {
 	node, ok := obj.(*v1.Node)
 	if !ok {
@@ -197,10 +191,6 @@ func (ni *NodeInformer) handleAddNode(obj interface{}) {
 	}
 
 	slog.Debug("Node added", "node", node.Name)
-
-	ni.mutex.Lock()
-	ni.totalNodes++
-	ni.mutex.Unlock()
 }
 
 // handleUpdateNodeWrapper is a wrapper for handleUpdateNode that converts interface{} to *v1.Node.
@@ -274,7 +264,7 @@ func (ni *NodeInformer) SetOnManualUncordonCallback(callback func(nodeName strin
 	ni.onManualUncordon = callback
 }
 
-// handleDeleteNode recalculates counts when a node is deleted.
+// handleDeleteNode handles node deletion events.
 func (ni *NodeInformer) handleDeleteNode(obj interface{}) {
 	node, ok := obj.(*v1.Node)
 	if !ok {
@@ -298,10 +288,6 @@ func (ni *NodeInformer) handleDeleteNode(obj interface{}) {
 	}
 
 	slog.Info("Node deleted", "node", node.Name)
-
-	ni.mutex.Lock()
-	ni.totalNodes--
-	ni.mutex.Unlock()
 
 	// Check if the node had the quarantine annotation
 	_, hadQuarantineAnnotation := node.Annotations[common.QuarantineHealthEventIsCordonedAnnotationKey]

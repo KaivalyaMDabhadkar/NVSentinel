@@ -24,9 +24,9 @@ import (
 // K8sClientOperations defines the minimal interface needed by the circuit breaker
 type K8sClientOperations interface {
 	GetTotalNodes(ctx context.Context) (int, error)
-	EnsureCircuitBreakerConfigMap(ctx context.Context, name, namespace string, initialStatus string) error
-	ReadCircuitBreakerState(ctx context.Context, name, namespace string) (string, error)
-	WriteCircuitBreakerState(ctx context.Context, name, namespace, status string) error
+	EnsureCircuitBreakerConfigMap(ctx context.Context, name, namespace string, initialStatus State) error
+	ReadCircuitBreakerState(ctx context.Context, name, namespace string) (State, error)
+	WriteCircuitBreakerState(ctx context.Context, name, namespace string, status State) error
 }
 
 // CircuitBreakerConfig holds the Kubernetes-specific configuration for the circuit breaker

@@ -26,29 +26,29 @@ type mockK8sClientOps struct {
 	callsEnsure  int
 	callsWrite   int
 	initialState State
-	readStateFn  func(context.Context, string, string) (string, error)
+	readStateFn  func(context.Context, string, string) (State, error)
 }
 
 func (m *mockK8sClientOps) GetTotalNodes(context.Context) (int, error) {
 	return m.totalNodes, nil
 }
 
-func (m *mockK8sClientOps) EnsureCircuitBreakerConfigMap(context.Context, string, string, string) error {
+func (m *mockK8sClientOps) EnsureCircuitBreakerConfigMap(context.Context, string, string, State) error {
 	m.callsEnsure++
 	return nil
 }
 
-func (m *mockK8sClientOps) ReadCircuitBreakerState(ctx context.Context, name, namespace string) (string, error) {
+func (m *mockK8sClientOps) ReadCircuitBreakerState(ctx context.Context, name, namespace string) (State, error) {
 	if m.readStateFn != nil {
 		return m.readStateFn(ctx, name, namespace)
 	}
 	if m.initialState != "" {
-		return string(m.initialState), nil
+		return m.initialState, nil
 	}
-	return string(StateClosed), nil
+	return StateClosed, nil
 }
 
-func (m *mockK8sClientOps) WriteCircuitBreakerState(context.Context, string, string, string) error {
+func (m *mockK8sClientOps) WriteCircuitBreakerState(context.Context, string, string, State) error {
 	m.callsWrite++
 	return nil
 }

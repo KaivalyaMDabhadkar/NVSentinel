@@ -66,6 +66,7 @@ type Reconciler struct {
 	cb                    breaker.CircuitBreaker
 	eventWatcher          mongodb.EventWatcherInterface
 	taintInitKeys         []keyValTaint // Pre-computed taint keys for map initialization
+	taintUpdateMu         sync.Mutex    // Protects taint priority updates
 
 	// Label keys
 	cordonedByLabelKey        string
@@ -367,26 +368,24 @@ func (r *Reconciler) handleEvent(
 		return nil
 	}
 
-	var taintAppliedMap sync.Map
+	taintAppliedMap := make(map[keyValTaint]string, len(r.taintInitKeys))
+	taintEffectPriorityMap := make(map[keyValTaint]int, len(r.taintInitKeys))
+
+	for _, keyVal := range r.taintInitKeys {
+		taintAppliedMap[keyVal] = ""
+		taintEffectPriorityMap[keyVal] = -1
+	}
 
 	var labelsMap sync.Map
 
 	var isCordoned atomic.Bool
 
-	var taintEffectPriorityMap sync.Map
-
-	// Initialize taint maps using pre-computed keys
-	for _, keyVal := range r.taintInitKeys {
-		taintAppliedMap.Store(keyVal, "")
-		taintEffectPriorityMap.Store(keyVal, -1)
-	}
-
 	r.evaluateRulesets(
 		event, ruleSetEvals, rulesetsConfig,
-		&taintAppliedMap, &labelsMap, &isCordoned, &taintEffectPriorityMap,
+		taintAppliedMap, &labelsMap, &isCordoned, taintEffectPriorityMap,
 	)
 
-	taintsToBeApplied := r.collectTaintsToApply(&taintAppliedMap)
+	taintsToBeApplied := r.collectTaintsToApply(taintAppliedMap)
 
 	annotationsMap := r.prepareAnnotations(taintsToBeApplied, &labelsMap, &isCordoned)
 
@@ -438,10 +437,10 @@ func (r *Reconciler) evaluateRulesets(
 	event *storeconnector.HealthEventWithStatus,
 	ruleSetEvals []evaluator.RuleSetEvaluatorIface,
 	rulesetsConfig rulesetsConfig,
-	taintAppliedMap *sync.Map,
+	taintAppliedMap map[keyValTaint]string,
 	labelsMap *sync.Map,
 	isCordoned *atomic.Bool,
-	taintEffectPriorityMap *sync.Map,
+	taintEffectPriorityMap map[keyValTaint]int,
 ) {
 	// Handle quarantine override (force quarantine without rule evaluation)
 	if event.HealthEvent.QuarantineOverrides != nil && event.HealthEvent.QuarantineOverrides.Force {
@@ -491,8 +490,8 @@ func (r *Reconciler) handleSuccessfulRuleEvaluation(
 	rulesetsConfig rulesetsConfig,
 	labelsMap *sync.Map,
 	isCordoned *atomic.Bool,
-	taintAppliedMap *sync.Map,
-	taintEffectPriorityMap *sync.Map,
+	taintAppliedMap map[keyValTaint]string,
+	taintEffectPriorityMap map[keyValTaint]int,
 ) {
 	metrics.RulesetPassed.WithLabelValues(eval.GetName()).Inc()
 
@@ -518,28 +517,26 @@ func (r *Reconciler) handleSuccessfulRuleEvaluation(
 }
 
 // updateTaintMaps updates taint maps with priority-based logic to handle multiple rulesets
-// affecting the same taint key-value pair
+// affecting the same taint key-value pair.
 func (r *Reconciler) updateTaintMaps(
 	evalName string,
 	taintConfig *config.Taint,
 	rulesetsConfig rulesetsConfig,
-	taintAppliedMap *sync.Map,
-	taintEffectPriorityMap *sync.Map,
+	taintAppliedMap map[keyValTaint]string,
+	taintEffectPriorityMap map[keyValTaint]int,
 ) {
 	keyVal := keyValTaint{Key: taintConfig.Key, Value: taintConfig.Value}
-
-	currentVal, _ := taintAppliedMap.Load(keyVal)
-	currentEffect := currentVal.(string)
-
-	currentPriorityVal, _ := taintEffectPriorityMap.Load(keyVal)
-	currentPriority := currentPriorityVal.(int)
-
 	newPriority := rulesetsConfig.RuleSetPriorityMap[evalName]
 
-	// Update if no effect set yet or new priority is higher
+	r.taintUpdateMu.Lock()
+	defer r.taintUpdateMu.Unlock()
+
+	currentEffect := taintAppliedMap[keyVal]
+	currentPriority := taintEffectPriorityMap[keyVal]
+
 	if currentEffect == "" || newPriority > currentPriority {
-		taintEffectPriorityMap.Store(keyVal, newPriority)
-		taintAppliedMap.Store(keyVal, taintConfig.Effect)
+		taintEffectPriorityMap[keyVal] = newPriority
+		taintAppliedMap[keyVal] = taintConfig.Effect
 	}
 }
 
@@ -555,14 +552,10 @@ func (r *Reconciler) handleRuleEvaluationError(
 }
 
 // collectTaintsToApply collects all taints that should be applied from the taint map
-func (r *Reconciler) collectTaintsToApply(taintAppliedMap *sync.Map) []config.Taint {
-	taintsToBeApplied := []config.Taint{}
+func (r *Reconciler) collectTaintsToApply(taintAppliedMap map[keyValTaint]string) []config.Taint {
+	taintsToBeApplied := make([]config.Taint, 0, len(taintAppliedMap))
 
-	// Check the taint map and collect the taints which are to be applied
-	taintAppliedMap.Range(func(k, v interface{}) bool {
-		keyVal := k.(keyValTaint)
-		effect := v.(string)
-
+	for keyVal, effect := range taintAppliedMap {
 		if effect != "" {
 			taintsToBeApplied = append(taintsToBeApplied, config.Taint{
 				Key:    keyVal.Key,
@@ -570,9 +563,7 @@ func (r *Reconciler) collectTaintsToApply(taintAppliedMap *sync.Map) []config.Ta
 				Effect: effect,
 			})
 		}
-
-		return true
-	})
+	}
 
 	return taintsToBeApplied
 }

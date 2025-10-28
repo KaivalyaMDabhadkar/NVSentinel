@@ -17,6 +17,7 @@ package informer
 import (
 	"context"
 
+	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/breaker"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/config"
 	v1 "k8s.io/api/core/v1"
 )
@@ -31,8 +32,8 @@ type K8sClientInterface interface {
 	HandleManualUncordonCleanup(ctx context.Context, nodeName string, taintsToRemove []config.Taint,
 		annotationsToRemove []string, annotationsToAdd map[string]string, labelsToRemove []string) error
 	UpdateNode(ctx context.Context, nodeName string, updateFn func(*v1.Node) error) error
-	EnsureCircuitBreakerConfigMap(ctx context.Context, name, namespace string, initialStatus string) error
-	ReadCircuitBreakerState(ctx context.Context, name, namespace string) (string, error)
-	WriteCircuitBreakerState(ctx context.Context, name, namespace, status string) error
+	EnsureCircuitBreakerConfigMap(ctx context.Context, name, namespace string, initialStatus breaker.State) error
+	ReadCircuitBreakerState(ctx context.Context, name, namespace string) (breaker.State, error)
+	WriteCircuitBreakerState(ctx context.Context, name, namespace, status breaker.State) error
 	GetTotalNodes(ctx context.Context) (int, error)
 }
