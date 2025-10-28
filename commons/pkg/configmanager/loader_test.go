@@ -65,7 +65,8 @@ func TestLoadTOMLConfigNonExistentFile(t *testing.T) {
 
 	var cfg testTOMLConfig
 
-	err := LoadTOMLConfig("/path/that/does/not/exist/config.toml", &cfg)
+	nonExistentPath := filepath.Join(t.TempDir(), "nonexistent.toml")
+	err := LoadTOMLConfig(nonExistentPath, &cfg)
 	if err == nil {
 		t.Fatal("expected error for non-existent file, got nil")
 	}

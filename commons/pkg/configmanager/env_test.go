@@ -279,7 +279,10 @@ func TestParseIntBoundsChecking(t *testing.T) {
 				if err != nil {
 					t.Errorf("unexpected error for input %q: %v", tt.input, err)
 				}
-				expectedInt, _ := strconv.Atoi(tt.input)
+				expectedInt, parseErr := strconv.Atoi(tt.input)
+				if parseErr != nil {
+					t.Fatalf("test setup error: strconv.Atoi failed for valid input %q: %v", tt.input, parseErr)
+				}
 				if result != expectedInt {
 					t.Errorf("expected %d, got %d", expectedInt, result)
 				}
@@ -337,7 +340,10 @@ func TestParseUintBoundsChecking(t *testing.T) {
 				if err != nil {
 					t.Errorf("unexpected error for input %q: %v", tt.input, err)
 				}
-				expectedUint, _ := strconv.ParseUint(tt.input, 10, 64)
+				expectedUint, parseErr := strconv.ParseUint(tt.input, 10, 64)
+				if parseErr != nil {
+					t.Fatalf("test setup error: strconv.ParseUint failed for valid input %q: %v", tt.input, parseErr)
+				}
 				if result != uint(expectedUint) {
 					t.Errorf("expected %d, got %d", expectedUint, result)
 				}

@@ -112,19 +112,18 @@ func (w *EventWatcher) Start(ctx context.Context) error {
 		}
 	}()
 
+	var watchErr error
 	select {
 	case <-ctx.Done():
 		slog.Info("Context cancelled, stopping MongoDB event watcher")
 	case err := <-watchDoneCh:
 		slog.Error("Event watcher terminated unexpectedly, initiating shutdown", "error", err)
-		watcher.Close(ctx)
-
-		return fmt.Errorf("event watcher terminated: %w", err)
+		watchErr = fmt.Errorf("event watcher terminated: %w", err)
 	}
 
 	watcher.Close(ctx)
 
-	return nil
+	return watchErr
 }
 
 func (w *EventWatcher) watchEvents(ctx context.Context, watcher *storewatcher.ChangeStreamWatcher) error {
