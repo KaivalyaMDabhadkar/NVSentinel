@@ -95,7 +95,6 @@ require (
 	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-// Local replacements for internal modules
 replace github.com/nvidia/nvsentinel/store-client-sdk => ../store-client-sdk
 
 replace github.com/nvidia/nvsentinel/data-models => ../data-models

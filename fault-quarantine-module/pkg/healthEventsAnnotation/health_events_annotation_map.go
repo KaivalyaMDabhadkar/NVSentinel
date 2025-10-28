@@ -74,7 +74,6 @@ func createEventKeyForEntity(
 // createEventKeys creates keys for all entities in a HealthEvent
 func createEventKeys(event *protos.HealthEvent) []HealthEventKey {
 	if len(event.EntitiesImpacted) == 0 {
-		// If no entities, create a single key without entity info
 		return []HealthEventKey{createEventKeyForEntity(event, nil)}
 	}
 
@@ -189,7 +188,6 @@ func (he *HealthEventsAnnotationMap) RemoveEvent(event *protos.HealthEvent) int 
 		}
 	}
 
-	// Then remove them
 	for _, key := range keys {
 		delete(he.Events, key)
 	}
@@ -215,7 +213,6 @@ func (he *HealthEventsAnnotationMap) removeAllEntitiesForCheck(event *protos.Hea
 		}
 	}
 
-	// Remove all matching keys
 	for _, key := range keysToRemove {
 		delete(he.Events, key)
 	}
@@ -225,7 +222,6 @@ func (he *HealthEventsAnnotationMap) removeAllEntitiesForCheck(event *protos.Hea
 
 // RemoveEntitiesForCheck removes specific entities for a check
 func (he *HealthEventsAnnotationMap) RemoveEntitiesForCheck(event *protos.HealthEvent) {
-	// Remove each entity specified in the event
 	keys := createEventKeys(event)
 	for _, key := range keys {
 		delete(he.Events, key)
@@ -277,12 +273,10 @@ func (he *HealthEventsAnnotationMap) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("failed to unmarshal health events: %w", err)
 	}
 
-	// Initialize the map if needed
 	if he.Events == nil {
 		he.Events = make(map[HealthEventKey]*protos.HealthEvent)
 	}
 
-	// Clear existing events and add the unmarshaled ones
 	for k := range he.Events {
 		delete(he.Events, k)
 	}

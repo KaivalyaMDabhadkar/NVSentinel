@@ -268,12 +268,10 @@ func (r *Reconciler) checkCircuitBreakerAtStartup(ctx context.Context) error {
 
 	tripped, err := r.cb.IsTripped(ctx)
 	if err != nil {
-		// Check if this is a retry exhaustion error (should restart pod)
 		if errors.Is(err, breaker.ErrRetryExhausted) {
 			return err
 		}
 
-		// Other errors: log and block indefinitely
 		slog.Error("Error checking if circuit breaker is tripped", "error", err)
 		<-ctx.Done()
 
@@ -353,9 +351,6 @@ func (r *Reconciler) handleEvent(
 	annotations, quarantineAnnotationExists := r.hasExistingQuarantine(event.HealthEvent.NodeName)
 
 	if quarantineAnnotationExists {
-		// The node was already quarantined by FQM earlier. Delegate to the
-		// specialized handler which decides whether to keep it quarantined or
-		// un-quarantine based on the incoming event.
 		return r.handleAlreadyQuarantinedNode(ctx, event.HealthEvent, ruleSetEvals)
 	}
 
@@ -421,8 +416,6 @@ func (r *Reconciler) handleAlreadyQuarantinedNode(
 ) *model.Status {
 	var status model.Status
 
-	// Delegate to handleQuarantinedNode which decides whether to keep the node
-	// quarantined or un-quarantine based on the incoming event
 	if r.handleQuarantinedNode(ctx, event, ruleSetEvals) {
 		status = model.AlreadyQuarantined
 	} else {
@@ -456,7 +449,6 @@ func (r *Reconciler) evaluateRulesets(
 
 	var wg sync.WaitGroup
 
-	// Evaluate each ruleset in parallel
 	for _, eval := range ruleSetEvals {
 		wg.Add(1)
 
@@ -495,7 +487,6 @@ func (r *Reconciler) handleSuccessfulRuleEvaluation(
 ) {
 	metrics.RulesetPassed.WithLabelValues(eval.GetName()).Inc()
 
-	// Handle cordon configuration if specified
 	shouldCordon := rulesetsConfig.CordonConfigMap[eval.GetName()]
 	if shouldCordon {
 		isCordoned.Store(true)
@@ -577,7 +568,6 @@ func (r *Reconciler) prepareAnnotations(
 	annotationsMap := map[string]string{}
 
 	if len(taintsToBeApplied) > 0 {
-		// Store the taints applied as an annotation
 		taintsJsonStr, err := json.Marshal(taintsToBeApplied)
 		if err != nil {
 			slog.Error("Failed to marshal taints for annotation", "error", err)
@@ -587,7 +577,6 @@ func (r *Reconciler) prepareAnnotations(
 	}
 
 	if isCordoned.Load() {
-		// Store cordon as an annotation
 		annotationsMap[common.QuarantineHealthEventIsCordonedAnnotationKey] =
 			common.QuarantineHealthEventIsCordonedAnnotationValueTrue
 
@@ -609,10 +598,8 @@ func (r *Reconciler) applyQuarantine(
 	labelsMap *sync.Map,
 	isCordoned *atomic.Bool,
 ) *model.Status {
-	// Record an event to sliding window before actually quarantining
 	r.recordCordonEventInCircuitBreaker(event)
 
-	// Create health events structure for the new quarantine with sanitized health event
 	healthEvents := healthEventsAnnotation.NewHealthEventsAnnotationMap()
 	updated := healthEvents.AddOrUpdateEvent(event.HealthEvent)
 
@@ -737,14 +724,12 @@ func (r *Reconciler) handleUnhealthyEventOnQuarantinedNode(
 	ruleSetEvals []evaluator.RuleSetEvaluatorIface,
 	healthEventsAnnotationMap *healthEventsAnnotation.HealthEventsAnnotationMap,
 ) bool {
-	// Check if this event matches any configured rules before adding to annotation
 	if !r.eventMatchesAnyRule(event, ruleSetEvals) {
 		slog.Info("Unhealthy event on node doesn't match any rules, skipping annotation update",
 			"checkName", event.CheckName, "node", event.NodeName)
 		return true
 	}
 
-	// Handle unhealthy event - add new entity failures
 	added := healthEventsAnnotationMap.AddOrUpdateEvent(event)
 
 	if added {
@@ -760,7 +745,6 @@ func (r *Reconciler) handleUnhealthyEventOnQuarantinedNode(
 			"checkName", event.CheckName, "node", event.NodeName)
 	}
 
-	// Node remains quarantined
 	return true
 }
 
@@ -781,7 +765,6 @@ func (r *Reconciler) handleQuarantinedNode(
 		return r.handleUnhealthyEventOnQuarantinedNode(ctx, event, ruleSetEvals, healthEventsAnnotationMap)
 	}
 
-	// Handle healthy event
 	if !hasExistingCheck {
 		slog.Debug("Received healthy event for untracked check %s on node %s (other checks may still be failing)",
 			event.CheckName, event.NodeName)
@@ -804,7 +787,6 @@ func (r *Reconciler) handleQuarantinedNode(
 	}
 
 	if healthEventsAnnotationMap.IsEmpty() {
-		// All checks recovered - uncordon the node
 		slog.Info("All health checks recovered for node, proceeding with uncordon",
 			"node", event.NodeName)
 		return r.performUncordon(ctx, event, annotations)
@@ -816,7 +798,6 @@ func (r *Reconciler) handleQuarantinedNode(
 		return true
 	}
 
-	// Node remains quarantined as there are still failing checks
 	slog.Info("Node remains quarantined with failing checks",
 		"node", event.NodeName,
 		"failingChecksCount", healthEventsAnnotationMap.Count(),
@@ -848,11 +829,9 @@ func (r *Reconciler) getHealthEventsFromAnnotation(
 	err = json.Unmarshal([]byte(quarantineAnnotationStr), &healthEventsMap)
 
 	if err != nil {
-		// Fallback: try to unmarshal as single HealthEvent for backward compatibility
 		var singleHealthEvent protos.HealthEvent
 
 		if err2 := json.Unmarshal([]byte(quarantineAnnotationStr), &singleHealthEvent); err2 == nil {
-			// Convert single event to health events structure for local processing
 			slog.Info("Found old format annotation for node, converting locally", "node", event.NodeName)
 
 			healthEventsMap = *healthEventsAnnotation.NewHealthEventsAnnotationMap()
@@ -929,7 +908,6 @@ func (r *Reconciler) removeEventFromAnnotation(
 			}
 		}
 
-		// Remove the event's entities using HealthEventsAnnotationMap logic
 		healthEventsMap.RemoveEvent(event)
 
 		annotationBytes, _ := json.Marshal(healthEventsMap)
@@ -968,7 +946,6 @@ func (r *Reconciler) performUncordon(
 			"node", event.NodeName)
 	}
 
-	// Add the main quarantine annotation to removal list
 	annotationsToBeRemoved = append(annotationsToBeRemoved, common.QuarantineHealthEventAnnotationKey)
 
 	if !r.config.CircuitBreakerEnabled {
@@ -1132,23 +1109,19 @@ func (r *Reconciler) handleManualUncordon(nodeName string) error {
 		return fmt.Errorf("failed to get annotations for manually uncordoned node %s: %w", nodeName, err)
 	}
 
-	// Check which FQ annotations exist and need to be removed
 	annotationsToRemove := []string{}
 
 	var taintsToRemove []config.Taint
 
-	// Check for taints annotation
 	taintsKey := common.QuarantineHealthEventAppliedTaintsAnnotationKey
 	if taintsStr, exists := annotations[taintsKey]; exists && taintsStr != "" {
 		annotationsToRemove = append(annotationsToRemove, taintsKey)
 
-		// Parse taints to remove them
 		if err := json.Unmarshal([]byte(taintsStr), &taintsToRemove); err != nil {
 			return fmt.Errorf("failed to unmarshal taints for manually uncordoned node %s: %w", nodeName, err)
 		}
 	}
 
-	// Remove all FQ-related annotations
 	if _, exists := annotations[common.QuarantineHealthEventAnnotationKey]; exists {
 		annotationsToRemove = append(annotationsToRemove, common.QuarantineHealthEventAnnotationKey)
 	}
@@ -1157,12 +1130,10 @@ func (r *Reconciler) handleManualUncordon(nodeName string) error {
 		annotationsToRemove = append(annotationsToRemove, common.QuarantineHealthEventIsCordonedAnnotationKey)
 	}
 
-	// Add the manual uncordon annotation
 	newAnnotations := map[string]string{
 		common.QuarantinedNodeUncordonedManuallyAnnotationKey: common.QuarantinedNodeUncordonedManuallyAnnotationValue,
 	}
 
-	// Atomically update the node: remove FQ annotations/taints/labels and add manual uncordon annotation
 	if err := r.k8sClient.HandleManualUncordonCleanup(
 		context.Background(),
 		nodeName,

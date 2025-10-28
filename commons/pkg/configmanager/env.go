@@ -73,7 +73,6 @@ func GetEnvVar[T any](name string, defaultAndValidator ...any) (T, error) {
 
 	valueStr, exists := os.LookupEnv(name)
 	if !exists {
-		// If env var not set, use default if provided
 		if defaultValue != nil {
 			return *defaultValue, nil
 		}
@@ -81,13 +80,11 @@ func GetEnvVar[T any](name string, defaultAndValidator ...any) (T, error) {
 		return zero, fmt.Errorf("environment variable %s is not set", name)
 	}
 
-	// Convert string to type T
 	value, err := parseValue[T](valueStr)
 	if err != nil {
 		return zero, fmt.Errorf("error converting %s: %w", name, err)
 	}
 
-	// Validate if validator is provided
 	if validator != nil {
 		if err := validator(value); err != nil {
 			return zero, fmt.Errorf("validation failed for %s: %w", name, err)

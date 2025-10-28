@@ -30,7 +30,6 @@ import (
 )
 
 const (
-	// quarantineAnnotationIndexName is the index name for quarantined nodes
 	quarantineAnnotationIndexName = "quarantineAnnotation"
 )
 
@@ -221,7 +220,6 @@ func (ni *NodeInformer) detectAndHandleManualUncordon(oldNode, newNode *v1.Node)
 
 	slog.Info("Detected manual uncordon of FQ-quarantined node", "node", newNode.Name)
 
-	// Call the manual uncordon handler if registered
 	if ni.onManualUncordon != nil {
 		if err := ni.onManualUncordon(newNode.Name); err != nil {
 			slog.Error("Failed to handle manual uncordon for node", "node", newNode.Name, "error", err)
@@ -274,7 +272,6 @@ func (ni *NodeInformer) handleDeleteNode(obj interface{}) {
 
 	slog.Info("Node deleted", "node", node.Name)
 
-	// Check if the node had the quarantine annotation
 	_, hadQuarantineAnnotation := node.Annotations[common.QuarantineHealthEventIsCordonedAnnotationKey]
 
 	// If the node was quarantined and had the annotation, call the callback so that
