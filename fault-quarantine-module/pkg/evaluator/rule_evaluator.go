@@ -300,7 +300,7 @@ func extractJSONFieldName(jsonTag, fieldName string) string {
 }
 
 func handleSliceOrArray(v reflect.Value) interface{} {
-	if v.IsNil() {
+	if v.Kind() == reflect.Slice && v.IsNil() {
 		return nil
 	}
 
