@@ -92,21 +92,11 @@ crane blob "$IMAGE@$SBOM_DIGEST"
 
 SLSA (Supply chain Levels for Software Artifacts) provides verifiable information about how images were built.
 
-**View all attestations**: https://github.com/NVIDIA/NVSentinel/attestations
+NVSentinel images include SLSA Build Provenance attestations that can be verified both manually (using CLI tools) and automatically (using Kubernetes admission policies). 
 
-**Verify a specific image**:
+Refer to [distros/kubernetes/nvsentinel/policies/README.md](distros/kubernetes/nvsentinel/policies/README.md) for:
 
-```shell
-gh attestation verify "oci://$IMAGE_DIGEST" \
-  -R NVIDIA/NVSentinel \
-  --bundle-from-oci \
-  --signer-workflow 'NVIDIA/NVSentinel/.github/workflows/publish\.yml@refs/heads/main' \
-  --source-ref refs/heads/main \
-  --cert-oidc-issuer https://token.actions.githubusercontent.com \
-  --format json --jq '.[].verificationResult.summary'
-```
+- Manual verification commands using `cosign` or `gh` CLI
+- Automated in-cluster verification using Sigstore Policy Controller
+- Installation and configuration instructions
 
-This verifies:
-- The image was built by the official NVSentinel publish workflow
-- The build occurred in the NVIDIA/NVSentinel repository
-- The build was properly signed and attested

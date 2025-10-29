@@ -19,18 +19,28 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/common.sh"
 
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+VERSIONS_FILE="${REPO_ROOT}/.versions.yaml"
+
+# Detect platform architecture
+ARCH=$(uname -m)
+log "Detected architecture: $ARCH"
+
+# Load versions from .versions.yaml
+KWOK_VERSION=$(yq eval '.testing_tools.kwok' "$VERSIONS_FILE")
+KWOK_CHART_VERSION=$(yq eval '.testing_tools.kwok_chart' "$VERSIONS_FILE")
+HELM_VERSION=$(yq eval '.testing_tools.helm' "$VERSIONS_FILE")
+PROMETHEUS_OPERATOR_VERSION=$(yq eval '.cluster.prometheus_operator' "$VERSIONS_FILE")
+GPU_OPERATOR_VERSION=$(yq eval '.cluster.gpu_operator' "$VERSIONS_FILE")
+CERT_MANAGER_VERSION=$(yq eval '.cluster.cert_manager' "$VERSIONS_FILE")
+
+# Configuration
 CLUSTER_NAME="${CLUSTER_NAME:-nvsentinel-uat}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
-CSP="${CSP:-aws}"
-
-PROMETHEUS_OPERATOR_VERSION="${PROMETHEUS_OPERATOR_VERSION:-78.5.0}"
-GPU_OPERATOR_VERSION="${GPU_OPERATOR_VERSION:-v25.10.0}"
-CERT_MANAGER_VERSION="${CERT_MANAGER_VERSION:-1.19.1}"
+CSP="${CSP:-kind}"  # Default to kind for local development
 NVSENTINEL_VERSION="${NVSENTINEL_VERSION:-}"
-KWOK_VERSION="${KWOK_VERSION:-v0.7.0}"
 FAKE_GPU_NODE_COUNT="${FAKE_GPU_NODE_COUNT:-10}"
 
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 VALUES_DIR="${SCRIPT_DIR}/${CSP}"
 
 PROMETHEUS_VALUES="${VALUES_DIR}/prometheus-operator-values.yaml"
@@ -38,6 +48,9 @@ GPU_OPERATOR_VALUES="${VALUES_DIR}/gpu-operator-values.yaml"
 CERT_MANAGER_VALUES="${VALUES_DIR}/cert-manager-values.yaml"
 NVSENTINEL_VALUES="${VALUES_DIR}/nvsentinel-values.yaml"
 NVSENTINEL_CHART="${REPO_ROOT}/distros/kubernetes/nvsentinel"
+
+# ARM64-specific values file (if needed)
+NVSENTINEL_ARM64_VALUES="${REPO_ROOT}/distros/kubernetes/nvsentinel/values-tilt-arm64.yaml"
 
 install_prometheus_operator() {
     log "Installing Prometheus Operator (version $PROMETHEUS_OPERATOR_VERSION)..."
@@ -68,21 +81,32 @@ install_cert_manager() {
         --create-namespace \
         --values "$CERT_MANAGER_VALUES" \
         --version "$CERT_MANAGER_VERSION" \
-        --wait; then
+        --wait \
+        --timeout 10m; then
         error "Failed to install cert-manager"
+    fi
+    
+    log "Waiting for cert-manager webhook to be ready..."
+    if ! kubectl wait --for=condition=available --timeout=5m \
+        -n cert-manager deployment/cert-manager-webhook; then
+        log "WARNING: cert-manager webhook did not become ready in time"
+        log "Checking webhook pod status:"
+        kubectl get pods -n cert-manager -l app.kubernetes.io/component=webhook
+        kubectl describe pods -n cert-manager -l app.kubernetes.io/component=webhook | tail -30
     fi
     
     log "cert-manager installed successfully ✓"
 }
 
 install_kwok() {
-    log "Installing KWOK (version $KWOK_VERSION)..."
+    log "Installing KWOK (app version: $KWOK_VERSION, chart version: $KWOK_CHART_VERSION)..."
     
     helm repo add sigs-kwok https://kwok.sigs.k8s.io/charts/
     helm repo update
     
     if ! helm upgrade --install kwok sigs-kwok/kwok \
         --namespace kube-system \
+        --version "$KWOK_CHART_VERSION" \
         --set hostNetwork=true \
         --wait \
         --timeout=5m; then
@@ -93,6 +117,7 @@ install_kwok() {
     
     if ! helm upgrade --install kwok-stage-fast sigs-kwok/stage-fast \
         --namespace kube-system \
+        --version "$KWOK_CHART_VERSION" \
         --wait \
         --timeout=5m; then
         error "Failed to install KWOK stage-fast"
@@ -188,6 +213,26 @@ wait_for_fake_gpu_stack() {
 install_nvsentinel() {
     log "Installing NVSentinel (version: $NVSENTINEL_VERSION)..."
     
+    # Validate required variables
+    if [[ -z "$NVSENTINEL_CHART" ]]; then
+        error "NVSENTINEL_CHART is not set"
+    fi
+    
+    if [[ ! -d "$NVSENTINEL_CHART" ]]; then
+        error "NVSentinel chart directory not found: $NVSENTINEL_CHART"
+    fi
+    
+    if [[ -z "$NVSENTINEL_VALUES" ]]; then
+        error "NVSENTINEL_VALUES is not set"
+    fi
+    
+    if [[ ! -f "$NVSENTINEL_VALUES" ]]; then
+        error "NVSentinel values file not found: $NVSENTINEL_VALUES"
+    fi
+    
+    log "Using chart: $NVSENTINEL_CHART"
+    log "Using values: $NVSENTINEL_VALUES"
+    
     local extra_set_args=()
     if [[ "$CSP" == "aws" ]]; then
         local aws_account_id
@@ -202,14 +247,34 @@ install_nvsentinel() {
         )
     fi
     
-    if ! helm upgrade --install nvsentinel "$NVSENTINEL_CHART" \
-        --namespace nvsentinel \
-        --create-namespace \
-        --values "$NVSENTINEL_VALUES" \
-        --set global.image.tag="$NVSENTINEL_VERSION" \
-        "${extra_set_args[@]}" \
-        --timeout 20m \
-        --wait; then
+    # Build helm command with proper array handling
+    local helm_args=(
+        "upgrade" "--install" "nvsentinel" "$NVSENTINEL_CHART"
+        "--namespace" "nvsentinel"
+        "--create-namespace"
+        "--values" "$NVSENTINEL_VALUES"
+    )
+    
+    # Add ARM64-specific values if on ARM architecture
+    if [[ "$ARCH" == "arm64" ]] || [[ "$ARCH" == "aarch64" ]]; then
+        if [[ -f "$NVSENTINEL_ARM64_VALUES" ]]; then
+            log "Using ARM64-specific values: $NVSENTINEL_ARM64_VALUES"
+            helm_args+=("--values" "$NVSENTINEL_ARM64_VALUES")
+        else
+            log "WARNING: ARM64 architecture detected but ARM64 values file not found: $NVSENTINEL_ARM64_VALUES"
+        fi
+    fi
+    
+    helm_args+=("--set" "global.image.tag=$NVSENTINEL_VERSION")
+    
+    # Add CSP-specific args if any
+    if [[ ${#extra_set_args[@]} -gt 0 ]]; then
+        helm_args+=("${extra_set_args[@]}")
+    fi
+    
+    helm_args+=("--timeout" "20m" "--wait")
+    
+    if ! helm "${helm_args[@]}"; then
         error "Failed to install NVSentinel"
     fi
     
@@ -218,6 +283,17 @@ install_nvsentinel() {
 
 main() {
     log "Starting application installation for NVSentinel UAT testing..."
+    log "Architecture: $ARCH"
+    log "Target CSP: $CSP (override with CSP=<aws|azure|gcp|kind|oci>)"
+    log "Versions from .versions.yaml:"
+    log "  - KWOK: $KWOK_VERSION (chart: $KWOK_CHART_VERSION)"
+    log "  - Prometheus Operator: $PROMETHEUS_OPERATOR_VERSION"
+    log "  - GPU Operator: $GPU_OPERATOR_VERSION"
+    log "  - cert-manager: $CERT_MANAGER_VERSION"
+    
+    if [[ "$ARCH" == "arm64" ]] || [[ "$ARCH" == "aarch64" ]]; then
+        log "ARM64 architecture detected - using compatible image overrides for MongoDB"
+    fi
     
     install_prometheus_operator
     install_cert_manager

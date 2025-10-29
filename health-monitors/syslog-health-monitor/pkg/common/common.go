@@ -23,10 +23,15 @@ import (
 	"strings"
 
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/patterns"
 	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/types"
 
 	"github.com/thedatashed/xlsxreader"
 )
+
+// XIDPattern is the canonical pattern for detecting XID errors.
+// Re-exported from the patterns package for convenience.
+var XIDPattern = patterns.XIDPattern
 
 // NVIDIA XID Error Catalog - Embedded Excel File
 //
