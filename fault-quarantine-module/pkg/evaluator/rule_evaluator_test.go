@@ -28,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/common"
@@ -188,14 +189,7 @@ func TestNodeToSkipLabelRuleEvaluator(t *testing.T) {
 
 			go nodeInformer.Run(stopCh)
 
-			for i := 0; i < 100; i++ {
-				if nodeInformer.HasSynced() {
-					break
-				}
-				time.Sleep(50 * time.Millisecond)
-			}
-
-			if !nodeInformer.HasSynced() {
+			if ok := cache.WaitForCacheSync(stopCh, nodeInformer.GetInformer().HasSynced); !ok {
 				t.Fatalf("NodeInformer failed to sync")
 			}
 

@@ -142,7 +142,7 @@ func (m *FakeChangeStreamWatcher) GetUnprocessedEventCount(
 	return 0, nil
 }
 
-// Reset clears all call counters and tracked parameters.
+// Reset clears all call counters, tracked parameters, and drains any pending events from EventsChan.
 // This is useful when reusing the same fake across multiple test cases.
 func (m *FakeChangeStreamWatcher) Reset() {
 	m.mu.Lock()
@@ -158,6 +158,10 @@ func (m *FakeChangeStreamWatcher) Reset() {
 	m.LastGetUnprocessedEventCountCtx = nil
 	m.LastGetUnprocessedEventCountID = primitive.ObjectID{}
 	m.LastGetUnprocessedEventCountFilters = nil
+
+	for len(m.EventsChan) > 0 {
+		<-m.EventsChan
+	}
 }
 
 // GetCallCounts returns the current call counts for all methods in a thread-safe manner.

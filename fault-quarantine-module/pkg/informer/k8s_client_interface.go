@@ -24,9 +24,9 @@ import (
 
 // K8sClientInterface defines the methods used by Reconciler from k8sClient
 type K8sClientInterface interface {
-	TaintAndCordonNodeAndSetAnnotations(ctx context.Context, nodeName string,
+	QuarantineNodeAndSetAnnotations(ctx context.Context, nodeName string,
 		taints []config.Taint, isCordon bool, annotations map[string]string, labelMap map[string]string) error
-	UnTaintAndUnCordonNodeAndRemoveAnnotations(ctx context.Context, nodeName string,
+	UnQuarantineNodeAndRemoveAnnotations(ctx context.Context, nodeName string,
 		taints []config.Taint, annotationKeys []string, labelsToRemove []string,
 		labelMap map[string]string) error
 	HandleManualUncordonCleanup(ctx context.Context, nodeName string, taintsToRemove []config.Taint,
@@ -34,6 +34,6 @@ type K8sClientInterface interface {
 	UpdateNode(ctx context.Context, nodeName string, updateFn func(*v1.Node) error) error
 	EnsureCircuitBreakerConfigMap(ctx context.Context, name, namespace string, initialStatus breaker.State) error
 	ReadCircuitBreakerState(ctx context.Context, name, namespace string) (breaker.State, error)
-	WriteCircuitBreakerState(ctx context.Context, name, namespace, status breaker.State) error
+	WriteCircuitBreakerState(ctx context.Context, name, namespace string, state breaker.State) error
 	GetTotalNodes(ctx context.Context) (int, error)
 }

@@ -99,7 +99,7 @@ func TestGetEnvVar(t *testing.T) {
 	t.Run("required with validation", func(t *testing.T) {
 		t.Setenv("TEST_REQUIRED", "42")
 
-		value, err := GetEnvVar[int]("TEST_REQUIRED", func(v int) error {
+		value, err := GetEnvVar("TEST_REQUIRED", nil, func(v int) error {
 			if v <= 0 {
 				return fmt.Errorf("must be positive")
 			}
@@ -114,14 +114,15 @@ func TestGetEnvVar(t *testing.T) {
 	})
 
 	t.Run("missing required returns error", func(t *testing.T) {
-		_, err := GetEnvVar[int]("TEST_MISSING_REQUIRED")
+		_, err := GetEnvVar[int]("TEST_MISSING_REQUIRED", nil, nil)
 		if err == nil {
 			t.Error("expected error for missing env var but got none")
 		}
 	})
 
 	t.Run("with default value", func(t *testing.T) {
-		value, err := GetEnvVar[int]("TEST_WITH_DEFAULT", 99)
+		defaultVal := 99
+		value, err := GetEnvVar("TEST_WITH_DEFAULT", &defaultVal, nil)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -133,7 +134,8 @@ func TestGetEnvVar(t *testing.T) {
 	t.Run("with default and validation", func(t *testing.T) {
 		t.Setenv("TEST_DEFAULT_VAL", "42")
 
-		value, err := GetEnvVar[int]("TEST_DEFAULT_VAL", 10, func(v int) error {
+		defaultVal := 10
+		value, err := GetEnvVar("TEST_DEFAULT_VAL", &defaultVal, func(v int) error {
 			if v <= 0 {
 				return fmt.Errorf("must be positive")
 			}
@@ -150,7 +152,7 @@ func TestGetEnvVar(t *testing.T) {
 	t.Run("validation failure", func(t *testing.T) {
 		t.Setenv("TEST_VALIDATION_FAIL", "5")
 
-		_, err := GetEnvVar[int]("TEST_VALIDATION_FAIL", func(v int) error {
+		_, err := GetEnvVar("TEST_VALIDATION_FAIL", nil, func(v int) error {
 			if v <= 10 {
 				return fmt.Errorf("must be greater than 10")
 			}
@@ -166,17 +168,17 @@ func TestGetEnvVar(t *testing.T) {
 		t.Setenv("TEST_BOOL", "true")
 		t.Setenv("TEST_FLOAT", "3.14")
 
-		strVal, err := GetEnvVar[string]("TEST_STRING")
+		strVal, err := GetEnvVar[string]("TEST_STRING", nil, nil)
 		if err != nil || strVal != "hello" {
 			t.Errorf("string test failed: %v, got %s", err, strVal)
 		}
 
-		boolVal, err := GetEnvVar[bool]("TEST_BOOL")
+		boolVal, err := GetEnvVar[bool]("TEST_BOOL", nil, nil)
 		if err != nil || !boolVal {
 			t.Errorf("bool test failed: %v, got %v", err, boolVal)
 		}
 
-		floatVal, err := GetEnvVar[float64]("TEST_FLOAT")
+		floatVal, err := GetEnvVar[float64]("TEST_FLOAT", nil, nil)
 		if err != nil || floatVal != 3.14 {
 			t.Errorf("float test failed: %v, got %f", err, floatVal)
 		}
@@ -187,7 +189,7 @@ func TestGetEnvVarAllSupportedTypes(t *testing.T) {
 	t.Run("int type", func(t *testing.T) {
 		t.Setenv("TEST_INT", "42")
 
-		value, err := GetEnvVar[int]("TEST_INT")
+		value, err := GetEnvVar[int]("TEST_INT", nil, nil)
 		if err != nil || value != 42 {
 			t.Errorf("int test failed: %v, got %d", err, value)
 		}
@@ -196,7 +198,7 @@ func TestGetEnvVarAllSupportedTypes(t *testing.T) {
 	t.Run("uint type", func(t *testing.T) {
 		t.Setenv("TEST_UINT", "4294967295")
 
-		value, err := GetEnvVar[uint]("TEST_UINT")
+		value, err := GetEnvVar[uint]("TEST_UINT", nil, nil)
 		if err != nil || value != 4294967295 {
 			t.Errorf("uint test failed: %v, got %d", err, value)
 		}
@@ -205,7 +207,7 @@ func TestGetEnvVarAllSupportedTypes(t *testing.T) {
 	t.Run("float64 type", func(t *testing.T) {
 		t.Setenv("TEST_FLOAT64", "3.14159")
 
-		value, err := GetEnvVar[float64]("TEST_FLOAT64")
+		value, err := GetEnvVar[float64]("TEST_FLOAT64", nil, nil)
 		if err != nil || value != 3.14159 {
 			t.Errorf("float64 test failed: %v, got %f", err, value)
 		}
@@ -214,7 +216,7 @@ func TestGetEnvVarAllSupportedTypes(t *testing.T) {
 	t.Run("bool type", func(t *testing.T) {
 		t.Setenv("TEST_BOOL", "true")
 
-		value, err := GetEnvVar[bool]("TEST_BOOL")
+		value, err := GetEnvVar[bool]("TEST_BOOL", nil, nil)
 		if err != nil || !value {
 			t.Errorf("bool test failed: %v, got %v", err, value)
 		}
@@ -223,7 +225,7 @@ func TestGetEnvVarAllSupportedTypes(t *testing.T) {
 	t.Run("string type", func(t *testing.T) {
 		t.Setenv("TEST_STRING_TYPE", "hello world")
 
-		value, err := GetEnvVar[string]("TEST_STRING_TYPE")
+		value, err := GetEnvVar[string]("TEST_STRING_TYPE", nil, nil)
 		if err != nil || value != "hello world" {
 			t.Errorf("string test failed: %v, got %s", err, value)
 		}
@@ -355,7 +357,7 @@ func TestParseUintBoundsChecking(t *testing.T) {
 func TestGetEnvVarBoundsValidation(t *testing.T) {
 	t.Run("int within valid range", func(t *testing.T) {
 		t.Setenv("TEST_VALID_INT", "100")
-		value, err := GetEnvVar[int]("TEST_VALID_INT")
+		value, err := GetEnvVar[int]("TEST_VALID_INT", nil, nil)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -366,7 +368,7 @@ func TestGetEnvVarBoundsValidation(t *testing.T) {
 
 	t.Run("uint within valid range", func(t *testing.T) {
 		t.Setenv("TEST_VALID_UINT", "100")
-		value, err := GetEnvVar[uint]("TEST_VALID_UINT")
+		value, err := GetEnvVar[uint]("TEST_VALID_UINT", nil, nil)
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
 		}
@@ -377,7 +379,7 @@ func TestGetEnvVarBoundsValidation(t *testing.T) {
 
 	t.Run("negative uint should fail", func(t *testing.T) {
 		t.Setenv("TEST_NEGATIVE_UINT", "-1")
-		_, err := GetEnvVar[uint]("TEST_NEGATIVE_UINT")
+		_, err := GetEnvVar[uint]("TEST_NEGATIVE_UINT", nil, nil)
 		if err == nil {
 			t.Error("expected error for negative uint but got none")
 		}
@@ -385,9 +387,22 @@ func TestGetEnvVarBoundsValidation(t *testing.T) {
 
 	t.Run("invalid int string should fail", func(t *testing.T) {
 		t.Setenv("TEST_INVALID_INT", "not-a-number")
-		_, err := GetEnvVar[int]("TEST_INVALID_INT")
+		_, err := GetEnvVar[int]("TEST_INVALID_INT", nil, nil)
 		if err == nil {
 			t.Error("expected error for invalid int string but got none")
+		}
+	})
+
+	t.Run("default value validation failure", func(t *testing.T) {
+		invalidDefault := -5
+		_, err := GetEnvVar("TEST_MISSING_WITH_INVALID_DEFAULT", &invalidDefault, func(v int) error {
+			if v <= 0 {
+				return fmt.Errorf("must be positive")
+			}
+			return nil
+		})
+		if err == nil {
+			t.Error("expected validation error for invalid default value but got none")
 		}
 	})
 }

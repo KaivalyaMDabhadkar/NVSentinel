@@ -25,7 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nvidia/nvsentinel/commons/pkg/configmanager"
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
 	"github.com/nvidia/nvsentinel/commons/pkg/server"
 	"github.com/nvidia/nvsentinel/fault-quarantine-module/pkg/initializer"
@@ -52,10 +51,6 @@ func main() {
 func run() error {
 	metricsPort, mongoClientCertMountPath, kubeconfigPath, dryRun, circuitBreakerEnabled,
 		circuitBreakerPercentage, circuitBreakerDuration, tomlConfigPath := parseFlags()
-
-	if _, err := configmanager.GetEnvVar[string]("POD_NAMESPACE"); err != nil {
-		return fmt.Errorf("failed to get POD_NAMESPACE: %w", err)
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

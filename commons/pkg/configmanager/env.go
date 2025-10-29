@@ -23,10 +23,10 @@ import (
 )
 
 // GetEnvVar retrieves an environment variable and converts it to type T.
-// Type must be explicitly specified: GetEnvVar[int]("PORT")
-// If no default value is provided, the environment variable is required.
-// If a default value is provided, it will be used when the environment variable is not set.
-// Optional validator function can be provided - it should return nil if validation passes, error otherwise.
+// Type must be explicitly specified: GetEnvVar[int]("PORT", nil, nil)
+// If defaultValue is nil, the environment variable is required.
+// If defaultValue is non-nil, it will be used when the environment variable is not set.
+// Optional validator function validates the final value (from env or default).
 //
 // Supported types:
 //   - int
@@ -37,47 +37,31 @@ import (
 //
 // Example usage:
 //
-//	// Required env var (must specify type explicitly)
-//	port, err := configmanager.GetEnvVar[int]("PORT")
+//	// Required env var
+//	port, err := configmanager.GetEnvVar[int]("PORT", nil, nil)
 //
-//	// With default value (type can be inferred)
-//	timeout, err := configmanager.GetEnvVar[int]("TIMEOUT", 30)
+//	// With default value
+//	defaultTimeout := 30
+//	timeout, err := configmanager.GetEnvVar[int]("TIMEOUT", &defaultTimeout, nil)
 //
 //	// With default and validation
-//	maxConn, err := configmanager.GetEnvVar[int]("MAX_CONN", 100, func(v int) error {
+//	defaultMaxConn := 100
+//	maxConn, err := configmanager.GetEnvVar[int]("MAX_CONN", &defaultMaxConn, func(v int) error {
 //	    if v <= 0 { return fmt.Errorf("must be positive") }
 //	    return nil
 //	})
 //
-//	// Required with validation (must specify type explicitly)
-//	workers, err := configmanager.GetEnvVar[int]("WORKERS", func(v int) error {
+//	// Required with validation
+//	workers, err := configmanager.GetEnvVar[int]("WORKERS", nil, func(v int) error {
 //	    if v <= 0 { return fmt.Errorf("must be positive") }
 //	    return nil
 //	})
-func GetEnvVar[T any](name string, defaultAndValidator ...any) (T, error) {
+func GetEnvVar[T any](name string, defaultValue *T, validator func(T) error) (T, error) {
 	var zero T
-
-	var defaultValue *T
-
-	var validator func(T) error
-
-	// Parse variadic arguments: [defaultValue], [validator], or [defaultValue, validator]
-	for _, arg := range defaultAndValidator {
-		switch v := arg.(type) {
-		case func(T) error:
-			validator = v
-		case T:
-			defaultValue = &v
-		}
-	}
 
 	valueStr, exists := os.LookupEnv(name)
 	if !exists {
-		if defaultValue != nil {
-			return *defaultValue, nil
-		}
-
-		return zero, fmt.Errorf("environment variable %s is not set", name)
+		return handleMissingEnvVarWithDefault(name, defaultValue, validator)
 	}
 
 	value, err := parseValue[T](valueStr)
@@ -92,6 +76,22 @@ func GetEnvVar[T any](name string, defaultAndValidator ...any) (T, error) {
 	}
 
 	return value, nil
+}
+
+func handleMissingEnvVarWithDefault[T any](name string, defaultValue *T, validator func(T) error) (T, error) {
+	var zero T
+
+	if defaultValue == nil {
+		return zero, fmt.Errorf("environment variable %s is not set", name)
+	}
+
+	if validator != nil {
+		if err := validator(*defaultValue); err != nil {
+			return zero, fmt.Errorf("validation failed for default value of %s: %w", name, err)
+		}
+	}
+
+	return *defaultValue, nil
 }
 
 func parseValue[T any](valueStr string) (T, error) {
@@ -180,9 +180,11 @@ func parseBool(valueStr string) (bool, error) {
 //	    return fmt.Errorf("missing required vars: %v", errors)
 //	}
 type EnvVarSpec struct {
-	Name         string // Required: The environment variable name to read
-	Optional     bool   // Optional: If true, env var is optional; if false, it's required (default: false/required)
-	DefaultValue string // Optional: Value to use when env var is not set (default: "")
+	Name     string // Required: The environment variable name to read
+	Optional bool   // Optional: If true, env var is optional; if false, it's required (default: false/required)
+	// DefaultValue is used when env var is not set.
+	// Empty string defaults are treated as "no value" and excluded from results map.
+	DefaultValue string
 }
 
 // ReadEnvVars reads multiple environment variables based on the provided specifications.
@@ -192,9 +194,10 @@ type EnvVarSpec struct {
 // Example usage:
 //
 //	specs := []configmanager.EnvVarSpec{
-//	    {Name: "MONGODB_URI"},
-//	    {Name: "MONGODB_DATABASE_NAME"},
-//	    {Name: "MONGODB_PORT", Optional: true, DefaultValue: "27017"},
+//	    {Name: "MONGODB_URI"},                                     // Required
+//	    {Name: "MONGODB_DATABASE_NAME"},                           // Required
+//	    {Name: "MONGODB_PORT", Optional: true, DefaultValue: "27017"}, // Included with default
+//	    {Name: "DEBUG_MODE", Optional: true, DefaultValue: ""},    // NOT included (empty default)
 //	}
 //	envVars, errors := configmanager.ReadEnvVars(specs)
 //	if len(errors) > 0 {
@@ -218,6 +221,7 @@ func ReadEnvVars(specs []EnvVarSpec) (map[string]string, []error) {
 				errors = append(errors, err)
 			}
 
+			// Only include non-empty defaults in results map to distinguish "not set" from "set to empty"
 			if defaultVal != "" {
 				results[spec.Name] = defaultVal
 			}

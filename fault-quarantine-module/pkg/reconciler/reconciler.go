@@ -393,14 +393,14 @@ func (r *Reconciler) handleEvent(
 }
 
 func (r *Reconciler) hasExistingQuarantine(nodeName string) (map[string]string, bool) {
-	annotations, annErr := r.getNodeQuarantineAnnotations(nodeName)
-	if annErr != nil {
-		slog.Error("Failed to fetch annotations for node", "node", nodeName, "error", annErr)
-		return annotations, false
+	annotations, err := r.getNodeQuarantineAnnotations(nodeName)
+	if err != nil {
+		slog.Error("Failed to fetch annotations for node", "node", nodeName, "error", err)
+		return make(map[string]string), false
 	}
 
 	if annotations == nil {
-		return annotations, false
+		return make(map[string]string), false
 	}
 
 	annotationVal, exists := annotations[common.QuarantineHealthEventAnnotationKey]
@@ -635,7 +635,7 @@ func (r *Reconciler) applyQuarantine(
 		return true
 	})
 
-	err := r.k8sClient.TaintAndCordonNodeAndSetAnnotations(
+	err := r.k8sClient.QuarantineNodeAndSetAnnotations(
 		ctx,
 		event.HealthEvent.NodeName,
 		taintsToBeApplied,
@@ -753,7 +753,7 @@ func (r *Reconciler) handleQuarantinedNode(
 	event *protos.HealthEvent,
 	ruleSetEvals []evaluator.RuleSetEvaluatorIface,
 ) bool {
-	healthEventsAnnotationMap, annotations, err := r.getHealthEventsFromAnnotation(ctx, event)
+	healthEventsAnnotationMap, annotations, err := r.getHealthEventsFromAnnotation(event)
 	if err != nil {
 		metrics.ProcessingErrors.WithLabelValues("get_node_annotations_error").Inc()
 		return !errors.Is(err, errNoQuarantineAnnotation)
@@ -807,7 +807,6 @@ func (r *Reconciler) handleQuarantinedNode(
 }
 
 func (r *Reconciler) getHealthEventsFromAnnotation(
-	ctx context.Context,
 	event *protos.HealthEvent,
 ) (*healthEventsAnnotation.HealthEventsAnnotationMap, map[string]string, error) {
 	annotations, err := r.getNodeQuarantineAnnotations(event.NodeName)
@@ -973,7 +972,7 @@ func (r *Reconciler) performUncordon(
 		statemanager.NVSentinelStateLabelKey,
 	}
 
-	if err := r.k8sClient.UnTaintAndUnCordonNodeAndRemoveAnnotations(
+	if err := r.k8sClient.UnQuarantineNodeAndRemoveAnnotations(
 		ctx,
 		event.NodeName,
 		taintsToBeRemoved,
@@ -1092,10 +1091,6 @@ func (r *Reconciler) getNodeQuarantineAnnotations(nodeName string) (map[string]s
 
 func (r *Reconciler) cleanupManualUncordonAnnotation(ctx context.Context, nodeName string,
 	annotations map[string]string) {
-	if annotations == nil {
-		return
-	}
-
 	if _, hasManualUncordon := annotations[common.QuarantinedNodeUncordonedManuallyAnnotationKey]; hasManualUncordon {
 		slog.Info("Removing manual uncordon annotation from node before applying new quarantine", "node", nodeName)
 

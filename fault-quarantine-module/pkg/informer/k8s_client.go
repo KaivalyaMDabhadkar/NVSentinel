@@ -143,7 +143,7 @@ func (c *FaultQuarantineClient) UpdateNode(ctx context.Context, nodeName string,
 			return err
 		}
 
-		slog.Debug("Updated node (eventual consistency)", "node", nodeName)
+		slog.Debug("Updated node", "node", nodeName)
 
 		return nil
 	})
@@ -168,7 +168,7 @@ func (c *FaultQuarantineClient) ReadCircuitBreakerState(
 }
 
 func (c *FaultQuarantineClient) WriteCircuitBreakerState(
-	ctx context.Context, name, namespace string, status breaker.State,
+	ctx context.Context, name, namespace string, state breaker.State,
 ) error {
 	cmClient := c.Clientset.CoreV1().ConfigMaps(namespace)
 
@@ -183,7 +183,7 @@ func (c *FaultQuarantineClient) WriteCircuitBreakerState(
 			cm.Data = map[string]string{}
 		}
 
-		cm.Data["status"] = string(status)
+		cm.Data["status"] = string(state)
 
 		_, err = cmClient.Update(ctx, cm, metav1.UpdateOptions{})
 		if err != nil {
@@ -194,7 +194,7 @@ func (c *FaultQuarantineClient) WriteCircuitBreakerState(
 	})
 }
 
-func (c *FaultQuarantineClient) TaintAndCordonNodeAndSetAnnotations(
+func (c *FaultQuarantineClient) QuarantineNodeAndSetAnnotations(
 	ctx context.Context,
 	nodename string,
 	taints []config.Taint,
@@ -300,7 +300,7 @@ func (c *FaultQuarantineClient) applyLabels(node *v1.Node, labels map[string]str
 	}
 }
 
-func (c *FaultQuarantineClient) UnTaintAndUnCordonNodeAndRemoveAnnotations(
+func (c *FaultQuarantineClient) UnQuarantineNodeAndRemoveAnnotations(
 	ctx context.Context,
 	nodename string,
 	taints []config.Taint,

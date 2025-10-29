@@ -246,7 +246,7 @@ func (b *slidingWindowBreaker) ForceState(ctx context.Context, s State) error {
 		ctx, b.cfg.ConfigMapName, b.cfg.ConfigMapNamespace, s)
 	if err != nil {
 		slog.Error("Error writing circuit breaker state", "error", err)
-		return err
+		return fmt.Errorf("error writing circuit breaker state: %w", err)
 	}
 
 	slog.Info("ForceState changed", "state", s)
@@ -301,7 +301,10 @@ func (b *slidingWindowBreaker) getTotalNodesWithRetry(ctx context.Context) (int,
 			return b.handleSuccessfulNodeCount(totalNodes, attempt)
 		}
 
-		b.handleZeroNodes(attempt, maxRetries)
+		if attempt == 0 {
+			slog.Info("Circuit breaker starting retries: NodeInformer cache may not be synced yet",
+				"maxRetries", maxRetries)
+		}
 
 		if attempt < maxRetries {
 			if err := b.performRetryDelay(ctx, attempt, maxRetries, initialDelay, maxDelay); err != nil {
@@ -359,14 +362,6 @@ func (b *slidingWindowBreaker) handleSuccessfulNodeCount(totalNodes, attempt int
 	}
 
 	return totalNodes, nil
-}
-
-// handleZeroNodes handles the case when GetTotalNodes returns 0
-func (b *slidingWindowBreaker) handleZeroNodes(attempt, maxRetries int) {
-	if attempt == 0 {
-		slog.Info("Circuit breaker starting retries: NodeInformer cache may not be synced yet",
-			"maxRetries", maxRetries)
-	}
 }
 
 // performRetryDelay calculates and performs the exponential backoff delay

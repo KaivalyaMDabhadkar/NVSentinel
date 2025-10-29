@@ -210,7 +210,7 @@ func loadEnvConfig() (*EnvConfig, error) {
 }
 
 func getPositiveIntEnvVar(name string, defaultValue int) (int, error) {
-	value, err := configmanager.GetEnvVar[int](name, defaultValue,
+	value, err := configmanager.GetEnvVar[int](name, &defaultValue,
 		func(v int) error {
 			if v <= 0 {
 				return fmt.Errorf("must be positive")
