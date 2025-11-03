@@ -483,6 +483,8 @@ func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string,
 	evicted, remainingPods := i.checkIfPodsPresentInNamespaceAndNode(namespaces, nodeName)
 	if evicted {
 		slog.Info("All pods on node have been deleted", "node", nodeName)
+		metrics.NodeDrainTimeout.WithLabelValues(nodeName).Set(0)
+
 		return nil
 	}
 
@@ -496,6 +498,8 @@ func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string,
 			metrics.NodeDrainTimeoutReached.WithLabelValues(nodeName, ns).Inc()
 		}
 
+		metrics.NodeDrainTimeout.WithLabelValues(nodeName).Set(0)
+
 		if err := i.forceDeletePods(ctx, remainingPods); err != nil {
 			slog.Error("Failed to force delete pods on node",
 				"node", nodeName,
@@ -507,6 +511,8 @@ func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string,
 		// After force deleting, requeue to verify pods are gone
 		return fmt.Errorf("force deleted %d pods, requeueing to verify deletion on node %s", len(remainingPods), nodeName)
 	}
+
+	metrics.NodeDrainTimeout.WithLabelValues(nodeName).Set(1)
 
 	podNames := make([]string, 0, len(remainingPods))
 	for _, pod := range remainingPods {

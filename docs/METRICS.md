@@ -5,12 +5,15 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 ## Table of Contents
 
 - [Fault Quarantine Module](#fault-quarantine)
+- [Node Drainer Module](#node-drainer)
+- [Fault Remediation Module](#fault-remediation)
 - [Labeler Module](#labeler)
 - [Janitor](#janitor)
 - [Platform Connectors](#platform-connectors)
 - [Health Monitors](#health-monitors)
   - [GPU Health Monitor](#gpu-health-monitor)
   - [Syslog Health Monitor](#syslog-health-monitor)
+  - [CSP Health Monitor](#csp-health-monitor)
 
 ---
 
@@ -64,6 +67,68 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 
 ---
 
+## Node Drainer Module
+
+### Event Processing Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `node_drainer_events_received_total` | Counter | - | Total number of events received from the watcher |
+| `node_drainer_events_replayed_total` | Counter | - | Total number of in-progress events replayed at startup |
+| `node_drainer_events_successfully_processed_total` | Counter | - | Total number of events successfully processed |
+| `node_drainer_processing_errors_total` | Counter | `error_type` | Total number of errors encountered during event processing |
+| `node_drainer_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
+| `node_drainer_queue_depth` | Gauge | - | Total number of pending events in the queue |
+
+### Health Event Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `node_drainer_healthy_event_total` | Counter | `node`, `check_name` | Total number of healthy events |
+| `node_drainer_unhealthy_event_total` | Counter | `node`, `check_name` | Total number of unhealthy events |
+| `node_drainer_healthy_event_with_node_drain_cancel_total` | Counter | - | Total number of healthy events that led to the cancellation of node draining |
+
+### Node Draining Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `node_drainer_node_drain_successful_total` | Counter | `node` | Total number of successful node drainings |
+| `node_drainer_node_drain_errors_total` | Counter | `error_type`, `node` | Total number of errors encountered while draining a node |
+| `node_drainer_node_drain_status` | Gauge | `node` | Shows if a node is currently being drained (1) or not (0) |
+| `node_drainer_waiting_for_timeout` | Gauge | `node` | Shows if node drainer operation is waiting for timeout before force deletion (1=waiting, 0=not waiting) |
+| `node_drainer_force_delete_pods_after_timeout` | Counter | `node`, `namespace` | Total number of node drainer operations that reached timeout and force deleted pods |
+
+---
+
+## Fault Remediation Module
+
+### Event Processing Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `fault_remediation_events_received_total` | Counter | - | Total number of events received from the watcher |
+| `fault_remediation_events_successfully_processed_total` | Counter | - | Total number of events successfully processed |
+| `fault_remediation_processing_errors_total` | Counter | `error_type`, `node_name` | Total number of errors encountered during event processing |
+| `fault_remediation_unsupported_actions_total` | Counter | `action`, `node_name` | Total number of health events with currently unsupported remediation actions |
+| `fault_remediation_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
+
+### Remediation Operation Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `fault_remediation_remediation_successful_total` | Counter | `node` | Total number of successful remediations |
+| `fault_remediation_remediation_failed_total` | Counter | `node` | Total number of failed remediations |
+
+### Log Collector Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `fault_remediation_log_collector_jobs_total` | Counter | `node_name`, `status` | Total number of log collector jobs. Status values: `success`, `failure`, `timeout` |
+| `fault_remediation_log_collector_job_duration_seconds` | Histogram | `node_name`, `status` | Duration of log collector jobs in seconds |
+| `fault_remediation_log_collector_errors_total` | Counter | `error_type`, `node_name` | Total number of errors encountered in log collector operations |
+
+---
+
 ## Labeler Module
 
 ### Event Processing Metrics
@@ -90,11 +155,18 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 
 ## Platform Connectors
 
-### Server Metrics
+### Kubernetes Connector Metrics
 
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
-| `platform_connector_health_events_received_total` | Counter | - | The total number of health events that the platform connector has received |
+| `k8s_platform_connector_node_condition_update_success_total` | Counter | - | Total number of successful node condition updates |
+| `k8s_platform_connector_node_condition_update_failed_total` | Counter | - | Total number of failed node condition updates |
+| `k8s_platform_connector_node_event_creation_success_total` | Counter | `node_name` | Total number of successful node event creations |
+| `k8s_platform_connector_node_event_creation_failed_total` | Counter | `node_name` | Total number of failed node event creations |
+| `k8s_platform_connector_node_event_update_success_total` | Counter | `node_name` | Total number of successful node event updates |
+| `k8s_platform_connector_node_event_update_failed_total` | Counter | `node_name` | Total number of failed node event updates |
+| `k8s_platform_connector_node_condition_update_duration_milliseconds` | Histogram | - | Duration of node condition updates in milliseconds. Uses linear buckets (0, 10, 500) |
+| `k8s_platform_connector_node_event_update_create_duration_milliseconds` | Histogram | - | Duration of node event updates/creations in milliseconds. Uses linear buckets (0, 10, 500) |
 
 ### Workqueue Metrics
 
@@ -157,6 +229,60 @@ SXID errors are NVSwitch-related errors:
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
 | `syslog_health_monitor_gpu_fallen_errors` | Counter | `node` | Total number of GPU fallen off bus errors detected |
+
+---
+
+### CSP Health Monitor
+
+The CSP health monitor tracks cloud provider maintenance events and node health issues.
+
+#### CSP Client Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `csp_health_monitor_csp_events_received_total` | Counter | `csp` | Total number of raw events received from CSP API/source |
+| `csp_health_monitor_csp_polling_duration_seconds` | Histogram | `csp` | Duration of CSP polling cycles |
+| `csp_health_monitor_csp_api_errors_total` | Counter | `csp`, `error_type` | Total number of errors encountered during CSP API calls |
+| `csp_health_monitor_csp_api_polling_duration_seconds` | Histogram | `csp`, `api` | Duration of CSP API polling cycles |
+| `csp_health_monitor_csp_monitor_errors_total` | Counter | `csp`, `error_type` | Total number of errors initializing or starting CSP monitors |
+| `csp_health_monitor_csp_events_by_type_unsupported_total` | Counter | `csp`, `event_type` | Total number of raw CSP events received, partitioned by event type code |
+
+#### Event Processing Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `csp_health_monitor_main_events_to_normalize_total` | Counter | `csp` | Total number of events passed to the normalizer |
+| `csp_health_monitor_main_normalization_errors_total` | Counter | `csp` | Total number of errors during event normalization |
+| `csp_health_monitor_main_events_received_total` | Counter | `csp` | Total number of normalized events received by the main processor |
+| `csp_health_monitor_main_events_processed_success_total` | Counter | `csp` | Total number of events successfully processed |
+| `csp_health_monitor_main_processing_errors_total` | Counter | `csp`, `error_type` | Total number of errors during event processing |
+| `csp_health_monitor_main_event_processing_duration_seconds` | Histogram | `csp` | Duration of processing a single event |
+
+#### Datastore Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `csp_health_monitor_main_datastore_upsert_attempts_total` | Counter | `csp` | Total number of attempts to upsert maintenance events |
+| `csp_health_monitor_main_datastore_upsert_success_total` | Counter | `csp` | Total number of successful maintenance event upserts |
+| `csp_health_monitor_main_datastore_upsert_errors_total` | Counter | `csp` | Total number of errors during maintenance event upserts |
+
+#### Trigger Engine Metrics
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `csp_health_monitor_trigger_poll_cycles_total` | Counter | - | Total number of polling cycles executed by the trigger engine |
+| `csp_health_monitor_trigger_poll_errors_total` | Counter | - | Total number of errors during a trigger engine poll cycle |
+| `csp_health_monitor_trigger_events_found_total` | Counter | `trigger_type` | Total number of events found potentially needing a trigger |
+| `csp_health_monitor_trigger_attempts_total` | Counter | `trigger_type` | Total number of trigger attempts made |
+| `csp_health_monitor_trigger_success_total` | Counter | `trigger_type` | Total number of successful triggers |
+| `csp_health_monitor_trigger_failures_total` | Counter | `trigger_type`, `failure_reason` | Total number of failed trigger attempts |
+| `csp_health_monitor_trigger_datastore_query_duration_seconds` | Histogram | `query_type` | Duration of datastore queries performed by the trigger engine |
+| `csp_health_monitor_trigger_datastore_query_errors_total` | Counter | `query_type` | Total number of errors during datastore queries |
+| `csp_health_monitor_trigger_datastore_update_errors_total` | Counter | `trigger_type` | Total number of errors updating event status after trigger |
+| `csp_health_monitor_trigger_uds_send_duration_seconds` | Histogram | - | Duration of sending health events via UDS |
+| `csp_health_monitor_trigger_uds_send_errors_total` | Counter | - | Total number of errors encountered when sending events via UDS |
+| `csp_health_monitor_node_not_ready_timeout_total` | Counter | `node_name` | Total number of nodes that remained not ready after the timeout period |
+| `csp_health_monitor_node_readiness_monitoring_started_total` | Counter | `node_name` | Total number of times background node readiness monitoring was started |
 
 ---
 

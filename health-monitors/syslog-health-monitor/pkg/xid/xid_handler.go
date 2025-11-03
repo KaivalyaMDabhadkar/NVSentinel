@@ -53,6 +53,11 @@ func NewXIDHandler(nodeName, defaultAgentName,
 }
 
 func (xidHandler *XIDHandler) ProcessLine(message string) (*pb.HealthEvents, error) {
+	start := time.Now()
+	defer func() {
+		metrics.XidProcessingLatency.Observe(time.Since(start).Seconds())
+	}()
+
 	if pciID, gpuUUID := xidHandler.parseNVRMGPUMapLine(message); pciID != "" && gpuUUID != "" {
 		normPCI := xidHandler.normalizePCI(pciID)
 		xidHandler.pciToGPUUUID[normPCI] = gpuUUID

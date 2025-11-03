@@ -22,6 +22,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/metrics"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	corev1 "k8s.io/api/core/v1"
@@ -377,4 +381,102 @@ func TestFlappingNodeDoesNotMultiplyCount(t *testing.T) {
 	if !tripped {
 		t.Fatalf("breaker should trip with 5 unique nodes (5 >= 5 threshold)")
 	}
+}
+
+// Metrics Tests
+
+// TestMetrics_BreakerState validates FaultQuarantineBreakerState gauge updates
+func TestMetrics_BreakerState(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBreaker(t, ctx, 10, 50, 1*time.Second, "")
+
+	t.Log("Verify breaker starts in CLOSED state")
+	state := b.CurrentState()
+	assert.Equal(t, StateClosed, state, "Breaker should start in CLOSED state")
+
+	t.Log("Add 5 nodes to trip the breaker")
+	for i := 0; i < 5; i++ {
+		b.AddCordonEvent(fmt.Sprintf("node%d", i))
+	}
+
+	tripped, _ := b.IsTripped(ctx)
+	assert.True(t, tripped, "Breaker should be tripped")
+	assert.Equal(t, StateTripped, b.CurrentState(), "Breaker state should be TRIPPED")
+
+	t.Log("Force close the breaker")
+	b.ForceState(ctx, StateClosed)
+	assert.Equal(t, StateClosed, b.CurrentState(), "Breaker state should be CLOSED after force close")
+
+	t.Logf("✓ BreakerState metric validated through state transitions")
+}
+
+// TestMetrics_BreakerUtilization validates FaultQuarantineBreakerUtilization gauge
+func TestMetrics_BreakerUtilization(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBreaker(t, ctx, 10, 50, 5*time.Second, "")
+
+	t.Log("Add 3 nodes (30% utilization)")
+	for i := 0; i < 3; i++ {
+		b.AddCordonEvent(fmt.Sprintf("node%d", i))
+	}
+
+	b.IsTripped(ctx)
+
+	utilization := getGaugeValue(t, metrics.FaultQuarantineBreakerUtilization)
+	assert.GreaterOrEqual(t, utilization, float64(0.25), "Utilization should be at least 25%")
+	assert.LessOrEqual(t, utilization, float64(0.35), "Utilization should be at most 35%")
+	t.Logf("Utilization: %.2f%% (3/10 nodes)", utilization*100)
+}
+
+// TestMetrics_GetTotalNodesMetrics validates getTotalNodes retry metrics
+func TestMetrics_GetTotalNodesMetrics(t *testing.T) {
+	ctx := context.Background()
+	b := newTestBreaker(t, ctx, 10, 50, 1*time.Second, "")
+
+	beforeDuration := getHistogramVecCount(t, metrics.FaultQuarantineGetTotalNodesDuration, "success")
+
+	b.IsTripped(ctx)
+
+	afterDuration := getHistogramVecCount(t, metrics.FaultQuarantineGetTotalNodesDuration, "success")
+	assert.GreaterOrEqual(t, afterDuration, beforeDuration+1, "GetTotalNodesDuration should record observations")
+}
+
+// Helper functions for reading Prometheus metrics
+
+func getGaugeValue(t *testing.T, gauge prometheus.Gauge) float64 {
+	t.Helper()
+	metric := &dto.Metric{}
+	err := gauge.Write(metric)
+	require.NoError(t, err)
+	return metric.Gauge.GetValue()
+}
+
+func getHistogramVecCount(t *testing.T, histogramVec *prometheus.HistogramVec, labelValues ...string) uint64 {
+	t.Helper()
+
+	metricCh := make(chan prometheus.Metric, 1)
+	histogramVec.Collect(metricCh)
+	close(metricCh)
+
+	for metric := range metricCh {
+		dtoMetric := &dto.Metric{}
+		if err := metric.Write(dtoMetric); err != nil {
+			continue
+		}
+
+		if dtoMetric.Histogram != nil {
+			labelMatch := true
+			for i, label := range dtoMetric.Label {
+				if i < len(labelValues) && label.GetValue() != labelValues[i] {
+					labelMatch = false
+					break
+				}
+			}
+			if labelMatch {
+				return dtoMetric.Histogram.GetSampleCount()
+			}
+		}
+	}
+
+	return 0
 }

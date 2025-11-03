@@ -26,10 +26,13 @@ import (
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/config"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/informers"
+	"github.com/nvidia/nvsentinel/node-drainer/pkg/metrics"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/queue"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/reconciler"
 	"github.com/nvidia/nvsentinel/store-client/pkg/storewatcher"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
@@ -440,8 +443,8 @@ func TestReconciler_AllowCompletionRequeue(t *testing.T) {
 		}
 		if pod.Status.Phase == v1.PodSucceeded {
 			pod.Finalizers = nil
-			_, _ = setup.client.CoreV1().Pods("completion-test").Update(setup.ctx, pod, metav1.UpdateOptions{})
-			_ = setup.client.CoreV1().Pods("completion-test").Delete(setup.ctx, "running-pod", metav1.DeleteOptions{
+			setup.client.CoreV1().Pods("completion-test").Update(setup.ctx, pod, metav1.UpdateOptions{})
+			setup.client.CoreV1().Pods("completion-test").Delete(setup.ctx, "running-pod", metav1.DeleteOptions{
 				GracePeriodSeconds: ptr.To(int64(0)),
 			})
 		}
@@ -683,7 +686,7 @@ func assertPodsEvicted(t *testing.T, client kubernetes.Interface, ctx context.Co
 			} else {
 				pod := p
 				pod.Finalizers = nil
-				_, _ = client.CoreV1().Pods(namespace).Update(ctx, &pod, metav1.UpdateOptions{})
+				client.CoreV1().Pods(namespace).Update(ctx, &pod, metav1.UpdateOptions{})
 			}
 		}
 		return allMarkedForDeletion
@@ -693,11 +696,360 @@ func assertPodsEvicted(t *testing.T, client kubernetes.Interface, ctx context.Co
 		pods, _ := client.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{})
 		for _, p := range pods.Items {
 			if p.DeletionTimestamp != nil {
-				_ = client.CoreV1().Pods(namespace).Delete(ctx, p.Name, metav1.DeleteOptions{
+				client.CoreV1().Pods(namespace).Delete(ctx, p.Name, metav1.DeleteOptions{
 					GracePeriodSeconds: ptr.To(int64(0)),
 				})
 			}
 		}
 		return len(pods.Items) == 0
 	}, 10*time.Second, 200*time.Millisecond)
+}
+
+// Metrics Tests
+
+// TestMetrics_EventProcessingMetrics tests TotalEventsReceived and TotalEventsSuccessfullyProcessed
+func TestMetrics_EventProcessingMetrics(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "immediate-*", Mode: config.ModeImmediateEvict},
+	}, false)
+
+	nodeName := "metrics-events-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	beforeReceived := getCounterValue(t, metrics.TotalEventsReceived)
+
+	processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.Quarantined,
+	})
+
+	afterReceived := getCounterValue(t, metrics.TotalEventsReceived)
+
+	assert.GreaterOrEqual(t, afterReceived, beforeReceived+1, "TotalEventsReceived should increment")
+}
+
+// TestMetrics_ProcessingErrors tests unmarshal errors
+func TestMetrics_ProcessingErrors(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "test-*", Mode: config.ModeImmediateEvict},
+	}, false)
+
+	beforeError := getCounterVecValue(t, metrics.ProcessingErrors, "unmarshal_error")
+
+	invalidEvent := bson.M{
+		"fullDocument": "invalid",
+	}
+	setup.reconciler.ProcessEvent(setup.ctx, invalidEvent, setup.mockCollection, "test-node")
+
+	afterError := getCounterVecValue(t, metrics.ProcessingErrors, "unmarshal_error")
+	assert.Greater(t, afterError, beforeError, "ProcessingErrors should increment for unmarshal_error")
+}
+
+// TestMetrics_HealthEventsMetrics tests HealthyEvent, UnhealthyEvent, HealthyEventWithContextCancellation
+func TestMetrics_HealthEventsMetrics(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "test-*", Mode: config.ModeImmediateEvict},
+	}, false)
+
+	nodeName := "metrics-health-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	t.Run("UnhealthyEvent increments", func(t *testing.T) {
+		beforeUnhealthy := getCounterVecValue(t, metrics.UnhealthyEvent, nodeName, "test-check")
+
+		processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+			nodeName:        nodeName,
+			nodeQuarantined: model.Quarantined,
+		})
+
+		afterUnhealthy := getCounterVecValue(t, metrics.UnhealthyEvent, nodeName, "test-check")
+		assert.Equal(t, beforeUnhealthy+1, afterUnhealthy, "UnhealthyEvent should increment")
+	})
+
+	t.Run("HealthyEvent increments", func(t *testing.T) {
+		beforeHealthy := getCounterVecValue(t, metrics.HealthyEvent, nodeName, "test-check")
+
+		processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+			nodeName:        nodeName,
+			nodeQuarantined: model.UnQuarantined,
+		})
+
+		afterHealthy := getCounterVecValue(t, metrics.HealthyEvent, nodeName, "test-check")
+		assert.Equal(t, beforeHealthy+1, afterHealthy, "HealthyEvent should increment")
+	})
+
+	t.Run("HealthyEventWithContextCancellation increments", func(t *testing.T) {
+		nodeWithLabel := "metrics-cancel-node"
+		createNodeWithLabels(setup.ctx, t, setup.client, nodeWithLabel, map[string]string{
+			statemanager.NVSentinelStateLabelKey: string(statemanager.DrainingLabelValue),
+		})
+
+		beforeCancel := getCounterValue(t, metrics.HealthyEventWithContextCancellation)
+
+		processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+			nodeName:        nodeWithLabel,
+			nodeQuarantined: model.UnQuarantined,
+		})
+
+		afterCancel := getCounterValue(t, metrics.HealthyEventWithContextCancellation)
+		assert.Equal(t, beforeCancel+1, afterCancel, "HealthyEventWithContextCancellation should increment")
+	})
+}
+
+// TestMetrics_NodeDrainStatus tests NodeDrainStatus gauge
+func TestMetrics_NodeDrainStatus(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "immediate-*", Mode: config.ModeImmediateEvict},
+	}, false)
+
+	nodeName := "metrics-drain-status-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+	createNamespace(setup.ctx, t, setup.client, "immediate-test")
+
+	t.Run("DrainStatus set to 1 when draining", func(t *testing.T) {
+		createPod(setup.ctx, t, setup.client, "immediate-test", "status-pod-1", nodeName, v1.PodRunning)
+
+		processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+			nodeName:        nodeName,
+			nodeQuarantined: model.Quarantined,
+		})
+
+		statusValue := getGaugeVecValue(t, metrics.NodeDrainStatus, nodeName)
+		assert.Equal(t, float64(1), statusValue, "NodeDrainStatus should be 1 when draining")
+	})
+
+	t.Run("DrainStatus set to 0 when healthy", func(t *testing.T) {
+		processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+			nodeName:        nodeName,
+			nodeQuarantined: model.UnQuarantined,
+		})
+
+		statusValue := getGaugeVecValue(t, metrics.NodeDrainStatus, nodeName)
+		assert.Equal(t, float64(0), statusValue, "NodeDrainStatus should be 0 when not draining")
+	})
+}
+
+// TestMetrics_NodeDrainSuccess tests successful drain completion
+func TestMetrics_NodeDrainSuccess(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "immediate-*", Mode: config.ModeImmediateEvict},
+	}, false)
+
+	nodeName := "metrics-drain-success-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	beforeSuccess := getCounterVecValue(t, metrics.NodeDrainSuccess, nodeName)
+
+	event := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.Quarantined,
+	})
+
+	healthEventWithStatus := model.HealthEventWithStatus{}
+	require.NoError(t, storewatcher.UnmarshalFullDocumentFromEvent(event, &healthEventWithStatus))
+	healthEventWithStatus.HealthEventStatus.UserPodsEvictionStatus.Status = model.StatusInProgress
+
+	err := setup.reconciler.ProcessEvent(setup.ctx, event, setup.mockCollection, nodeName)
+	require.NoError(t, err)
+
+	afterSuccess := getCounterVecValue(t, metrics.NodeDrainSuccess, nodeName)
+	assert.Equal(t, beforeSuccess+1, afterSuccess, "NodeDrainSuccess should increment after successful drain")
+}
+
+// TestMetrics_QueueDepth tests queue depth tracking
+func TestMetrics_QueueDepth(t *testing.T) {
+	setup := setupRequeueTest(t, []config.UserNamespace{
+		{Name: "immediate-*", Mode: config.ModeImmediateEvict},
+	})
+
+	nodeName := "metrics-queue-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+	createNamespace(setup.ctx, t, setup.client, "immediate-test")
+
+	initialDepth := getGaugeValue(t, metrics.QueueDepth)
+
+	enqueueHealthEvent(setup.ctx, t, setup.queueMgr, setup.mockCollection, nodeName)
+
+	require.Eventually(t, func() bool {
+		currentDepth := getGaugeValue(t, metrics.QueueDepth)
+		return currentDepth > initialDepth || currentDepth == 0
+	}, 5*time.Second, 50*time.Millisecond, "Queue depth should change")
+
+	require.Eventually(t, func() bool {
+		currentDepth := getGaugeValue(t, metrics.QueueDepth)
+		return currentDepth == 0
+	}, 10*time.Second, 100*time.Millisecond, "Queue should eventually be empty")
+}
+
+// TestMetrics_EventHandlingDuration tests duration histogram
+func TestMetrics_EventHandlingDuration(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "immediate-*", Mode: config.ModeImmediateEvict},
+	}, false)
+
+	nodeName := "metrics-duration-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	beforeCount := getHistogramCount(t, metrics.EventHandlingDuration)
+
+	processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.Quarantined,
+	})
+
+	afterCount := getHistogramCount(t, metrics.EventHandlingDuration)
+	assert.Equal(t, beforeCount+1, afterCount, "EventHandlingDuration should record 1 observation")
+}
+
+// TestMetrics_NodeDrainTimeout tests timeout tracking
+func TestMetrics_NodeDrainTimeout(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "timeout-*", Mode: config.ModeDeleteAfterTimeout},
+	}, false)
+
+	nodeName := "metrics-timeout-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+	createNamespace(setup.ctx, t, setup.client, "timeout-test")
+	createPod(setup.ctx, t, setup.client, "timeout-test", "timeout-pod", nodeName, v1.PodRunning)
+
+	processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.Quarantined,
+	})
+
+	timeoutValue := getGaugeVecValue(t, metrics.NodeDrainTimeout, nodeName)
+	assert.Equal(t, float64(1), timeoutValue, "NodeDrainTimeout should be 1 for node in timeout mode")
+}
+
+// TestMetrics_MultipleNodes tests metrics across multiple nodes
+func TestMetrics_MultipleNodes(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "immediate-*", Mode: config.ModeImmediateEvict},
+	}, false)
+
+	nodeNames := []string{"multi-node-1", "multi-node-2"}
+	for _, nodeName := range nodeNames {
+		createNode(setup.ctx, t, setup.client, nodeName)
+	}
+
+	beforeReceived := getCounterValue(t, metrics.TotalEventsReceived)
+
+	for _, nodeName := range nodeNames {
+		processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+			nodeName:        nodeName,
+			nodeQuarantined: model.Quarantined,
+		})
+	}
+
+	afterReceived := getCounterValue(t, metrics.TotalEventsReceived)
+	assert.GreaterOrEqual(t, afterReceived, beforeReceived+float64(len(nodeNames)), "Should receive events for all nodes")
+
+	for _, nodeName := range nodeNames {
+		statusValue := getGaugeVecValue(t, metrics.NodeDrainStatus, nodeName)
+		assert.Contains(t, []float64{0, 1}, statusValue, "Node %s should have valid drain status", nodeName)
+	}
+}
+
+// TestMetrics_AlreadyQuarantinedDoesNotIncrementDrainSuccess tests that AlreadyDrained doesn't double-count
+func TestMetrics_AlreadyQuarantinedDoesNotIncrementDrainSuccess(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "test-*", Mode: config.ModeImmediateEvict},
+	}, false)
+
+	nodeName := "metrics-already-drained-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	setup.mockCollection.FindOneFunc = func(ctx context.Context, filter any, opts ...*options.FindOneOptions) *mongo.SingleResult {
+		response := bson.M{
+			"healtheventstatus": bson.M{
+				"nodequarantined": string(model.Quarantined),
+				"userpodsevictionstatus": bson.M{
+					"status": string(model.StatusSucceeded),
+				},
+			},
+		}
+		return mongo.NewSingleResultFromDocument(response, nil, nil)
+	}
+
+	beforeSuccess := getCounterVecValue(t, metrics.NodeDrainSuccess, nodeName)
+
+	processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.AlreadyQuarantined,
+	})
+
+	afterSuccess := getCounterVecValue(t, metrics.NodeDrainSuccess, nodeName)
+	assert.Equal(t, beforeSuccess, afterSuccess, "NodeDrainSuccess should NOT increment for already drained nodes")
+}
+
+// TestMetrics_HealthyEventCancellationDoesNotIncrementDrainSuccess tests that healthy cancellation doesn't count as drain success
+func TestMetrics_HealthyEventCancellationDoesNotIncrementDrainSuccess(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "test-*", Mode: config.ModeImmediateEvict},
+	}, false)
+
+	nodeName := "metrics-cancel-success-node"
+	createNodeWithLabels(setup.ctx, t, setup.client, nodeName, map[string]string{
+		statemanager.NVSentinelStateLabelKey: string(statemanager.DrainingLabelValue),
+	})
+
+	beforeSuccess := getCounterVecValue(t, metrics.NodeDrainSuccess, nodeName)
+	beforeCancel := getCounterValue(t, metrics.HealthyEventWithContextCancellation)
+
+	processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.UnQuarantined,
+	})
+
+	afterSuccess := getCounterVecValue(t, metrics.NodeDrainSuccess, nodeName)
+	afterCancel := getCounterValue(t, metrics.HealthyEventWithContextCancellation)
+
+	assert.Equal(t, beforeSuccess, afterSuccess, "NodeDrainSuccess should NOT increment for healthy event cancellation")
+	assert.Equal(t, beforeCancel+1, afterCancel, "HealthyEventWithContextCancellation should increment")
+}
+
+// Helper functions for reading Prometheus metrics
+
+func getCounterValue(t *testing.T, counter prometheus.Counter) float64 {
+	t.Helper()
+	metric := &dto.Metric{}
+	err := counter.Write(metric)
+	require.NoError(t, err)
+	return metric.Counter.GetValue()
+}
+
+func getCounterVecValue(t *testing.T, counterVec *prometheus.CounterVec, labelValues ...string) float64 {
+	t.Helper()
+	counter, err := counterVec.GetMetricWithLabelValues(labelValues...)
+	require.NoError(t, err)
+	metric := &dto.Metric{}
+	err = counter.Write(metric)
+	require.NoError(t, err)
+	return metric.Counter.GetValue()
+}
+
+func getGaugeValue(t *testing.T, gauge prometheus.Gauge) float64 {
+	t.Helper()
+	metric := &dto.Metric{}
+	err := gauge.Write(metric)
+	require.NoError(t, err)
+	return metric.Gauge.GetValue()
+}
+
+func getGaugeVecValue(t *testing.T, gaugeVec *prometheus.GaugeVec, labelValues ...string) float64 {
+	t.Helper()
+	gauge, err := gaugeVec.GetMetricWithLabelValues(labelValues...)
+	require.NoError(t, err)
+	metric := &dto.Metric{}
+	err = gauge.Write(metric)
+	require.NoError(t, err)
+	return metric.Gauge.GetValue()
+}
+
+func getHistogramCount(t *testing.T, histogram prometheus.Histogram) uint64 {
+	t.Helper()
+	metric := &dto.Metric{}
+	err := histogram.Write(metric)
+	require.NoError(t, err)
+	return metric.Histogram.GetSampleCount()
 }

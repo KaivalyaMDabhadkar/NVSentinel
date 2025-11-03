@@ -46,8 +46,8 @@ var (
 		},
 	)
 
-	// TotalEventProcessingError tracks errors during event processing
-	TotalEventProcessingError = promauto.NewCounterVec(
+	// ProcessingErrors tracks errors during event processing
+	ProcessingErrors = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "node_drainer_processing_errors_total",
 			Help: "Total number of errors encountered during event processing.",
@@ -137,12 +137,11 @@ var (
 		[]string{"node"},
 	)
 
-	// NodeQueueDepth tracks the number of pending events per node
-	NodeQueueDepth = promauto.NewGaugeVec(
+	// QueueDepth tracks the total number of pending events in the queue
+	QueueDepth = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "node_drainer_queue_depth",
-			Help: "Number of pending events in the queue for each node.",
+			Help: "Total number of pending events in the queue.",
 		},
-		[]string{"node"},
 	)
 )

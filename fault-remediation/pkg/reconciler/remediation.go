@@ -228,6 +228,9 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	actualCRName := createdCR.GetName()
 	log.Printf("Created Maintenance CR %s successfully for node %s", actualCRName, healthEvent.NodeName)
 
+	// Track successful remediation only for newly created CRs
+	remediationSuccess.WithLabelValues(healthEvent.NodeName).Inc()
+
 	// Update node annotation with CR reference
 	group := common.GetRemediationGroupForAction(healthEvent.RecommendedAction)
 	if group != "" && c.annotationManager != nil {
@@ -288,12 +291,14 @@ func (c *FaultRemediationClient) RunLogCollectorJob(ctx context.Context, nodeNam
 
 	content, err := os.ReadFile(manifestPath)
 	if err != nil {
+		logCollectorErrors.WithLabelValues("manifest_read_error", nodeName).Inc()
 		return fmt.Errorf("failed to read log collector manifest: %w", err)
 	}
 
 	// Create Job from manifest using strong types
 	job := &batchv1.Job{}
 	if err := yaml.Unmarshal(content, job); err != nil {
+		logCollectorErrors.WithLabelValues("manifest_unmarshal_error", nodeName).Inc()
 		return fmt.Errorf("failed to unmarshal Job manifest: %w", err)
 	}
 
@@ -303,6 +308,7 @@ func (c *FaultRemediationClient) RunLogCollectorJob(ctx context.Context, nodeNam
 	// Create Job using typed client
 	created, err := c.kubeClient.BatchV1().Jobs(job.Namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
+		logCollectorErrors.WithLabelValues("job_creation_error", nodeName).Inc()
 		return fmt.Errorf("failed to create Job: %w", err)
 	}
 
@@ -372,12 +378,14 @@ func (c *FaultRemediationClient) RunLogCollectorJob(ctx context.Context, nodeNam
 				}
 				logCollectorJobs.WithLabelValues(nodeName, "failure").Inc()
 				logCollectorJobDuration.WithLabelValues(nodeName, "failure").Observe(duration)
+				logCollectorErrors.WithLabelValues("job_failed", nodeName).Inc()
 				done <- fmt.Errorf("log collector job %s failed", created.Name)
 				return
 			}
 		},
 	})
 	if err != nil {
+		logCollectorErrors.WithLabelValues("event_handler_error", nodeName).Inc()
 		return fmt.Errorf("failed to add event handler for job %s: %w", created.Name, err)
 	}
 
@@ -389,6 +397,8 @@ func (c *FaultRemediationClient) RunLogCollectorJob(ctx context.Context, nodeNam
 	// Wait for cache to sync
 	if !cache.WaitForCacheSync(watchCtx.Done(), jobInformer.Informer().HasSynced) {
 		close(stopCh) // Stop informer on sync failure
+		logCollectorErrors.WithLabelValues("cache_sync_error", nodeName).Inc()
+
 		return fmt.Errorf("failed to sync cache for job informer")
 	}
 
@@ -396,6 +406,9 @@ func (c *FaultRemediationClient) RunLogCollectorJob(ctx context.Context, nodeNam
 	select {
 	case <-watchCtx.Done():
 		close(stopCh)
+		logCollectorJobs.WithLabelValues(nodeName, "timeout").Inc()
+		logCollectorErrors.WithLabelValues("job_timeout", nodeName).Inc()
+
 		return fmt.Errorf("timeout waiting for log collector job %s to complete", created.Name)
 	case result := <-done:
 		close(stopCh)

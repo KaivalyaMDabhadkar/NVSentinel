@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
@@ -73,8 +74,14 @@ func (r *Reconciler) Shutdown() {
 
 func (r *Reconciler) ProcessEvent(ctx context.Context,
 	event bson.M, collection queue.MongoCollectionAPI, nodeName string) error {
+	start := time.Now()
+	defer func() {
+		metrics.EventHandlingDuration.Observe(time.Since(start).Seconds())
+	}()
+
 	healthEventWithStatus := model.HealthEventWithStatus{}
 	if err := storewatcher.UnmarshalFullDocumentFromEvent(event, &healthEventWithStatus); err != nil {
+		metrics.ProcessingErrors.WithLabelValues("unmarshal_error").Inc()
 		return fmt.Errorf("failed to unmarshal health event: %w", err)
 	}
 
@@ -84,6 +91,7 @@ func (r *Reconciler) ProcessEvent(ctx context.Context,
 
 	actionResult, err := r.evaluator.EvaluateEvent(ctx, healthEventWithStatus, collection)
 	if err != nil {
+		metrics.ProcessingErrors.WithLabelValues("evaluate_event_error").Inc()
 		return fmt.Errorf("failed to evaluate event: %w", err)
 	}
 
@@ -169,6 +177,7 @@ func (r *Reconciler) executeImmediateEviction(ctx context.Context,
 	nodeName := healthEvent.HealthEvent.NodeName
 	for _, namespace := range action.Namespaces {
 		if err := r.informers.EvictAllPodsInImmediateMode(ctx, namespace, nodeName, action.Timeout); err != nil {
+			metrics.NodeDrainError.WithLabelValues("immediate_eviction_error", nodeName).Inc()
 			return fmt.Errorf("failed immediate eviction for namespace %s on node %s: %w", namespace, nodeName, err)
 		}
 	}
@@ -183,6 +192,7 @@ func (r *Reconciler) executeTimeoutEviction(ctx context.Context,
 
 	if err := r.informers.DeletePodsAfterTimeout(ctx,
 		nodeName, action.Namespaces, timeoutMinutes, &healthEvent); err != nil {
+		metrics.NodeDrainError.WithLabelValues("timeout_eviction_error", nodeName).Inc()
 		return fmt.Errorf("failed timeout eviction for node %s: %w", nodeName, err)
 	}
 
@@ -253,7 +263,7 @@ func (r *Reconciler) executeUpdateStatus(ctx context.Context,
 		slog.Error("Failed to update node label to drain-succeeded",
 			"node", nodeName,
 			"error", err)
-		metrics.TotalEventProcessingError.WithLabelValues("label_update_error").Inc()
+		metrics.ProcessingErrors.WithLabelValues("label_update_error").Inc()
 	}
 
 	err := r.updateNodeUserPodsEvictedStatus(ctx, collection, event, podsEvictionStatus)
@@ -261,6 +271,7 @@ func (r *Reconciler) executeUpdateStatus(ctx context.Context,
 		return fmt.Errorf("failed to update user pod eviction status: %w", err)
 	}
 
+	metrics.NodeDrainSuccess.WithLabelValues(nodeName).Inc()
 	metrics.NodeDrainStatus.WithLabelValues(nodeName).Set(0)
 
 	return nil
@@ -293,7 +304,7 @@ func (r *Reconciler) updateNodeDrainStatus(ctx context.Context,
 			slog.Error("Failed to update node label to draining",
 				"node", nodeName,
 				"error", err)
-			metrics.TotalEventProcessingError.WithLabelValues("label_update_error").Inc()
+			metrics.ProcessingErrors.WithLabelValues("label_update_error").Inc()
 		}
 
 		metrics.NodeDrainStatus.WithLabelValues(nodeName).Set(1)
@@ -345,7 +356,7 @@ func (r *Reconciler) updateNodeUserPodsEvictedStatus(ctx context.Context, collec
 
 	_, err := collection.UpdateOne(ctx, filter, update)
 	if err != nil {
-		metrics.TotalEventProcessingError.WithLabelValues("update_status_error").Inc()
+		metrics.ProcessingErrors.WithLabelValues("update_status_error").Inc()
 		return fmt.Errorf("error updating document with ID: %v, error: %w", document["_id"], err)
 	}
 

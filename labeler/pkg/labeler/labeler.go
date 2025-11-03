@@ -466,6 +466,7 @@ func (l *Labeler) handleNodeEvent(obj any) error {
 
 // updateKataLabel updates only the kata label on a node
 func (l *Labeler) updateKataLabel(nodeName, expectedKataLabel string) error {
+	updateStartTime := time.Now()
 	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		node, err := l.clientset.CoreV1().Nodes().Get(l.ctx, nodeName, metav1.GetOptions{})
 		if err != nil {
@@ -491,8 +492,11 @@ func (l *Labeler) updateKataLabel(nodeName, expectedKataLabel string) error {
 	})
 
 	if err != nil {
+		metrics.NodeUpdateFailures.Inc()
 		return fmt.Errorf("failed to update kata label for %s: %w", nodeName, err)
 	}
+
+	metrics.NodeUpdateDuration.Observe(time.Since(updateStartTime).Seconds())
 
 	return nil
 }
