@@ -442,7 +442,6 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 
 	_, mockWatcher, getStatus, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
 
-	// Track metrics before quarantine
 	beforeProcessed := getCounterValue(t, metrics.TotalEventsSuccessfullyProcessed)
 	beforeQuarantined := getCounterVecValue(t, metrics.TotalNodesQuarantined, nodeName)
 	beforeTaints := getCounterVecValue(t, metrics.TaintsApplied, "nvidia.com/gpu-xid-error", "NoSchedule")
@@ -485,7 +484,6 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 	assert.Equal(t, "True", node.Annotations[quarantineHealthEventIsCordonedAnnotationKey], "Cordon annotation should be True")
 	verifyQuarantineLabels(t, node, "gpu-xid-critical-errors")
 
-	// Verify quarantine metrics
 	afterProcessed := getCounterValue(t, metrics.TotalEventsSuccessfullyProcessed)
 	afterQuarantined := getCounterVecValue(t, metrics.TotalNodesQuarantined, nodeName)
 	afterGauge := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
@@ -542,7 +540,6 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 	assert.Empty(t, node.Annotations[quarantineHealthEventIsCordonedAnnotationKey], "Cordoned annotation should be removed")
 	verifyUnquarantineLabels(t, node)
 
-	// Verify unquarantine metrics
 	afterUnquarantined := getCounterVecValue(t, metrics.TotalNodesUnquarantined, nodeName)
 	finalGauge := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
 	afterTaintsRemoved := getCounterVecValue(t, metrics.TaintsRemoved, "nvidia.com/gpu-xid-error", "NoSchedule")
@@ -2234,7 +2231,6 @@ func TestE2E_RulesetNotMatching(t *testing.T) {
 
 	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
 
-	// Track metrics before
 	beforeRulesetFailed := getCounterVecValue(t, metrics.RulesetEvaluations, "gpu-xid-fatal-only", metrics.StatusFailed)
 
 	t.Log("Send event that doesn't match (wrong checkName)")
