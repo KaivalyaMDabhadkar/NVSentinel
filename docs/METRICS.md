@@ -25,7 +25,6 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 |------------|------|--------|-------------|
 | `fault_quarantine_events_received_total` | Counter | - | Total number of events received from the watcher |
 | `fault_quarantine_events_successfully_processed_total` | Counter | - | Total number of events successfully processed |
-| `fault_quarantine_events_skipped_total` | Counter | - | Total number of events received on already cordoned node |
 | `fault_quarantine_processing_errors_total` | Counter | `error_type` | Total number of errors encountered during event processing |
 | `fault_quarantine_event_backlog_count` | Gauge | - | Number of health events which fault quarantine is yet to process |
 | `fault_quarantine_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
@@ -73,8 +72,8 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 |------------|------|--------|-------------|
 | `node_drainer_events_received_total` | Counter | - | Total number of events received from the watcher |
 | `node_drainer_events_replayed_total` | Counter | - | Total number of in-progress events replayed at startup |
-| `node_drainer_events_successfully_processed_total` | Counter | - | Total number of events successfully processed |
-| `node_drainer_processing_errors_total` | Counter | `error_type` | Total number of errors encountered during event processing |
+| `node_drainer_events_processed_total` | Counter | `drain_status`, `node` | Total number of events processed by drain status outcome. Drain status values: `drained`, `cancelled`, `skipped` |
+| `node_drainer_processing_errors_total` | Counter | `error_type`, `node` | Total number of errors encountered during event processing and node draining |
 | `node_drainer_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
 | `node_drainer_queue_depth` | Gauge | - | Total number of pending events in the queue |
 
@@ -82,9 +81,6 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
-| `node_drainer_node_drain_successful_total` | Counter | `node` | Total number of successful node drainings |
-| `node_drainer_node_drain_errors_total` | Counter | `error_type`, `node` | Total number of errors encountered while draining a node |
-| `node_drainer_node_drain_status` | Gauge | `node` | Shows if a node is currently being drained (1) or not (0) |
 | `node_drainer_waiting_for_timeout` | Gauge | `node` | Shows if node drainer operation is waiting for timeout before force deletion (1=waiting, 0=not waiting) |
 | `node_drainer_force_delete_pods_after_timeout` | Counter | `node`, `namespace` | Total number of node drainer operations that reached timeout and force deleted pods |
 
@@ -97,16 +93,10 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
 | `fault_remediation_events_received_total` | Counter | - | Total number of events received from the watcher |
-| `fault_remediation_events_successfully_processed_total` | Counter | - | Total number of events successfully processed |
+| `fault_remediation_events_processed_total` | Counter | `cr_status`, `node_name` | Total number of remediation events processed by CR creation status. CR status values: `created`, `skipped` |
 | `fault_remediation_processing_errors_total` | Counter | `error_type`, `node_name` | Total number of errors encountered during event processing |
 | `fault_remediation_unsupported_actions_total` | Counter | `action`, `node_name` | Total number of health events with currently unsupported remediation actions |
 | `fault_remediation_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
-
-### Remediation Operation Metrics
-
-| Metric Name | Type | Labels | Description |
-|------------|------|--------|-------------|
-| `fault_remediation_remediation_total` | Counter | `node`, `status` | Total number of remediations by status. Status values: `success`, `failed` |
 
 ### Log Collector Metrics
 
@@ -127,7 +117,6 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 | `labeler_events_processed_total` | Counter | `status` | Total number of pod events processed. Status values: `success`, `failed` |
 | `labeler_node_update_failures_total` | Counter | - | Total number of node update failures during reconciliation |
 | `labeler_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
-| `labeler_node_update_duration_seconds` | Histogram | - | Histogram of node update operation durations |
 
 ---
 
@@ -181,9 +170,8 @@ These metrics track GPU health events detected via DCGM (Data Center GPU Manager
 |------------|------|--------|-------------|
 | `dcgm_health_events_publish_time_to_grpc_channel` | Histogram | `operation_name` | Amount of time spent in publishing DCGM health events on the gRPC channel |
 | `health_events_insertion_to_uds_succeed` | Counter | - | Total number of successful insertions of health events to UDS |
-| `health_events_insertion_to_uds_error` | Gauge | - | Error in insertions of health events to UDS |
-| `dcgm_health_active_non_fatal_health_events` | Gauge | `event_type`, `gpu_id` | Total number of active non-fatal health events at any given time |
-| `dcgm_health_active_fatal_health_events` | Gauge | `event_type`, `gpu_id` | Total number of active fatal health events at any given time |
+| `health_events_insertion_to_uds_error` | Counter | - | Total number of failed insertions of health events to UDS |
+| `dcgm_health_active_events` | Gauge | `event_type`, `gpu_id`, `severity` | Total number of active health events at any given time by severity. Severity values: `fatal`, `non_fatal` |
 
 ---
 

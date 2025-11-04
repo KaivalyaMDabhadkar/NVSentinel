@@ -226,9 +226,6 @@ func (c *FaultRemediationClient) CreateMaintenanceResource(
 	actualCRName := createdCR.GetName()
 	log.Printf("Created Maintenance CR %s successfully for node %s", actualCRName, healthEvent.NodeName)
 
-	// Track successful remediation only for newly created CRs
-	remediationTotal.WithLabelValues(healthEvent.NodeName, StatusSuccess).Inc()
-
 	// Update node annotation with CR reference
 	group := common.GetRemediationGroupForAction(healthEvent.RecommendedAction)
 	if group != "" && c.annotationManager != nil {

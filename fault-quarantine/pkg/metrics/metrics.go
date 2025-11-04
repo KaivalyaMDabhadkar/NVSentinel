@@ -39,12 +39,6 @@ var (
 			Help: "Total number of events successfully processed.",
 		},
 	)
-	TotalEventsSkipped = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "fault_quarantine_events_skipped_total",
-			Help: "Total number of events received on already cordoned node",
-		},
-	)
 	ProcessingErrors = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_processing_errors_total",

@@ -576,6 +576,9 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 
 		reconcilerInstance := NewReconciler(cfg, false)
 
+		beforeReceived := getCounterValue(t, totalEventsReceived)
+		beforeDuration := getHistogramCount(t, eventHandlingDuration)
+
 		// Start event processing loop (simulating Start() event loop)
 		reconcilerDone := make(chan struct{})
 		go func() {
@@ -723,8 +726,46 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 		_, markedCount, _, _ := mockWatcher.GetCallCounts()
 		assert.Greater(t, markedCount, 0, "MarkProcessed should be called for processed events")
 
+		afterReceived := getCounterValue(t, totalEventsReceived)
+		afterDuration := getHistogramCount(t, eventHandlingDuration)
+		createdCount := getCounterVecValue(t, eventsProcessed, CRStatusCreated, nodeName)
+		skippedCount := getCounterVecValue(t, eventsProcessed, CRStatusSkipped, nodeName)
+
+		assert.GreaterOrEqual(t, afterReceived, beforeReceived+3, "totalEventsReceived should increment for all events")
+		assert.GreaterOrEqual(t, createdCount, float64(1), "eventsProcessed with cr_status=created should increment for CR creation")
+		assert.GreaterOrEqual(t, skippedCount, float64(1), "eventsProcessed with cr_status=skipped should increment for duplicate event")
+		assert.GreaterOrEqual(t, afterDuration, beforeDuration+3, "eventHandlingDuration should record observations for all events")
+
 		// Cleanup
 		testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
+	})
+
+	t.Run("UnsupportedAction_TrackedInMetrics", func(t *testing.T) {
+		remediationClient := createTestRemediationClient(t, false)
+
+		cfg := ReconcilerConfig{
+			RemediationClient: remediationClient,
+			StateManager:      statemanager.NewStateManager(testClient),
+			UpdateMaxRetries:  3,
+			UpdateRetryDelay:  100 * time.Millisecond,
+		}
+
+		reconcilerInstance := NewReconciler(cfg, false)
+
+		beforeUnsupported := getCounterVecValue(t, totalUnsupportedRemediationActions, "UNKNOWN", nodeName)
+
+		healthEvent := model.HealthEventWithStatus{
+			HealthEvent: &protos.HealthEvent{
+				NodeName:          nodeName,
+				RecommendedAction: protos.RecommendedAction_UNKNOWN,
+			},
+		}
+
+		shouldSkip := reconcilerInstance.shouldSkipEvent(ctx, healthEvent)
+		assert.True(t, shouldSkip, "Should skip unsupported action")
+
+		afterUnsupported := getCounterVecValue(t, totalUnsupportedRemediationActions, "UNKNOWN", nodeName)
+		assert.Equal(t, beforeUnsupported+1, afterUnsupported, "totalUnsupportedRemediationActions should increment")
 	})
 }
 
@@ -877,59 +918,6 @@ func cleanupNodeAnnotations(ctx context.Context, t *testing.T, nodeName string) 
 
 // Metrics E2E Tests
 
-// TestMetrics_EventProcessing tests totalEventsReceived and totalEventsSuccessfullyProcessed
-func TestMetrics_EventProcessing(t *testing.T) {
-	nodeName := "metrics-event-proc-" + primitive.NewObjectID().Hex()[:8]
-	createTestNode(testContext, nodeName, nil, map[string]string{"test": "label"})
-	defer func() {
-		testClient.CoreV1().Nodes().Delete(testContext, nodeName, metav1.DeleteOptions{})
-	}()
-
-	cleanupNodeAnnotations(testContext, t, nodeName)
-
-	remediationClient := createTestRemediationClient(t, false)
-	mockColl := &MockCollection{
-		updateOneFn: func(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error) {
-			return &mongo.UpdateResult{ModifiedCount: 1}, nil
-		},
-	}
-
-	cfg := ReconcilerConfig{
-		RemediationClient: remediationClient,
-		StateManager:      statemanager.NewStateManager(testClient),
-		UpdateMaxRetries:  3,
-		UpdateRetryDelay:  100 * time.Millisecond,
-	}
-
-	reconciler := NewReconciler(cfg, false)
-
-	beforeReceived := getCounterValue(t, totalEventsReceived)
-	beforeProcessed := getCounterValue(t, totalEventsSuccessfullyProcessed)
-
-	eventID := primitive.NewObjectID()
-	event := createQuarantineEvent(eventID, nodeName, protos.RecommendedAction_RESTART_BM)
-
-	mockWatcher := storewatcher.NewFakeChangeStreamWatcher()
-
-	reconciler.processEvent(testContext, event, mockWatcher, mockColl)
-
-	afterReceived := getCounterValue(t, totalEventsReceived)
-	afterProcessed := getCounterValue(t, totalEventsSuccessfullyProcessed)
-
-	assert.Equal(t, beforeReceived+1, afterReceived, "totalEventsReceived should increment by 1")
-	assert.Equal(t, beforeProcessed+1, afterProcessed, "totalEventsSuccessfullyProcessed should increment by 1")
-
-	gvr := schema.GroupVersionResource{
-		Group:    "janitor.dgxc.nvidia.com",
-		Version:  "v1alpha1",
-		Resource: "rebootnodes",
-	}
-	state, _ := reconciler.annotationManager.GetRemediationState(testContext, nodeName)
-	if grp, ok := state.EquivalenceGroups["restart"]; ok {
-		testDynamic.Resource(gvr).Delete(testContext, grp.MaintenanceCR, metav1.DeleteOptions{})
-	}
-}
-
 // TestMetrics_ProcessingErrors tests error tracking
 func TestMetrics_ProcessingErrors(t *testing.T) {
 	reconciler := &Reconciler{}
@@ -947,194 +935,6 @@ func TestMetrics_ProcessingErrors(t *testing.T) {
 
 	afterError := getCounterVecValue(t, processingErrors, "unmarshal_doc_error", "unknown")
 	assert.Greater(t, afterError, beforeError, "processingErrors should increment for unmarshal error")
-}
-
-// TestMetrics_RemediationSuccess tests successful remediation tracking
-func TestMetrics_RemediationSuccess(t *testing.T) {
-	nodeName := "metrics-success-" + primitive.NewObjectID().Hex()[:8]
-	createTestNode(testContext, nodeName, nil, map[string]string{"test": "label"})
-	defer func() {
-		testClient.CoreV1().Nodes().Delete(testContext, nodeName, metav1.DeleteOptions{})
-	}()
-
-	cleanupNodeAnnotations(testContext, t, nodeName)
-
-	remediationClient := createTestRemediationClient(t, false)
-
-	cfg := ReconcilerConfig{
-		RemediationClient: remediationClient,
-		StateManager:      statemanager.NewStateManager(testClient),
-		UpdateMaxRetries:  3,
-		UpdateRetryDelay:  100 * time.Millisecond,
-	}
-
-	reconciler := NewReconciler(cfg, false)
-
-	beforeSuccess := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
-
-	healthEventDoc := &HealthEventDoc{
-		ID: primitive.NewObjectID(),
-		HealthEventWithStatus: model.HealthEventWithStatus{
-			HealthEvent: &protos.HealthEvent{
-				NodeName:          nodeName,
-				RecommendedAction: protos.RecommendedAction_RESTART_BM,
-			},
-		},
-	}
-
-	success, crName := reconciler.performRemediation(testContext, healthEventDoc)
-	assert.True(t, success, "Remediation should succeed")
-
-	afterSuccess := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
-	assert.Equal(t, beforeSuccess+1, afterSuccess, "remediationTotal with status=success should increment after successful remediation")
-
-	gvr := schema.GroupVersionResource{
-		Group:    "janitor.dgxc.nvidia.com",
-		Version:  "v1alpha1",
-		Resource: "rebootnodes",
-	}
-	testDynamic.Resource(gvr).Delete(testContext, crName, metav1.DeleteOptions{})
-}
-
-// TestMetrics_RemediationNoDuplicateCount tests that existing CR doesn't double-count metrics
-func TestMetrics_RemediationNoDuplicateCount(t *testing.T) {
-	nodeName := "metrics-no-dup-" + primitive.NewObjectID().Hex()[:8]
-	createTestNode(testContext, nodeName, nil, map[string]string{"test": "label"})
-	defer func() {
-		testClient.CoreV1().Nodes().Delete(testContext, nodeName, metav1.DeleteOptions{})
-	}()
-
-	cleanupNodeAnnotations(testContext, t, nodeName)
-
-	remediationClient := createTestRemediationClient(t, false)
-
-	cfg := ReconcilerConfig{
-		RemediationClient: remediationClient,
-		StateManager:      statemanager.NewStateManager(testClient),
-		UpdateMaxRetries:  3,
-		UpdateRetryDelay:  100 * time.Millisecond,
-	}
-
-	reconciler := NewReconciler(cfg, false)
-
-	beforeSuccess := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
-
-	healthEventDoc := &HealthEventDoc{
-		ID: primitive.NewObjectID(),
-		HealthEventWithStatus: model.HealthEventWithStatus{
-			HealthEvent: &protos.HealthEvent{
-				NodeName:          nodeName,
-				RecommendedAction: protos.RecommendedAction_RESTART_BM,
-			},
-		},
-	}
-
-	success1, crName := reconciler.performRemediation(testContext, healthEventDoc)
-	assert.True(t, success1)
-
-	afterFirstSuccess := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
-	assert.Equal(t, beforeSuccess+1, afterFirstSuccess, "remediationTotal with status=success should increment by 1 after first creation")
-
-	updateRebootNodeStatus(testContext, t, crName, "InProgress")
-
-	shouldCreateCR, existingCR, err := reconciler.checkExistingCRStatus(testContext, healthEventDoc.HealthEventWithStatus.HealthEvent)
-	assert.NoError(t, err)
-	assert.False(t, shouldCreateCR, "Should skip due to existing CR")
-	assert.Equal(t, crName, existingCR)
-
-	afterSecondCheck := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
-	assert.Equal(t, afterFirstSuccess, afterSecondCheck, "remediationTotal with status=success should NOT increment when skipping existing CR")
-
-	gvr := schema.GroupVersionResource{
-		Group:    "janitor.dgxc.nvidia.com",
-		Version:  "v1alpha1",
-		Resource: "rebootnodes",
-	}
-	testDynamic.Resource(gvr).Delete(testContext, crName, metav1.DeleteOptions{})
-}
-
-// TestMetrics_EventHandlingDuration tests duration tracking
-func TestMetrics_EventHandlingDuration(t *testing.T) {
-	nodeName := "metrics-duration-" + primitive.NewObjectID().Hex()[:8]
-	createTestNode(testContext, nodeName, nil, map[string]string{"test": "label"})
-	defer func() {
-		testClient.CoreV1().Nodes().Delete(testContext, nodeName, metav1.DeleteOptions{})
-	}()
-
-	cleanupNodeAnnotations(testContext, t, nodeName)
-
-	remediationClient := createTestRemediationClient(t, false)
-	mockColl := &MockCollection{
-		updateOneFn: func(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error) {
-			return &mongo.UpdateResult{ModifiedCount: 1}, nil
-		},
-	}
-
-	cfg := ReconcilerConfig{
-		RemediationClient: remediationClient,
-		StateManager:      statemanager.NewStateManager(testClient),
-		UpdateMaxRetries:  3,
-		UpdateRetryDelay:  100 * time.Millisecond,
-	}
-
-	reconciler := NewReconciler(cfg, false)
-
-	beforeCount := getHistogramCount(t, eventHandlingDuration)
-
-	eventID := primitive.NewObjectID()
-	event := createQuarantineEvent(eventID, nodeName, protos.RecommendedAction_RESTART_BM)
-
-	mockWatcher := storewatcher.NewFakeChangeStreamWatcher()
-
-	reconciler.processEvent(testContext, event, mockWatcher, mockColl)
-
-	afterCount := getHistogramCount(t, eventHandlingDuration)
-	assert.Equal(t, beforeCount+1, afterCount, "eventHandlingDuration should record 1 observation")
-
-	gvr := schema.GroupVersionResource{
-		Group:    "janitor.dgxc.nvidia.com",
-		Version:  "v1alpha1",
-		Resource: "rebootnodes",
-	}
-	state, _ := reconciler.annotationManager.GetRemediationState(testContext, nodeName)
-	if grp, ok := state.EquivalenceGroups["restart"]; ok {
-		testDynamic.Resource(gvr).Delete(testContext, grp.MaintenanceCR, metav1.DeleteOptions{})
-	}
-}
-
-// TestMetrics_UnsupportedActions tests unsupported action tracking
-func TestMetrics_UnsupportedActions(t *testing.T) {
-	nodeName := "metrics-unsupported-" + primitive.NewObjectID().Hex()[:8]
-	createTestNode(testContext, nodeName, nil, map[string]string{"test": "label"})
-	defer func() {
-		testClient.CoreV1().Nodes().Delete(testContext, nodeName, metav1.DeleteOptions{})
-	}()
-
-	remediationClient := createTestRemediationClient(t, false)
-
-	cfg := ReconcilerConfig{
-		RemediationClient: remediationClient,
-		StateManager:      statemanager.NewStateManager(testClient),
-		UpdateMaxRetries:  3,
-		UpdateRetryDelay:  100 * time.Millisecond,
-	}
-
-	reconciler := NewReconciler(cfg, false)
-
-	beforeUnsupported := getCounterVecValue(t, totalUnsupportedRemediationActions, "UNKNOWN", nodeName)
-
-	healthEvent := model.HealthEventWithStatus{
-		HealthEvent: &protos.HealthEvent{
-			NodeName:          nodeName,
-			RecommendedAction: protos.RecommendedAction_UNKNOWN,
-		},
-	}
-
-	shouldSkip := reconciler.shouldSkipEvent(testContext, healthEvent)
-	assert.True(t, shouldSkip, "Should skip unsupported action")
-
-	afterUnsupported := getCounterVecValue(t, totalUnsupportedRemediationActions, "UNKNOWN", nodeName)
-	assert.Equal(t, beforeUnsupported+1, afterUnsupported, "totalUnsupportedRemediationActions should increment")
 }
 
 // Helper functions for reading Prometheus metrics

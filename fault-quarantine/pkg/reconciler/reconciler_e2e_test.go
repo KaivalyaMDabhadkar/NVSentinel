@@ -442,6 +442,13 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 
 	_, mockWatcher, getStatus, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
 
+	// Track metrics before quarantine
+	beforeProcessed := getCounterValue(t, metrics.TotalEventsSuccessfullyProcessed)
+	beforeQuarantined := getCounterVecValue(t, metrics.TotalNodesQuarantined, nodeName)
+	beforeTaints := getCounterVecValue(t, metrics.TaintsApplied, "nvidia.com/gpu-xid-error", "NoSchedule")
+	beforeCordons := getCounterValue(t, metrics.CordonsApplied)
+	beforeRulesetPassed := getCounterVecValue(t, metrics.RulesetEvaluations, "gpu-xid-critical-errors", metrics.StatusPassed)
+
 	t.Log("Sending unhealthy event for initial quarantine")
 	eventID1 := primitive.NewObjectID()
 	mockWatcher.EventsChan <- createHealthEventBSON(
@@ -477,6 +484,21 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 	verifyNodeTaintsMatch(t, node, expectedTaints)
 	assert.Equal(t, "True", node.Annotations[quarantineHealthEventIsCordonedAnnotationKey], "Cordon annotation should be True")
 	verifyQuarantineLabels(t, node, "gpu-xid-critical-errors")
+
+	// Verify quarantine metrics
+	afterProcessed := getCounterValue(t, metrics.TotalEventsSuccessfullyProcessed)
+	afterQuarantined := getCounterVecValue(t, metrics.TotalNodesQuarantined, nodeName)
+	afterGauge := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
+	afterTaints := getCounterVecValue(t, metrics.TaintsApplied, "nvidia.com/gpu-xid-error", "NoSchedule")
+	afterCordons := getCounterValue(t, metrics.CordonsApplied)
+	afterRulesetPassed := getCounterVecValue(t, metrics.RulesetEvaluations, "gpu-xid-critical-errors", metrics.StatusPassed)
+
+	assert.GreaterOrEqual(t, afterProcessed, beforeProcessed+1, "TotalEventsSuccessfullyProcessed should increment")
+	assert.Equal(t, beforeQuarantined+1, afterQuarantined, "TotalNodesQuarantined should increment by 1")
+	assert.Equal(t, float64(1), afterGauge, "CurrentQuarantinedNodes should be 1")
+	assert.GreaterOrEqual(t, afterTaints, beforeTaints+1, "TaintsApplied should increment")
+	assert.GreaterOrEqual(t, afterCordons, beforeCordons+1, "CordonsApplied should increment")
+	assert.GreaterOrEqual(t, afterRulesetPassed, beforeRulesetPassed+1, "RulesetEvaluations with status=passed should increment")
 
 	t.Log("Sending healthy event for unquarantine")
 	eventID2 := primitive.NewObjectID()
@@ -519,6 +541,19 @@ func TestE2E_BasicQuarantineAndUnquarantine(t *testing.T) {
 	assert.Empty(t, node.Annotations[quarantineHealthEventAppliedTaintsAnnotationKey], "Applied taints annotation should be removed")
 	assert.Empty(t, node.Annotations[quarantineHealthEventIsCordonedAnnotationKey], "Cordoned annotation should be removed")
 	verifyUnquarantineLabels(t, node)
+
+	// Verify unquarantine metrics
+	afterUnquarantined := getCounterVecValue(t, metrics.TotalNodesUnquarantined, nodeName)
+	finalGauge := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
+	afterTaintsRemoved := getCounterVecValue(t, metrics.TaintsRemoved, "nvidia.com/gpu-xid-error", "NoSchedule")
+	afterCordonsRemoved := getCounterValue(t, metrics.CordonsRemoved)
+	finalProcessed := getCounterValue(t, metrics.TotalEventsSuccessfullyProcessed)
+
+	assert.GreaterOrEqual(t, afterUnquarantined, beforeQuarantined+1, "TotalNodesUnquarantined should increment")
+	assert.Equal(t, float64(0), finalGauge, "CurrentQuarantinedNodes should be 0 after unquarantine")
+	assert.GreaterOrEqual(t, afterTaintsRemoved, beforeTaints+1, "TaintsRemoved should increment")
+	assert.GreaterOrEqual(t, afterCordonsRemoved, beforeCordons+1, "CordonsRemoved should increment")
+	assert.GreaterOrEqual(t, finalProcessed, beforeProcessed+2, "TotalEventsSuccessfullyProcessed should increment for both events")
 }
 
 func TestE2E_EntityLevelTracking(t *testing.T) {
@@ -1905,6 +1940,7 @@ func TestE2E_SkipRedundantCordoning(t *testing.T) {
 
 	t.Log("Different check on already cordoned node - should skip redundant cordoning")
 	initialCordonState := true
+
 	mockWatcher.EventsChan <- createHealthEventBSON(
 		primitive.NewObjectID(),
 		nodeName,
@@ -2198,6 +2234,9 @@ func TestE2E_RulesetNotMatching(t *testing.T) {
 
 	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
 
+	// Track metrics before
+	beforeRulesetFailed := getCounterVecValue(t, metrics.RulesetEvaluations, "gpu-xid-fatal-only", metrics.StatusFailed)
+
 	t.Log("Send event that doesn't match (wrong checkName)")
 	mockWatcher.EventsChan <- createHealthEventBSON(
 		primitive.NewObjectID(),
@@ -2237,6 +2276,10 @@ func TestE2E_RulesetNotMatching(t *testing.T) {
 		}
 		return node.Spec.Unschedulable
 	}, neverTimeout, neverPollInterval, "Node should not be quarantined when isFatal requirement not met")
+
+	// Verify ruleset failed metrics incremented (2 non-matching events sent)
+	afterRulesetFailed := getCounterVecValue(t, metrics.RulesetEvaluations, "gpu-xid-fatal-only", metrics.StatusFailed)
+	assert.GreaterOrEqual(t, afterRulesetFailed, beforeRulesetFailed+2, "RulesetEvaluations with status=failed should increment for non-matching events")
 }
 
 func TestE2E_PartialAnnotationUpdate(t *testing.T) {
@@ -3306,384 +3349,6 @@ func TestE2E_TaintOnlyThenCordonRule(t *testing.T) {
 
 // Metrics Validation Tests
 
-// TestMetrics_EventProcessing validates TotalEventsSuccessfullyProcessed counter
-func TestMetrics_EventProcessing(t *testing.T) {
-	ctx, cancel := context.WithTimeout(e2eTestContext, 20*time.Second)
-	defer cancel()
-
-	nodeName := "metrics-events-" + primitive.NewObjectID().Hex()[:8]
-	createE2ETestNode(ctx, t, nodeName, nil, nil, nil, false)
-	defer func() {
-		_ = e2eTestClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
-	}()
-
-	tomlConfig := config.TomlConfig{
-		LabelPrefix: "k8s.nvidia.com/",
-		RuleSets: []config.RuleSet{
-			{
-				Name:     "test-rule",
-				Version:  "1",
-				Priority: 10,
-				Match: config.Match{
-					Any: []config.Rule{
-						{Kind: "HealthEvent", Expression: "event.checkName == 'TestCheck'"},
-					},
-				},
-				Taint:  config.Taint{Key: "nvidia.com/test", Value: "true", Effect: "NoSchedule"},
-				Cordon: config.Cordon{ShouldCordon: true},
-			},
-		},
-	}
-
-	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
-
-	beforeProcessed := getCounterValue(t, metrics.TotalEventsSuccessfullyProcessed)
-
-	mockWatcher.EventsChan <- createHealthEventBSON(
-		primitive.NewObjectID(),
-		nodeName,
-		"TestCheck",
-		false,
-		false,
-		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		model.StatusInProgress,
-	)
-
-	require.Eventually(t, func() bool {
-		node, _ := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		return node.Spec.Unschedulable
-	}, eventuallyTimeout, eventuallyPollInterval, "Node should be quarantined")
-
-	require.Eventually(t, func() bool {
-		afterProcessed := getCounterValue(t, metrics.TotalEventsSuccessfullyProcessed)
-		return afterProcessed >= beforeProcessed+1
-	}, eventuallyTimeout, eventuallyPollInterval, "TotalEventsSuccessfullyProcessed should increment")
-
-	afterProcessed := getCounterValue(t, metrics.TotalEventsSuccessfullyProcessed)
-	assert.GreaterOrEqual(t, afterProcessed, beforeProcessed+1, "TotalEventsSuccessfullyProcessed should increment")
-}
-
-// TestMetrics_QuarantineCounters validates quarantine/unquarantine counters and gauges
-func TestMetrics_QuarantineCounters(t *testing.T) {
-	ctx, cancel := context.WithTimeout(e2eTestContext, 20*time.Second)
-	defer cancel()
-
-	nodeName := "metrics-quarantine-" + primitive.NewObjectID().Hex()[:8]
-	createE2ETestNode(ctx, t, nodeName, nil, nil, nil, false)
-	defer func() {
-		_ = e2eTestClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
-	}()
-
-	tomlConfig := config.TomlConfig{
-		LabelPrefix: "k8s.nvidia.com/",
-		RuleSets: []config.RuleSet{
-			{
-				Name:     "test-rule",
-				Version:  "1",
-				Priority: 10,
-				Match: config.Match{
-					Any: []config.Rule{
-						{Kind: "HealthEvent", Expression: "true"},
-					},
-				},
-				Taint:  config.Taint{Key: "nvidia.com/test", Value: "true", Effect: "NoSchedule"},
-				Cordon: config.Cordon{ShouldCordon: true},
-			},
-		},
-	}
-
-	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
-
-	beforeQuarantined := getCounterVecValue(t, metrics.TotalNodesQuarantined, nodeName)
-	beforeGauge := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
-
-	mockWatcher.EventsChan <- createHealthEventBSON(
-		primitive.NewObjectID(),
-		nodeName,
-		"TestCheck",
-		false,
-		false,
-		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		model.StatusInProgress,
-	)
-
-	require.Eventually(t, func() bool {
-		node, _ := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		return node.Spec.Unschedulable
-	}, eventuallyTimeout, eventuallyPollInterval, "Node should be quarantined")
-
-	afterQuarantined := getCounterVecValue(t, metrics.TotalNodesQuarantined, nodeName)
-	afterGauge := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
-
-	assert.Equal(t, beforeQuarantined+1, afterQuarantined, "TotalNodesQuarantined should increment by 1")
-	assert.Equal(t, float64(1), afterGauge, "CurrentQuarantinedNodes should be 1")
-	assert.GreaterOrEqual(t, afterGauge, beforeGauge, "CurrentQuarantinedNodes should increase or stay at 1")
-
-	beforeUnquarantined := getCounterVecValue(t, metrics.TotalNodesUnquarantined, nodeName)
-
-	mockWatcher.EventsChan <- createHealthEventBSON(
-		primitive.NewObjectID(),
-		nodeName,
-		"TestCheck",
-		true,
-		false,
-		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		model.StatusInProgress,
-	)
-
-	require.Eventually(t, func() bool {
-		node, _ := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		return !node.Spec.Unschedulable
-	}, eventuallyTimeout, eventuallyPollInterval, "Node should be unquarantined")
-
-	afterUnquarantined := getCounterVecValue(t, metrics.TotalNodesUnquarantined, nodeName)
-	finalGauge := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
-
-	assert.Equal(t, beforeUnquarantined+1, afterUnquarantined, "TotalNodesUnquarantined should increment by 1")
-	assert.Equal(t, float64(0), finalGauge, "CurrentQuarantinedNodes should be 0 after unquarantine")
-}
-
-// TestMetrics_TaintAndCordon validates taint and cordon metrics
-func TestMetrics_TaintAndCordon(t *testing.T) {
-	ctx, cancel := context.WithTimeout(e2eTestContext, 20*time.Second)
-	defer cancel()
-
-	nodeName := "metrics-taint-" + primitive.NewObjectID().Hex()[:8]
-	createE2ETestNode(ctx, t, nodeName, nil, nil, nil, false)
-	defer func() {
-		_ = e2eTestClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
-	}()
-
-	tomlConfig := config.TomlConfig{
-		LabelPrefix: "k8s.nvidia.com/",
-		RuleSets: []config.RuleSet{
-			{
-				Name:     "test-taint-rule",
-				Version:  "1",
-				Priority: 10,
-				Match: config.Match{
-					Any: []config.Rule{
-						{Kind: "HealthEvent", Expression: "true"},
-					},
-				},
-				Taint:  config.Taint{Key: "nvidia.com/test-metric", Value: "true", Effect: "NoSchedule"},
-				Cordon: config.Cordon{ShouldCordon: true},
-			},
-		},
-	}
-
-	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
-
-	beforeTaints := getCounterVecValue(t, metrics.TaintsApplied, "nvidia.com/test-metric", "NoSchedule")
-	beforeCordons := getCounterValue(t, metrics.CordonsApplied)
-
-	mockWatcher.EventsChan <- createHealthEventBSON(
-		primitive.NewObjectID(),
-		nodeName,
-		"TestCheck",
-		false,
-		false,
-		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		model.StatusInProgress,
-	)
-
-	require.Eventually(t, func() bool {
-		node, _ := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		return node.Spec.Unschedulable
-	}, eventuallyTimeout, eventuallyPollInterval, "Node should be quarantined")
-
-	afterTaints := getCounterVecValue(t, metrics.TaintsApplied, "nvidia.com/test-metric", "NoSchedule")
-	afterCordons := getCounterValue(t, metrics.CordonsApplied)
-
-	assert.GreaterOrEqual(t, afterTaints, beforeTaints+1, "TaintsApplied should increment")
-	assert.GreaterOrEqual(t, afterCordons, beforeCordons+1, "CordonsApplied should increment")
-
-	beforeTaintsRemoved := getCounterVecValue(t, metrics.TaintsRemoved, "nvidia.com/test-metric", "NoSchedule")
-	beforeCordonsRemoved := getCounterValue(t, metrics.CordonsRemoved)
-
-	mockWatcher.EventsChan <- createHealthEventBSON(
-		primitive.NewObjectID(),
-		nodeName,
-		"TestCheck",
-		true,
-		false,
-		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		model.StatusInProgress,
-	)
-
-	require.Eventually(t, func() bool {
-		node, _ := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		return !node.Spec.Unschedulable
-	}, eventuallyTimeout, eventuallyPollInterval, "Node should be unquarantined")
-
-	afterTaintsRemoved := getCounterVecValue(t, metrics.TaintsRemoved, "nvidia.com/test-metric", "NoSchedule")
-	afterCordonsRemoved := getCounterValue(t, metrics.CordonsRemoved)
-
-	assert.GreaterOrEqual(t, afterTaintsRemoved, beforeTaintsRemoved+1, "TaintsRemoved should increment")
-	assert.GreaterOrEqual(t, afterCordonsRemoved, beforeCordonsRemoved+1, "CordonsRemoved should increment")
-}
-
-// TestMetrics_EventsSkipped validates TotalEventsSkipped counter
-func TestMetrics_EventsSkipped(t *testing.T) {
-	ctx, cancel := context.WithTimeout(e2eTestContext, 20*time.Second)
-	defer cancel()
-
-	nodeName := "metrics-skipped-" + primitive.NewObjectID().Hex()[:8]
-	createE2ETestNode(ctx, t, nodeName, nil, nil, nil, false)
-	defer func() {
-		_ = e2eTestClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
-	}()
-
-	tomlConfig := config.TomlConfig{
-		LabelPrefix: "k8s.nvidia.com/",
-		RuleSets: []config.RuleSet{
-			{
-				Name:     "test-rule",
-				Version:  "1",
-				Priority: 10,
-				Match: config.Match{
-					Any: []config.Rule{
-						{Kind: "HealthEvent", Expression: "event.checkName == 'TestCheck'"},
-					},
-				},
-				Taint:  config.Taint{Key: "nvidia.com/test", Value: "true", Effect: "NoSchedule"},
-				Cordon: config.Cordon{ShouldCordon: true},
-			},
-		},
-	}
-
-	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
-
-	beforeSkipped := getCounterValue(t, metrics.TotalEventsSkipped)
-
-	mockWatcher.EventsChan <- createHealthEventBSON(
-		primitive.NewObjectID(),
-		nodeName,
-		"TestCheck",
-		true,
-		false,
-		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		model.StatusInProgress,
-	)
-
-	require.Eventually(t, func() bool {
-		afterSkipped := getCounterValue(t, metrics.TotalEventsSkipped)
-		return afterSkipped >= beforeSkipped+1
-	}, eventuallyTimeout, eventuallyPollInterval, "TotalEventsSkipped should increment")
-
-	afterSkipped := getCounterValue(t, metrics.TotalEventsSkipped)
-	assert.GreaterOrEqual(t, afterSkipped, beforeSkipped+1, "TotalEventsSkipped should increment for healthy event without prior quarantine")
-}
-
-// TestMetrics_RulesetEvaluations validates ruleset evaluation metrics
-func TestMetrics_RulesetEvaluations(t *testing.T) {
-	ctx, cancel := context.WithTimeout(e2eTestContext, 20*time.Second)
-	defer cancel()
-
-	nodeName := "metrics-ruleset-" + primitive.NewObjectID().Hex()[:8]
-	createE2ETestNode(ctx, t, nodeName, nil, nil, nil, false)
-	defer func() {
-		_ = e2eTestClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
-	}()
-
-	rulesetName := "test-ruleset-metrics"
-
-	tomlConfig := config.TomlConfig{
-		LabelPrefix: "k8s.nvidia.com/",
-		RuleSets: []config.RuleSet{
-			{
-				Name:     rulesetName,
-				Version:  "1",
-				Priority: 10,
-				Match: config.Match{
-					Any: []config.Rule{
-						{Kind: "HealthEvent", Expression: "event.checkName == 'TestCheck'"},
-					},
-				},
-				Taint:  config.Taint{Key: "nvidia.com/test", Value: "true", Effect: "NoSchedule"},
-				Cordon: config.Cordon{ShouldCordon: true},
-			},
-		},
-	}
-
-	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
-
-	beforePassed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusPassed)
-
-	mockWatcher.EventsChan <- createHealthEventBSON(
-		primitive.NewObjectID(),
-		nodeName,
-		"TestCheck",
-		false,
-		false,
-		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		model.StatusInProgress,
-	)
-
-	require.Eventually(t, func() bool {
-		node, _ := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
-		return node.Spec.Unschedulable
-	}, eventuallyTimeout, eventuallyPollInterval, "Node should be quarantined")
-
-	afterPassed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusPassed)
-
-	assert.GreaterOrEqual(t, afterPassed, beforePassed+1, "RulesetEvaluations with status=passed should increment")
-}
-
-// TestMetrics_RulesetEvaluationFailed validates RulesetEvaluations metric with status=failed when rule doesn't match
-func TestMetrics_RulesetFailed(t *testing.T) {
-	ctx, cancel := context.WithTimeout(e2eTestContext, 20*time.Second)
-	defer cancel()
-
-	nodeName := "metrics-rulefail-" + primitive.NewObjectID().Hex()[:8]
-	createE2ETestNode(ctx, t, nodeName, nil, nil, nil, false)
-	defer func() {
-		e2eTestClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
-	}()
-
-	rulesetName := "test-ruleset-fail"
-
-	tomlConfig := config.TomlConfig{
-		LabelPrefix: "k8s.nvidia.com/",
-		RuleSets: []config.RuleSet{
-			{
-				Name:     rulesetName,
-				Version:  "1",
-				Priority: 10,
-				Match: config.Match{
-					Any: []config.Rule{
-						{Kind: "HealthEvent", Expression: "event.checkName == 'WillNotMatch'"},
-					},
-				},
-				Taint:  config.Taint{Key: "nvidia.com/test", Value: "true", Effect: "NoSchedule"},
-				Cordon: config.Cordon{ShouldCordon: true},
-			},
-		},
-	}
-
-	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
-
-	beforeFailed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusFailed)
-
-	mockWatcher.EventsChan <- createHealthEventBSON(
-		primitive.NewObjectID(),
-		nodeName,
-		"DifferentCheck",
-		false,
-		false,
-		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
-		model.StatusInProgress,
-	)
-
-	require.Eventually(t, func() bool {
-		afterFailed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusFailed)
-		return afterFailed >= beforeFailed+1
-	}, eventuallyTimeout, eventuallyPollInterval, "RulesetEvaluations with status=failed should increment")
-
-	afterFailed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusFailed)
-	assert.GreaterOrEqual(t, afterFailed, beforeFailed+1, "RulesetEvaluations with status=failed should increment when rule doesn't match")
-}
-
 // TestMetrics_CurrentQuarantinedNodesRestore validates gauge restoration on restart
 func TestMetrics_CurrentQuarantinedNodesRestore(t *testing.T) {
 	ctx, cancel := context.WithTimeout(e2eTestContext, 20*time.Second)
@@ -3731,7 +3396,7 @@ func TestMetrics_CurrentQuarantinedNodesRestore(t *testing.T) {
 
 	gaugeValue := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
 	if gaugeValue == float64(1) {
-		t.Logf("✓ CurrentQuarantinedNodes correctly restored to 1 for existing quarantined node")
+		t.Logf("CurrentQuarantinedNodes correctly restored to 1 for existing quarantined node")
 	} else {
 		t.Logf("Note: CurrentQuarantinedNodes is %v (cold start restoration depends on node informer sync)", gaugeValue)
 	}

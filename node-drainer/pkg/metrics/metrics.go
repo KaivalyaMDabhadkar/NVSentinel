@@ -19,6 +19,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Drain Status constants for event processing metrics
+const (
+	DrainStatusDrained   = "drained"
+	DrainStatusCancelled = "cancelled"
+	DrainStatusSkipped   = "skipped"
+)
+
 var (
 	// Event processing metrics
 
@@ -38,41 +45,25 @@ var (
 		},
 	)
 
-	// TotalEventsSuccessfullyProcessed tracks successfully processed events
-	TotalEventsSuccessfullyProcessed = promauto.NewCounter(
+	// EventsProcessed tracks events processed by drain outcome
+	EventsProcessed = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "node_drainer_events_successfully_processed_total",
-			Help: "Total number of events successfully processed.",
+			Name: "node_drainer_events_processed_total",
+			Help: "Total number of events processed by drain status outcome.",
 		},
+		[]string{"drain_status", "node"},
 	)
 
-	// ProcessingErrors tracks errors during event processing
+	// ProcessingErrors tracks all errors (event processing and node draining)
 	ProcessingErrors = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "node_drainer_processing_errors_total",
-			Help: "Total number of errors encountered during event processing.",
-		},
-		[]string{"error_type"},
-	)
-
-	// Node draining metrics
-
-	// NodeDrainSuccess tracks successful node drainings
-	NodeDrainSuccess = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "node_drainer_node_drain_successful_total",
-			Help: "Total number of successful node drainings.",
-		}, []string{"node"},
-	)
-
-	// NodeDrainError tracks errors while draining nodes
-	NodeDrainError = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "node_drainer_node_drain_errors_total",
-			Help: "Total number of errors encountered while draining a node.",
+			Help: "Total number of errors encountered during event processing and node draining.",
 		},
 		[]string{"error_type", "node"},
 	)
+
+	// Node draining metrics
 
 	// NodeDrainTimeout tracks node drainer operations in deleteAfterTimeout mode
 	NodeDrainTimeout = promauto.NewGaugeVec(
@@ -100,15 +91,6 @@ var (
 			Help:    "Histogram of event handling durations.",
 			Buckets: prometheus.DefBuckets,
 		},
-	)
-
-	// NodeDrainStatus tracks which nodes are currently being drained (1 = draining, 0 = not draining)
-	NodeDrainStatus = promauto.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Name: "node_drainer_node_drain_status",
-			Help: "Shows if a node is currently being drained (1) or not (0).",
-		},
-		[]string{"node"},
 	)
 
 	// QueueDepth tracks the total number of pending events in the queue

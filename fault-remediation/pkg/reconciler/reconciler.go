@@ -217,7 +217,6 @@ func (r *Reconciler) performRemediation(ctx context.Context, healthEventWithStat
 	}
 
 	if !success {
-		remediationTotal.WithLabelValues(nodeName, StatusFailed).Inc()
 		processingErrors.WithLabelValues("cr_creation_failed", nodeName).Inc()
 	}
 
@@ -295,6 +294,8 @@ func (r *Reconciler) handleRemediationEvent(
 			"node", nodeName,
 			"existingCR", existingCR)
 
+		eventsProcessed.WithLabelValues(CRStatusSkipped, nodeName).Inc()
+
 		if err := watcher.MarkProcessed(ctx); err != nil {
 			processingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
 			slog.Error("Error updating resume token", "error", err)
@@ -312,7 +313,7 @@ func (r *Reconciler) handleRemediationEvent(
 		return
 	}
 
-	totalEventsSuccessfullyProcessed.Inc()
+	eventsProcessed.WithLabelValues(CRStatusCreated, nodeName).Inc()
 
 	if err := watcher.MarkProcessed(ctx); err != nil {
 		processingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()

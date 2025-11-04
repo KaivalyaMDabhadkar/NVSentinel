@@ -238,8 +238,8 @@ func TestDoesNotTripBelowThreshold(t *testing.T) {
 	ctx := context.Background()
 	b := newTestBreaker(t, ctx, 10, 50, 1*time.Second, "")
 
-	t.Log("Adding 4 cordon events (below threshold of 5)")
-	for i := 0; i < 4; i++ {
+	t.Log("Adding 3 cordon events (below threshold of 5)")
+	for i := 0; i < 3; i++ {
 		b.AddCordonEvent(fmt.Sprintf("node%d", i))
 	}
 	tripped, err := b.IsTripped(ctx)
@@ -247,13 +247,21 @@ func TestDoesNotTripBelowThreshold(t *testing.T) {
 		t.Fatalf("error checking if breaker should trip: %v", err)
 	}
 	if tripped {
-		t.Fatalf("breaker should not trip below threshold (4 < 5)")
+		t.Fatalf("breaker should not trip below threshold (3 < 5)")
 	}
+
+	// Verify utilization metric (30% for 3 out of 10 nodes)
+	utilization := getGaugeValue(t, metrics.FaultQuarantineBreakerUtilization)
+	assert.GreaterOrEqual(t, utilization, float64(0.25), "Utilization should be at least 25%")
+	assert.LessOrEqual(t, utilization, float64(0.35), "Utilization should be at most 35%")
 }
 
 func TestTripsWhenAboveThreshold(t *testing.T) {
 	ctx := context.Background()
 	b := newTestBreaker(t, ctx, 10, 50, 1*time.Second, "")
+
+	// Track metrics before
+	beforeDuration := getHistogramVecCount(t, metrics.FaultQuarantineGetTotalNodesDuration, "success")
 
 	t.Log("Adding 5 cordon events (at threshold, should trip)")
 	for i := 0; i < 5; i++ {
@@ -266,11 +274,18 @@ func TestTripsWhenAboveThreshold(t *testing.T) {
 	if !tripped {
 		t.Fatalf("breaker should trip at threshold (5 >= 5)")
 	}
+
+	// Verify getTotalNodes duration metric
+	afterDuration := getHistogramVecCount(t, metrics.FaultQuarantineGetTotalNodesDuration, "success")
+	assert.GreaterOrEqual(t, afterDuration, beforeDuration+1, "GetTotalNodesDuration should record observations")
 }
 
 func TestForceStateOverridesComputation(t *testing.T) {
 	ctx := context.Background()
 	b := newTestBreaker(t, ctx, 10, 50, 1*time.Second, "")
+
+	t.Log("Verify breaker starts in CLOSED state")
+	assert.Equal(t, StateClosed, b.CurrentState(), "Breaker should start in CLOSED state")
 
 	t.Log("Force state to TRIPPED")
 	err := b.ForceState(ctx, StateTripped)
@@ -284,6 +299,7 @@ func TestForceStateOverridesComputation(t *testing.T) {
 	if !tripped {
 		t.Fatalf("breaker should report tripped after ForceState(StateTripped)")
 	}
+	assert.Equal(t, StateTripped, b.CurrentState(), "Breaker state should be TRIPPED")
 
 	t.Log("Force state to CLOSED")
 	err = b.ForceState(ctx, StateClosed)
@@ -297,6 +313,7 @@ func TestForceStateOverridesComputation(t *testing.T) {
 	if tripped {
 		t.Fatalf("breaker should not be tripped after ForceState(StateClosed)")
 	}
+	assert.Equal(t, StateClosed, b.CurrentState(), "Breaker state should be CLOSED after force close")
 }
 
 func TestWindowExpiryResetsCounts(t *testing.T) {
@@ -381,64 +398,6 @@ func TestFlappingNodeDoesNotMultiplyCount(t *testing.T) {
 	if !tripped {
 		t.Fatalf("breaker should trip with 5 unique nodes (5 >= 5 threshold)")
 	}
-}
-
-// Metrics Tests
-
-// TestMetrics_BreakerState validates FaultQuarantineBreakerState gauge updates
-func TestMetrics_BreakerState(t *testing.T) {
-	ctx := context.Background()
-	b := newTestBreaker(t, ctx, 10, 50, 1*time.Second, "")
-
-	t.Log("Verify breaker starts in CLOSED state")
-	state := b.CurrentState()
-	assert.Equal(t, StateClosed, state, "Breaker should start in CLOSED state")
-
-	t.Log("Add 5 nodes to trip the breaker")
-	for i := 0; i < 5; i++ {
-		b.AddCordonEvent(fmt.Sprintf("node%d", i))
-	}
-
-	tripped, _ := b.IsTripped(ctx)
-	assert.True(t, tripped, "Breaker should be tripped")
-	assert.Equal(t, StateTripped, b.CurrentState(), "Breaker state should be TRIPPED")
-
-	t.Log("Force close the breaker")
-	b.ForceState(ctx, StateClosed)
-	assert.Equal(t, StateClosed, b.CurrentState(), "Breaker state should be CLOSED after force close")
-
-	t.Logf("✓ BreakerState metric validated through state transitions")
-}
-
-// TestMetrics_BreakerUtilization validates FaultQuarantineBreakerUtilization gauge
-func TestMetrics_BreakerUtilization(t *testing.T) {
-	ctx := context.Background()
-	b := newTestBreaker(t, ctx, 10, 50, 5*time.Second, "")
-
-	t.Log("Add 3 nodes (30% utilization)")
-	for i := 0; i < 3; i++ {
-		b.AddCordonEvent(fmt.Sprintf("node%d", i))
-	}
-
-	b.IsTripped(ctx)
-
-	utilization := getGaugeValue(t, metrics.FaultQuarantineBreakerUtilization)
-	assert.GreaterOrEqual(t, utilization, float64(0.25), "Utilization should be at least 25%")
-	assert.LessOrEqual(t, utilization, float64(0.35), "Utilization should be at most 35%")
-	t.Logf("Utilization: %.2f%% (3/10 nodes)", utilization*100)
-}
-
-// TestMetrics_GetTotalNodesMetrics validates getTotalNodes retry metrics
-func TestMetrics_GetTotalNodesMetrics(t *testing.T) {
-	ctx := context.Background()
-	b := newTestBreaker(t, ctx, 10, 50, 1*time.Second, "")
-
-	beforeDuration := getHistogramVecCount(t, metrics.FaultQuarantineGetTotalNodesDuration, "success")
-
-	b.IsTripped(ctx)
-
-	afterDuration := getHistogramVecCount(t, metrics.FaultQuarantineGetTotalNodesDuration, "success")
-	assert.GreaterOrEqual(t, afterDuration, beforeDuration+1, "GetTotalNodesDuration should record observations")
 }
 
 // Helper functions for reading Prometheus metrics

@@ -306,9 +306,7 @@ func (r *Reconciler) ProcessEvent(
 	isNodeQuarantined := r.handleEvent(ctx, event, ruleSetEvals, rulesetsConfig)
 
 	if isNodeQuarantined == nil {
-		// Event was skipped (no quarantine action taken)
 		slog.Debug("Skipped processing event for node, no status update needed", "node", event.HealthEvent.NodeName)
-		metrics.TotalEventsSkipped.Inc()
 	} else if *isNodeQuarantined == model.Quarantined ||
 		*isNodeQuarantined == model.UnQuarantined ||
 		*isNodeQuarantined == model.AlreadyQuarantined {
@@ -456,8 +454,6 @@ func (r *Reconciler) evaluateRulesets(
 			defer wg.Done()
 
 			slog.Info("Handling event for ruleset", "event", event, "ruleset", eval.GetName())
-
-			metrics.RulesetEvaluations.WithLabelValues(eval.GetName()).Inc()
 
 			ruleEvaluatedResult, err := eval.Evaluate(event.HealthEvent)
 

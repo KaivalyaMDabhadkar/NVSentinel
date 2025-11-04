@@ -376,7 +376,7 @@ func (i *Informers) sendEvictionRequestForPod(ctx context.Context, namespace str
 		}
 
 		if errors.IsTooManyRequests(err) {
-			metrics.NodeDrainError.WithLabelValues("PDB_blocking_eviction_error", pod.Spec.NodeName).Inc()
+			metrics.ProcessingErrors.WithLabelValues("PDB_blocking_eviction_error", pod.Spec.NodeName).Inc()
 		}
 
 		return fmt.Errorf("error evicting pod %s from namespace %s: %w", pod.Name, pod.Namespace, err)
@@ -741,7 +741,7 @@ func (i *Informers) CheckIfAllPodsAreEvictedInImmediateMode(ctx context.Context,
 
 		err := i.forceDeletePods(ctx, remainingPods)
 		if err != nil {
-			metrics.NodeDrainError.WithLabelValues("pods_force_deletion_error", nodeName).Inc()
+			metrics.ProcessingErrors.WithLabelValues("pods_force_deletion_error", nodeName).Inc()
 			slog.Error("Failed to force delete pods on node",
 				"node", nodeName,
 				"error", err)
