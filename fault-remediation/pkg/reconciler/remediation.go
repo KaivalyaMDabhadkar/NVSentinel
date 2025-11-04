@@ -27,6 +27,7 @@ import (
 
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/common"
+	"github.com/nvidia/nvsentinel/fault-remediation/pkg/config"
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/crstatus"
 
 	batchv1 "k8s.io/api/batch/v1"
@@ -52,26 +53,24 @@ const (
 )
 
 type FaultRemediationClient struct {
-	clientset            dynamic.Interface
-	kubeClient           kubernetes.Interface
-	restMapper           *restmapper.DeferredDiscoveryRESTMapper
-	dryRunMode           []string
-	template             *template.Template
-	templateData         TemplateData
-	annotationManager    NodeAnnotationManagerInterface
-	statusCheckerFactory *crstatus.CRStatusCheckerFactory
+	clientset         dynamic.Interface
+	kubeClient        kubernetes.Interface
+	restMapper        *restmapper.DeferredDiscoveryRESTMapper
+	dryRunMode        []string
+	template          *template.Template
+	templateData      TemplateData
+	annotationManager NodeAnnotationManagerInterface
+	statusChecker     *crstatus.CRStatusChecker
 }
 
 // TemplateData holds the data to be inserted into the template
 type TemplateData struct {
 	NodeName          string
-	Namespace         string
-	Version           string
-	ApiGroup          string
-	TemplateMountPath string
-	TemplateFileName  string
 	HealthEventID     string
 	RecommendedAction protos.RecommendedAction
+	TemplateMountPath string
+	TemplateFileName  string
+	config.MaintenanceResource
 }
 
 // nolint: cyclop // todo
@@ -149,23 +148,22 @@ func NewK8sClient(kubeconfig string, dryRun bool, templateData TemplateData) (*F
 	// Initialize annotation manager
 	client.annotationManager = NewNodeAnnotationManager(kubeClient)
 
-	// Initialize status checker factory
-	client.statusCheckerFactory = crstatus.NewCRStatusCheckerFactory(
-		clientset, mapper, dryRun)
+	client.statusChecker = crstatus.NewCRStatusChecker(
+		clientset,
+		mapper,
+		&templateData.MaintenanceResource,
+		dryRun,
+	)
 
 	return client, kubeClient, nil
 }
 
-// GetAnnotationManager returns the annotation manager for the client
 func (c *FaultRemediationClient) GetAnnotationManager() NodeAnnotationManagerInterface {
 	return c.annotationManager
 }
 
-// GetStatusCheckerForAction returns the appropriate status checker for the given action
-func (c *FaultRemediationClient) GetStatusCheckerForAction(
-	action protos.RecommendedAction,
-) (crstatus.CRStatusChecker, error) {
-	return c.statusCheckerFactory.GetStatusChecker(action)
+func (c *FaultRemediationClient) GetStatusChecker() *crstatus.CRStatusChecker {
+	return c.statusChecker
 }
 
 func (c *FaultRemediationClient) CreateMaintenanceResource(

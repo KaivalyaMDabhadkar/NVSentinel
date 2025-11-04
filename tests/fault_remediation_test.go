@@ -36,7 +36,7 @@ func TestExistingCRPreventsNewCreation(t *testing.T) {
 		return newCtx
 	})
 
-	feature.Assess("existing CR prevents duplicate creation", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("new CR should be created on the same node after success", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
@@ -58,16 +58,8 @@ func TestExistingCRPreventsNewCreation(t *testing.T) {
 				return false
 			}
 
-			if len(crList) == 1 && crList[0] == cr1Name {
-				return true
-			}
-			if len(crList) > 1 {
-				t.Logf("ERROR: Found %d CRs, duplicate created!", len(crList))
-			} else {
-				t.Logf("Waiting for stable CR count, currently: %d", len(crList))
-			}
-			return false
-		}, helpers.NeverWaitTimeout, helpers.WaitInterval, "should have exactly the original CR, no duplicates")
+			return len(crList) == 2
+		}, helpers.NeverWaitTimeout, helpers.WaitInterval, "should have 2 CRs")
 
 		return ctx
 	})

@@ -26,7 +26,6 @@ import (
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/common"
-	"github.com/nvidia/nvsentinel/fault-remediation/pkg/crstatus"
 	"github.com/nvidia/nvsentinel/store-client/pkg/storewatcher"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -367,51 +366,6 @@ func (r *Reconciler) updateNodeRemediatedStatus(ctx context.Context, collection 
 	return nil
 }
 
-// handleCRStatus processes the CR status and determines if a new CR should be created
-func (r *Reconciler) handleCRStatus(
-	ctx context.Context,
-	nodeName, group string,
-	crName string,
-	status crstatus.CRStatus,
-) (shouldCreateCR bool, existingCR string) {
-	switch status {
-	case crstatus.CRStatusSucceeded, crstatus.CRStatusInProgress:
-		// Don't create new CR, remediation is complete or in progress
-		slog.Info("Skipping event for node - CR is in final state",
-			"node", nodeName,
-			"crName", crName,
-			"status", fmt.Sprintf("%v", status))
-
-		return false, crName
-	case crstatus.CRStatusFailed:
-		// Previous CR failed, remove it from annotation and allow retry
-		slog.Info("Previous CR failed for node, allowing retry",
-			"crName", crName,
-			"node", nodeName)
-
-		if err := r.annotationManager.RemoveGroupFromState(ctx, nodeName, group); err != nil {
-			slog.Error("Failed to remove failed CR from annotation", "error", err)
-		}
-
-		return true, ""
-	case crstatus.CRStatusNotFound:
-		// CR doesn't exist anymore, clean up annotation
-		slog.Info("CR not found for node, cleaning up annotation",
-			"crName", crName,
-			"node", nodeName)
-
-		if err := r.annotationManager.RemoveGroupFromState(ctx, nodeName, group); err != nil {
-			slog.Error("Failed to remove stale CR from annotation", "error", err)
-		}
-
-		return true, ""
-	}
-
-	return true, ""
-}
-
-// checkExistingCRStatus checks if there's an existing CR for the same equivalence group
-// and determines whether to create a new CR based on its status
 func (r *Reconciler) checkExistingCRStatus(
 	ctx context.Context,
 	healthEvent *protos.HealthEvent,
@@ -420,54 +374,42 @@ func (r *Reconciler) checkExistingCRStatus(
 	group := common.GetRemediationGroupForAction(healthEvent.RecommendedAction)
 
 	if group == "" {
-		// Action is not part of any remediation group, allow creating CR
 		return true, "", nil
 	}
 
-	// Get current remediation state from node annotation
 	state, err := r.annotationManager.GetRemediationState(ctx, nodeName)
 	if err != nil {
 		slog.Error("Error getting remediation state", "node", nodeName, "error", err)
-		// On error, allow creating CR
 		return true, "", nil
 	}
 
 	if state == nil {
-		slog.Warn("Remediation state is nil for node, allowing CR creation",
-			"node", nodeName)
+		slog.Warn("Remediation state is nil for node, allowing CR creation", "node", nodeName)
 		return true, "", nil
 	}
 
-	// Check if there's an existing CR for this group
 	groupState, exists := state.EquivalenceGroups[group]
 	if !exists {
-		// No existing CR for this group, allow creating new one
 		return true, "", nil
 	}
 
-	// Get the appropriate status checker for this action
-	statusChecker, err := r.remediationClient.GetStatusCheckerForAction(healthEvent.RecommendedAction)
-	if err != nil {
-		slog.Error("Error getting status checker for action",
-			"action", healthEvent.RecommendedAction.String(),
-			"error", err)
-		// On error, allow creating CR
+	statusChecker := r.remediationClient.GetStatusChecker()
+	if statusChecker == nil {
+		slog.Warn("Status checker is not available, allowing creation")
 		return true, "", nil
 	}
 
-	// Check the CR status
-	status, err := statusChecker.GetCRStatus(ctx, groupState.MaintenanceCR)
-	if err != nil {
-		slog.Error("Error checking CR status", "crName", groupState.MaintenanceCR, "error", err)
-		// On error checking status, assume NotFound
-		status = crstatus.CRStatusNotFound
+	shouldSkip := statusChecker.ShouldSkipCRCreation(ctx, groupState.MaintenanceCR)
+	if shouldSkip {
+		slog.Info("CR exists and is in progress, skipping event", "node", nodeName, "crName", groupState.MaintenanceCR)
+		return false, groupState.MaintenanceCR, nil
 	}
 
-	slog.Info("Found existing CR %s for node %s group %s with status %s",
-		groupState.MaintenanceCR, nodeName, group, status)
+	slog.Info("CR completed or failed, allowing retry", "node", nodeName, "crName", groupState.MaintenanceCR)
 
-	// Decide based on CR status
-	shouldCreate, existingCRName := r.handleCRStatus(ctx, nodeName, group, groupState.MaintenanceCR, status)
+	if err := r.annotationManager.RemoveGroupFromState(ctx, nodeName, group); err != nil {
+		slog.Error("Failed to remove CR from annotation", "error", err)
+	}
 
-	return shouldCreate, existingCRName, nil
+	return true, "", nil
 }

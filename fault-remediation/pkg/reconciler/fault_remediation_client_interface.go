@@ -17,7 +17,6 @@ package reconciler
 import (
 	"context"
 
-	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/crstatus"
 )
 
@@ -25,5 +24,5 @@ type FaultRemediationClientInterface interface {
 	CreateMaintenanceResource(ctx context.Context, healthEventDoc *HealthEventDoc) (bool, string)
 	RunLogCollectorJob(ctx context.Context, nodeName string) error
 	GetAnnotationManager() NodeAnnotationManagerInterface
-	GetStatusCheckerForAction(action protos.RecommendedAction) (crstatus.CRStatusChecker, error)
+	GetStatusChecker() *crstatus.CRStatusChecker
 }
