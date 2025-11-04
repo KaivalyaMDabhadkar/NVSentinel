@@ -468,7 +468,7 @@ func (r *Reconciler) evaluateRulesets(
 			case err != nil:
 				r.handleRuleEvaluationError(event.HealthEvent, eval.GetName(), err)
 			default:
-				metrics.RulesetFailed.WithLabelValues(eval.GetName()).Inc()
+				metrics.RulesetEvaluations.WithLabelValues(eval.GetName(), metrics.StatusFailed).Inc()
 			}
 		}(eval)
 	}
@@ -485,7 +485,7 @@ func (r *Reconciler) handleSuccessfulRuleEvaluation(
 	taintAppliedMap map[keyValTaint]string,
 	taintEffectPriorityMap map[keyValTaint]int,
 ) {
-	metrics.RulesetPassed.WithLabelValues(eval.GetName()).Inc()
+	metrics.RulesetEvaluations.WithLabelValues(eval.GetName(), metrics.StatusPassed).Inc()
 
 	shouldCordon := rulesetsConfig.CordonConfigMap[eval.GetName()]
 	if shouldCordon {
@@ -539,7 +539,7 @@ func (r *Reconciler) handleRuleEvaluationError(
 ) {
 	slog.Error("Rule evaluation failed", "ruleset", evalName, "node", event.NodeName, "error", err)
 	metrics.ProcessingErrors.WithLabelValues("ruleset_evaluation_error").Inc()
-	metrics.RulesetFailed.WithLabelValues(evalName).Inc()
+	metrics.RulesetEvaluations.WithLabelValues(evalName, metrics.StatusFailed).Inc()
 }
 
 // collectTaintsToApply collects all taints that should be applied from the taint map

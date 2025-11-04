@@ -85,8 +85,6 @@ func (r *Reconciler) ProcessEvent(ctx context.Context,
 		return fmt.Errorf("failed to unmarshal health event: %w", err)
 	}
 
-	r.updateQuarantineMetrics(&healthEventWithStatus)
-
 	metrics.TotalEventsReceived.Inc()
 
 	actionResult, err := r.evaluator.EvaluateEvent(ctx, healthEventWithStatus, collection)
@@ -145,11 +143,9 @@ func (r *Reconciler) executeSkip(ctx context.Context,
 	event bson.M, collection queue.MongoCollectionAPI) error {
 	slog.Info("Skipping event for node", "node", nodeName)
 
-	// Track if this is a healthy event that canceled draining
+	// Update MongoDB status to StatusSucceeded for healthy events that cancel draining
 	if healthEvent.HealthEventStatus.NodeQuarantined != nil &&
 		*healthEvent.HealthEventStatus.NodeQuarantined == model.UnQuarantined {
-		metrics.HealthyEventWithContextCancellation.Inc()
-
 		// Update MongoDB status to StatusSucceeded for healthy events that cancel draining
 		podsEvictionStatus := &healthEvent.HealthEventStatus.UserPodsEvictionStatus
 		podsEvictionStatus.Status = model.StatusSucceeded
@@ -310,33 +306,6 @@ func (r *Reconciler) updateNodeDrainStatus(ctx context.Context,
 		metrics.NodeDrainStatus.WithLabelValues(nodeName).Set(1)
 	} else {
 		metrics.NodeDrainStatus.WithLabelValues(nodeName).Set(0)
-	}
-}
-
-func (r *Reconciler) updateQuarantineMetrics(healthEventWithStatus *model.HealthEventWithStatus) {
-	if healthEventWithStatus.HealthEventStatus.NodeQuarantined == nil {
-		slog.Warn("NodeQuarantined is nil, skipping metrics update",
-			"node", healthEventWithStatus.HealthEvent.NodeName)
-		return
-	}
-
-	//nolint:exhaustive
-	switch *healthEventWithStatus.HealthEventStatus.NodeQuarantined {
-	case model.Quarantined:
-		metrics.UnhealthyEvent.WithLabelValues(healthEventWithStatus.HealthEvent.NodeName,
-			healthEventWithStatus.HealthEvent.CheckName).Inc()
-	case model.UnQuarantined:
-		metrics.HealthyEvent.WithLabelValues(healthEventWithStatus.HealthEvent.NodeName,
-			healthEventWithStatus.HealthEvent.CheckName).Inc()
-	case model.AlreadyQuarantined:
-		slog.Info("Node already quarantined",
-			"node", healthEventWithStatus.HealthEvent.NodeName)
-		metrics.UnhealthyEvent.WithLabelValues(healthEventWithStatus.HealthEvent.NodeName,
-			healthEventWithStatus.HealthEvent.CheckName).Inc()
-	default:
-		slog.Warn("Unknown NodeQuarantined status",
-			"node", healthEventWithStatus.HealthEvent.NodeName,
-			"status", *healthEventWithStatus.HealthEventStatus.NodeQuarantined)
 	}
 }
 

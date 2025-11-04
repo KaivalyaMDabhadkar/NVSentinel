@@ -218,7 +218,7 @@ func (r *Reconciler) performRemediation(ctx context.Context, healthEventWithStat
 	}
 
 	if !success {
-		remediationFailed.WithLabelValues(nodeName).Inc()
+		remediationTotal.WithLabelValues(nodeName, StatusFailed).Inc()
 		processingErrors.WithLabelValues("cr_creation_failed", nodeName).Inc()
 	}
 

@@ -3608,8 +3608,7 @@ func TestMetrics_RulesetEvaluations(t *testing.T) {
 
 	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
 
-	beforeEvaluations := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName)
-	beforePassed := getCounterVecValue(t, metrics.RulesetPassed, rulesetName)
+	beforePassed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusPassed)
 
 	mockWatcher.EventsChan <- createHealthEventBSON(
 		primitive.NewObjectID(),
@@ -3626,14 +3625,12 @@ func TestMetrics_RulesetEvaluations(t *testing.T) {
 		return node.Spec.Unschedulable
 	}, eventuallyTimeout, eventuallyPollInterval, "Node should be quarantined")
 
-	afterEvaluations := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName)
-	afterPassed := getCounterVecValue(t, metrics.RulesetPassed, rulesetName)
+	afterPassed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusPassed)
 
-	assert.GreaterOrEqual(t, afterEvaluations, beforeEvaluations+1, "RulesetEvaluations should increment")
-	assert.GreaterOrEqual(t, afterPassed, beforePassed+1, "RulesetPassed should increment")
+	assert.GreaterOrEqual(t, afterPassed, beforePassed+1, "RulesetEvaluations with status=passed should increment")
 }
 
-// TestMetrics_RulesetFailed validates RulesetFailed metric when rule doesn't match
+// TestMetrics_RulesetEvaluationFailed validates RulesetEvaluations metric with status=failed when rule doesn't match
 func TestMetrics_RulesetFailed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(e2eTestContext, 20*time.Second)
 	defer cancel()
@@ -3666,7 +3663,7 @@ func TestMetrics_RulesetFailed(t *testing.T) {
 
 	_, mockWatcher, _, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
 
-	beforeFailed := getCounterVecValue(t, metrics.RulesetFailed, rulesetName)
+	beforeFailed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusFailed)
 
 	mockWatcher.EventsChan <- createHealthEventBSON(
 		primitive.NewObjectID(),
@@ -3679,12 +3676,12 @@ func TestMetrics_RulesetFailed(t *testing.T) {
 	)
 
 	require.Eventually(t, func() bool {
-		afterFailed := getCounterVecValue(t, metrics.RulesetFailed, rulesetName)
+		afterFailed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusFailed)
 		return afterFailed >= beforeFailed+1
-	}, eventuallyTimeout, eventuallyPollInterval, "RulesetFailed should increment")
+	}, eventuallyTimeout, eventuallyPollInterval, "RulesetEvaluations with status=failed should increment")
 
-	afterFailed := getCounterVecValue(t, metrics.RulesetFailed, rulesetName)
-	assert.GreaterOrEqual(t, afterFailed, beforeFailed+1, "RulesetFailed should increment when rule doesn't match")
+	afterFailed := getCounterVecValue(t, metrics.RulesetEvaluations, rulesetName, metrics.StatusFailed)
+	assert.GreaterOrEqual(t, afterFailed, beforeFailed+1, "RulesetEvaluations with status=failed should increment when rule doesn't match")
 }
 
 // TestMetrics_CurrentQuarantinedNodesRestore validates gauge restoration on restart

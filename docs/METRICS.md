@@ -51,9 +51,7 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
-| `fault_quarantine_ruleset_evaluations_total` | Counter | `ruleset` | Total number of ruleset evaluations |
-| `fault_quarantine_ruleset_passed_total` | Counter | `ruleset` | Total number of ruleset evaluations that passed |
-| `fault_quarantine_ruleset_failed_total` | Counter | `ruleset` | Total number of ruleset evaluations that failed |
+| `fault_quarantine_ruleset_evaluations_total` | Counter | `ruleset`, `status` | Total number of ruleset evaluations. Status values: `passed`, `failed` |
 
 ### Circuit Breaker Metrics
 
@@ -79,14 +77,6 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 | `node_drainer_processing_errors_total` | Counter | `error_type` | Total number of errors encountered during event processing |
 | `node_drainer_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
 | `node_drainer_queue_depth` | Gauge | - | Total number of pending events in the queue |
-
-### Health Event Metrics
-
-| Metric Name | Type | Labels | Description |
-|------------|------|--------|-------------|
-| `node_drainer_healthy_event_total` | Counter | `node`, `check_name` | Total number of healthy events |
-| `node_drainer_unhealthy_event_total` | Counter | `node`, `check_name` | Total number of unhealthy events |
-| `node_drainer_healthy_event_with_node_drain_cancel_total` | Counter | - | Total number of healthy events that led to the cancellation of node draining |
 
 ### Node Draining Metrics
 
@@ -116,8 +106,7 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
-| `fault_remediation_remediation_successful_total` | Counter | `node` | Total number of successful remediations |
-| `fault_remediation_remediation_failed_total` | Counter | `node` | Total number of failed remediations |
+| `fault_remediation_remediation_total` | Counter | `node`, `status` | Total number of remediations by status. Status values: `success`, `failed` |
 
 ### Log Collector Metrics
 
@@ -159,12 +148,8 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
-| `k8s_platform_connector_node_condition_update_success_total` | Counter | - | Total number of successful node condition updates |
-| `k8s_platform_connector_node_condition_update_failed_total` | Counter | - | Total number of failed node condition updates |
-| `k8s_platform_connector_node_event_creation_success_total` | Counter | `node_name` | Total number of successful node event creations |
-| `k8s_platform_connector_node_event_creation_failed_total` | Counter | `node_name` | Total number of failed node event creations |
-| `k8s_platform_connector_node_event_update_success_total` | Counter | `node_name` | Total number of successful node event updates |
-| `k8s_platform_connector_node_event_update_failed_total` | Counter | `node_name` | Total number of failed node event updates |
+| `k8s_platform_connector_node_condition_update_total` | Counter | `status` | Total number of node condition updates by status. Status values: `success`, `failed` |
+| `k8s_platform_connector_node_event_operations_total` | Counter | `node_name`, `operation`, `status` | Total number of node event operations by type and status. Operation values: `create`, `update`. Status values: `success`, `failed` |
 | `k8s_platform_connector_node_condition_update_duration_milliseconds` | Histogram | - | Duration of node condition updates in milliseconds. Uses linear buckets (0, 10, 500) |
 | `k8s_platform_connector_node_event_update_create_duration_milliseconds` | Histogram | - | Duration of node event updates/creations in milliseconds. Uses linear buckets (0, 10, 500) |
 
@@ -263,8 +248,7 @@ The CSP health monitor tracks cloud provider maintenance events and node health 
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
 | `csp_health_monitor_main_datastore_upsert_attempts_total` | Counter | `csp` | Total number of attempts to upsert maintenance events |
-| `csp_health_monitor_main_datastore_upsert_success_total` | Counter | `csp` | Total number of successful maintenance event upserts |
-| `csp_health_monitor_main_datastore_upsert_errors_total` | Counter | `csp` | Total number of errors during maintenance event upserts |
+| `csp_health_monitor_main_datastore_upsert_total` | Counter | `csp`, `status` | Total number of maintenance event upserts by status. Status values: `success`, `failed` |
 
 #### Trigger Engine Metrics
 

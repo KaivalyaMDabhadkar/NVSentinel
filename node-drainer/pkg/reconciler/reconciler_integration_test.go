@@ -745,57 +745,6 @@ func TestMetrics_ProcessingErrors(t *testing.T) {
 	assert.Greater(t, afterError, beforeError, "ProcessingErrors should increment for unmarshal_error")
 }
 
-// TestMetrics_HealthEventsMetrics tests HealthyEvent, UnhealthyEvent, HealthyEventWithContextCancellation
-func TestMetrics_HealthEventsMetrics(t *testing.T) {
-	setup := setupDirectTest(t, []config.UserNamespace{
-		{Name: "test-*", Mode: config.ModeImmediateEvict},
-	}, false)
-
-	nodeName := "metrics-health-node"
-	createNode(setup.ctx, t, setup.client, nodeName)
-
-	t.Run("UnhealthyEvent increments", func(t *testing.T) {
-		beforeUnhealthy := getCounterVecValue(t, metrics.UnhealthyEvent, nodeName, "test-check")
-
-		processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
-			nodeName:        nodeName,
-			nodeQuarantined: model.Quarantined,
-		})
-
-		afterUnhealthy := getCounterVecValue(t, metrics.UnhealthyEvent, nodeName, "test-check")
-		assert.Equal(t, beforeUnhealthy+1, afterUnhealthy, "UnhealthyEvent should increment")
-	})
-
-	t.Run("HealthyEvent increments", func(t *testing.T) {
-		beforeHealthy := getCounterVecValue(t, metrics.HealthyEvent, nodeName, "test-check")
-
-		processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
-			nodeName:        nodeName,
-			nodeQuarantined: model.UnQuarantined,
-		})
-
-		afterHealthy := getCounterVecValue(t, metrics.HealthyEvent, nodeName, "test-check")
-		assert.Equal(t, beforeHealthy+1, afterHealthy, "HealthyEvent should increment")
-	})
-
-	t.Run("HealthyEventWithContextCancellation increments", func(t *testing.T) {
-		nodeWithLabel := "metrics-cancel-node"
-		createNodeWithLabels(setup.ctx, t, setup.client, nodeWithLabel, map[string]string{
-			statemanager.NVSentinelStateLabelKey: string(statemanager.DrainingLabelValue),
-		})
-
-		beforeCancel := getCounterValue(t, metrics.HealthyEventWithContextCancellation)
-
-		processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
-			nodeName:        nodeWithLabel,
-			nodeQuarantined: model.UnQuarantined,
-		})
-
-		afterCancel := getCounterValue(t, metrics.HealthyEventWithContextCancellation)
-		assert.Equal(t, beforeCancel+1, afterCancel, "HealthyEventWithContextCancellation should increment")
-	})
-}
-
 // TestMetrics_NodeDrainStatus tests NodeDrainStatus gauge
 func TestMetrics_NodeDrainStatus(t *testing.T) {
 	setup := setupDirectTest(t, []config.UserNamespace{
@@ -980,32 +929,6 @@ func TestMetrics_AlreadyQuarantinedDoesNotIncrementDrainSuccess(t *testing.T) {
 
 	afterSuccess := getCounterVecValue(t, metrics.NodeDrainSuccess, nodeName)
 	assert.Equal(t, beforeSuccess, afterSuccess, "NodeDrainSuccess should NOT increment for already drained nodes")
-}
-
-// TestMetrics_HealthyEventCancellationDoesNotIncrementDrainSuccess tests that healthy cancellation doesn't count as drain success
-func TestMetrics_HealthyEventCancellationDoesNotIncrementDrainSuccess(t *testing.T) {
-	setup := setupDirectTest(t, []config.UserNamespace{
-		{Name: "test-*", Mode: config.ModeImmediateEvict},
-	}, false)
-
-	nodeName := "metrics-cancel-success-node"
-	createNodeWithLabels(setup.ctx, t, setup.client, nodeName, map[string]string{
-		statemanager.NVSentinelStateLabelKey: string(statemanager.DrainingLabelValue),
-	})
-
-	beforeSuccess := getCounterVecValue(t, metrics.NodeDrainSuccess, nodeName)
-	beforeCancel := getCounterValue(t, metrics.HealthyEventWithContextCancellation)
-
-	processHealthEvent(setup.ctx, t, setup.reconciler, setup.mockCollection, healthEventOptions{
-		nodeName:        nodeName,
-		nodeQuarantined: model.UnQuarantined,
-	})
-
-	afterSuccess := getCounterVecValue(t, metrics.NodeDrainSuccess, nodeName)
-	afterCancel := getCounterValue(t, metrics.HealthyEventWithContextCancellation)
-
-	assert.Equal(t, beforeSuccess, afterSuccess, "NodeDrainSuccess should NOT increment for healthy event cancellation")
-	assert.Equal(t, beforeCancel+1, afterCancel, "HealthyEventWithContextCancellation should increment")
 }
 
 // Helper functions for reading Prometheus metrics

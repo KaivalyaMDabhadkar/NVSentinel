@@ -19,6 +19,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
+// Status constants for metrics
+const (
+	StatusSuccess = "success"
+	StatusFailed  = "failed"
+)
+
 var (
 	// Event Processing Metrics
 	totalEventsReceived = promauto.NewCounter(
@@ -58,19 +64,12 @@ var (
 	)
 
 	// Remediation Operation Metrics
-	remediationSuccess = promauto.NewCounterVec(
+	remediationTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "fault_remediation_remediation_successful_total",
-			Help: "Total number of successful remediations.",
+			Name: "fault_remediation_remediation_total",
+			Help: "Total number of remediations by status.",
 		},
-		[]string{"node"},
-	)
-	remediationFailed = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "fault_remediation_remediation_failed_total",
-			Help: "Total number of failed remediations.",
-		},
-		[]string{"node"},
+		[]string{"node", "status"},
 	)
 
 	// Log Collection Job Metrics

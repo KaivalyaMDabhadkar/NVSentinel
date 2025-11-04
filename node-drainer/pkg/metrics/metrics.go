@@ -55,32 +55,6 @@ var (
 		[]string{"error_type"},
 	)
 
-	// Health event metrics
-
-	// HealthyEvent tracks healthy events by node and check name
-	HealthyEvent = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "node_drainer_healthy_event_total",
-			Help: "Total number of healthy events.",
-		}, []string{"node", "check_name"},
-	)
-
-	// HealthyEventWithContextCancellation tracks healthy events that canceled node draining
-	HealthyEventWithContextCancellation = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Name: "node_drainer_healthy_event_with_node_drain_cancel_total",
-			Help: "Total number of healthy events that led to the cancellation of node draining",
-		},
-	)
-
-	// UnhealthyEvent tracks unhealthy events by node and check name
-	UnhealthyEvent = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "node_drainer_unhealthy_event_total",
-			Help: "Total number of unhealthy events.",
-		}, []string{"node", "check_name"},
-	)
-
 	// Node draining metrics
 
 	// NodeDrainSuccess tracks successful node drainings

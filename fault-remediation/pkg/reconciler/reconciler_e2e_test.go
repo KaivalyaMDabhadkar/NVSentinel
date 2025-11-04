@@ -946,7 +946,7 @@ func TestMetrics_RemediationSuccess(t *testing.T) {
 
 	reconciler := NewReconciler(cfg, false)
 
-	beforeSuccess := getCounterVecValue(t, remediationSuccess, nodeName)
+	beforeSuccess := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
 
 	healthEventDoc := &HealthEventDoc{
 		ID: primitive.NewObjectID(),
@@ -961,8 +961,8 @@ func TestMetrics_RemediationSuccess(t *testing.T) {
 	success, crName := reconciler.performRemediation(testContext, healthEventDoc)
 	assert.True(t, success, "Remediation should succeed")
 
-	afterSuccess := getCounterVecValue(t, remediationSuccess, nodeName)
-	assert.Equal(t, beforeSuccess+1, afterSuccess, "remediationSuccess should increment after successful remediation")
+	afterSuccess := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
+	assert.Equal(t, beforeSuccess+1, afterSuccess, "remediationTotal with status=success should increment after successful remediation")
 
 	gvr := schema.GroupVersionResource{
 		Group:    "janitor.dgxc.nvidia.com",
@@ -993,7 +993,7 @@ func TestMetrics_RemediationNoDuplicateCount(t *testing.T) {
 
 	reconciler := NewReconciler(cfg, false)
 
-	beforeSuccess := getCounterVecValue(t, remediationSuccess, nodeName)
+	beforeSuccess := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
 
 	healthEventDoc := &HealthEventDoc{
 		ID: primitive.NewObjectID(),
@@ -1008,8 +1008,8 @@ func TestMetrics_RemediationNoDuplicateCount(t *testing.T) {
 	success1, crName := reconciler.performRemediation(testContext, healthEventDoc)
 	assert.True(t, success1)
 
-	afterFirstSuccess := getCounterVecValue(t, remediationSuccess, nodeName)
-	assert.Equal(t, beforeSuccess+1, afterFirstSuccess, "remediationSuccess should increment by 1 after first creation")
+	afterFirstSuccess := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
+	assert.Equal(t, beforeSuccess+1, afterFirstSuccess, "remediationTotal with status=success should increment by 1 after first creation")
 
 	updateRebootNodeStatus(testContext, t, crName, "InProgress")
 
@@ -1018,8 +1018,8 @@ func TestMetrics_RemediationNoDuplicateCount(t *testing.T) {
 	assert.False(t, shouldCreateCR, "Should skip due to existing CR")
 	assert.Equal(t, crName, existingCR)
 
-	afterSecondCheck := getCounterVecValue(t, remediationSuccess, nodeName)
-	assert.Equal(t, afterFirstSuccess, afterSecondCheck, "remediationSuccess should NOT increment when skipping existing CR")
+	afterSecondCheck := getCounterVecValue(t, remediationTotal, nodeName, StatusSuccess)
+	assert.Equal(t, afterFirstSuccess, afterSecondCheck, "remediationTotal with status=success should NOT increment when skipping existing CR")
 
 	gvr := schema.GroupVersionResource{
 		Group:    "janitor.dgxc.nvidia.com",
