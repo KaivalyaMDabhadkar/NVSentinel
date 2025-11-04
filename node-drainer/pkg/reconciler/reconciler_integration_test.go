@@ -17,7 +17,6 @@ package reconciler_test
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"testing"
 	"time"
 
@@ -158,7 +157,6 @@ func TestReconciler_ProcessEvent(t *testing.T) {
 				require.Eventually(t, func() bool {
 					node, err := client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
 					require.NoError(t, err)
-					slog.Info("Node %s labels: %v", nodeName, node.Labels)
 					_, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
 					return !exists
 				}, 30*time.Second, 1*time.Second, "draining label should be removed")
