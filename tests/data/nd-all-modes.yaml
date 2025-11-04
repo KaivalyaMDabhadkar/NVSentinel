@@ -12,9 +12,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Configuration for the DCO bot
-# https://github.com/probot/dco
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: node-drainer
+  namespace: nvsentinel
+data:
+  config.toml: |
+    evictionTimeoutInSeconds = "60"
+    systemNamespaces = "^(kube-.*|nvsentinel|gpu-operator)$"
+    deleteAfterTimeoutMinutes = 1
+    notReadyTimeoutMinutes = 5
+    
+    [[userNamespaces]]
+      name = "immediate-test"
+      mode = "Immediate"
+    
+    [[userNamespaces]]
+      name = "allowcompletion-test"
+      mode = "AllowCompletion"
+    
+    [[userNamespaces]]
+      name = "delete-timeout-test"
+      mode = "DeleteAfterTimeout"
 
-# Require all commits to be signed off EXCEPT for organization members and bots
-require:
-  members: false  # Organization members don't need to sign off

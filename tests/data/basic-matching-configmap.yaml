@@ -12,9 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Configuration for the DCO bot
-# https://github.com/probot/dco
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fault-quarantine
+  namespace: nvsentinel
+data:
+  config.toml: |
+    [circuitBreaker]
+      percentage = 50
+      duration = "5m"
+    
+    [[rule-sets]]
+      name = "Basic-Match-Rule"
+      [[rule-sets.match.all]]
+        kind = "HealthEvent"
+        expression = "event.agent == 'gpu-health-monitor' && event.checkName == 'GpuXidError'"
+      [rule-sets.taint]
+        key = "AggregatedNodeHealth"
+        value = "False"
+        effect = "NoSchedule"
+      [rule-sets.cordon]
+        shouldCordon = true
 
-# Require all commits to be signed off EXCEPT for organization members and bots
-require:
-  members: false  # Organization members don't need to sign off

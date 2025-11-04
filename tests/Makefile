@@ -15,13 +15,16 @@ test-ci:
 	nohup kubectl port-forward -n nvsentinel svc/simple-health-client 8080:8080 > /dev/null 2>&1 &
 	kubectl get po -Ao wide
 	kubectl get no -o wide
+	@echo "Restarting fault-quarantine deployment..."
 	kubectl rollout restart deploy -l app.kubernetes.io/name=fault-quarantine -n nvsentinel
+	@echo "Waiting for deployment rollout to complete..."
+	kubectl rollout status deployment/fault-quarantine -n nvsentinel --timeout=10m
 	$(MAKE) test
 
 # Run end-to-end tests
 .PHONY: test
 test:
-	$(GO) test -timeout 20m -count 1 -v ./...
+	gotestsum --format standard-verbose -- -timeout 40m -count 1 -failfast ./...
 
 # Help target
 .PHONY: help

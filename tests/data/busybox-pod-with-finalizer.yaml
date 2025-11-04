@@ -12,9 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Configuration for the DCO bot
-# https://github.com/probot/dco
+apiVersion: v1
+kind: Pod
+metadata:
+  name: busybox-stuck
+  namespace: test-namespace
+  finalizers:
+    - test.nvsentinel.nvidia.com/block-deletion
+spec:
+  nodeName: NODE_NAME
+  containers:
+  - name: busybox
+    image: busybox:latest
+    command: ["sh", "-c", "while true; do sleep 3600; done"]
+  restartPolicy: Never
 
-# Require all commits to be signed off EXCEPT for organization members and bots
-require:
-  members: false  # Organization members don't need to sign off
