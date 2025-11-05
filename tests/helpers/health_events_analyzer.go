@@ -44,6 +44,7 @@ func SetupHealthEventsAnalyzerTest(ctx context.Context,
 	configMapPath, testNamespace string) (
 	context.Context, *HealthEventsAnalyzerTestContext) {
 	t.Helper()
+
 	client, err := c.NewClient()
 	require.NoError(t, err)
 
@@ -51,7 +52,7 @@ func SetupHealthEventsAnalyzerTest(ctx context.Context,
 	require.NoError(t, err, "failed to get nodes")
 	require.True(t, len(gpuNodes) > 0, "no gpu nodes found")
 
-	gpuNodeName := gpuNodes[rand.Intn(len(gpuNodes))]
+	gpuNodeName := gpuNodes[rand.Intn(len(gpuNodes))] // #nosec G404 - weak random acceptable for test node selection
 
 	testCtx := &HealthEventsAnalyzerTestContext{
 		TestNamespace: testNamespace,
@@ -70,9 +71,11 @@ func SetupHealthEventsAnalyzerTest(ctx context.Context,
 	SendHealthEvent(ctx, t, event)
 
 	t.Log("Backing up current health-events-analyzer configmap")
+
 	backupData, err := BackupConfigMap(ctx, client, "health-events-analyzer-config", NVSentinelNamespace)
 	require.NoError(t, err)
 	t.Log("Backup created in memory")
+
 	testCtx.ConfigMapBackup = backupData
 
 	err = applyHealthEventsAnalyzerConfigAndRestart(ctx, t, client, configMapPath)
@@ -81,15 +84,19 @@ func SetupHealthEventsAnalyzerTest(ctx context.Context,
 	return ctx, testCtx
 }
 
-func applyHealthEventsAnalyzerConfigAndRestart(ctx context.Context, t *testing.T, client klient.Client, configMapPath string) error {
+func applyHealthEventsAnalyzerConfigAndRestart(
+	ctx context.Context, t *testing.T, client klient.Client, configMapPath string,
+) error {
 	t.Helper()
 	t.Logf("Applying health-events-analyzer configmap: %s", configMapPath)
+
 	err := createConfigMapFromFilePath(ctx, client, configMapPath, "health-events-analyzer-config", NVSentinelNamespace)
 	if err != nil {
 		return err
 	}
 
 	t.Log("Restarting health-events-analyzer deployment")
+
 	err = RestartDeployment(ctx, t, client, "health-events-analyzer", NVSentinelNamespace)
 	if err != nil {
 		return err
@@ -103,6 +110,7 @@ func TriggerMultipleRemediationsCycle(ctx context.Context, t *testing.T, client 
 
 	// inject 5 fatal errors and let the remediation cycle finish
 	t.Logf("Injecting fatal errors to node %s", nodeName)
+
 	for _, xid := range xidsToInject {
 		waitForRemediationToComplete(ctx, t, client, nodeName, xid)
 	}
@@ -128,17 +136,21 @@ func waitForRemediationToComplete(ctx context.Context, t *testing.T, client klie
 		if err != nil {
 			return false
 		}
+
 		if node.Spec.Unschedulable {
 			return false
 		}
+
 		if node.Annotations != nil {
 			if _, exists := node.Annotations["quarantineHealthEvent"]; exists {
 				return false
 			}
+
 			if _, exists := node.Annotations["latestFaultRemediationState"]; exists {
 				return false
 			}
 		}
+
 		return true
 	}, EventuallyWaitTimeout, WaitInterval, "node should be fully cleaned up before next remediation cycle")
 }
@@ -165,6 +177,7 @@ func TeardownHealthEventsAnalyzer(ctx context.Context, t *testing.T,
 
 func restoreHealthEventsAnalyzerConfig(ctx context.Context, t *testing.T, c *envconf.Config, configMapBackup []byte) {
 	t.Helper()
+
 	client, err := c.NewClient()
 	require.NoError(t, err)
 

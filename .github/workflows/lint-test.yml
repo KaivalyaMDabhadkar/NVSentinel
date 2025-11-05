@@ -137,6 +137,7 @@ jobs:
           - platform-connectors
           - store-client
           - commons
+          - data-models
           - health-events-analyzer
           - fault-quarantine
           - labeler
@@ -144,6 +145,7 @@ jobs:
           - node-drainer
           - fault-remediation
           - janitor
+          - tests
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
 
@@ -162,11 +164,36 @@ jobs:
             ${{ matrix.component }}/coverage.txt
             ${{ matrix.component }}/report.xml
 
+  tilt-modules-lint-test:
+    runs-on: linux-amd64-cpu16
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        component:
+          - tilt/simple-health-client
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
+
+      - name: Setup build environment
+        uses: ./.github/actions/setup-ci-env
+
+      - name: Run lint and test
+        run: make -C ${{ matrix.component }} lint-test
+
+      - name: Upload artifacts
+        uses: ./.github/actions/upload-test-artifacts
+        with:
+          component-name: simple-health-client
+          file-paths: |
+            ${{ matrix.component }}/coverage.xml
+            ${{ matrix.component }}/coverage.txt
+            ${{ matrix.component }}/report.xml
+
   consolidated-coverage-report:
     if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/')
     runs-on: linux-amd64-cpu16
     timeout-minutes: 15
-    needs: [health-monitors-lint-test, modules-lint-test]
+    needs: [health-monitors-lint-test, modules-lint-test, tilt-modules-lint-test]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
 
@@ -363,7 +390,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: linux-amd64-cpu16
     timeout-minutes: 15
-    needs: [health-monitors-lint-test, modules-lint-test]
+    needs: [health-monitors-lint-test, modules-lint-test, tilt-modules-lint-test]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8  # v5.0.0
 
