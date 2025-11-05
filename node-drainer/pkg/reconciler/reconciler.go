@@ -144,10 +144,12 @@ func (r *Reconciler) executeSkip(ctx context.Context,
 	event bson.M, collection queue.MongoCollectionAPI) error {
 	slog.Info("Skipping event for node", "node", nodeName)
 
-	// Update MongoDB status to StatusSucceeded for healthy events that cancel draining
-	if healthEvent.HealthEventStatus.NodeQuarantined != nil &&
-		*healthEvent.HealthEventStatus.NodeQuarantined == model.UnQuarantined {
-		// Update MongoDB status to StatusSucceeded for healthy events that cancel draining
+	if statusPtr := healthEvent.HealthEventStatus.NodeQuarantined; statusPtr != nil &&
+		(*statusPtr == model.UnQuarantined || *statusPtr == model.Cancelled) {
+		if *statusPtr == model.Cancelled {
+			metrics.CancelledEvent.WithLabelValues(nodeName, healthEvent.HealthEvent.CheckName).Inc()
+		}
+
 		podsEvictionStatus := &healthEvent.HealthEventStatus.UserPodsEvictionStatus
 		podsEvictionStatus.Status = model.StatusSucceeded
 
@@ -162,7 +164,8 @@ func (r *Reconciler) executeSkip(ctx context.Context,
 
 		slog.Info("Updated MongoDB status for node",
 			"node", nodeName,
-			"status", "succeeded")
+			"status", "succeeded",
+			"reason", *statusPtr)
 	}
 
 	r.updateNodeDrainStatus(ctx, nodeName, &healthEvent, false)
@@ -281,8 +284,9 @@ func (r *Reconciler) updateNodeDrainStatus(ctx context.Context,
 		return
 	}
 
-	// Handle UnQuarantined events - remove draining label
-	if *healthEvent.HealthEventStatus.NodeQuarantined == model.UnQuarantined {
+	// Handle UnQuarantined or Cancelled events - remove draining label
+	if *healthEvent.HealthEventStatus.NodeQuarantined == model.UnQuarantined ||
+		*healthEvent.HealthEventStatus.NodeQuarantined == model.Cancelled {
 		if _, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx,
 			nodeName, statemanager.DrainingLabelValue, true); err != nil {
 			slog.Error("Failed to remove draining label for node",

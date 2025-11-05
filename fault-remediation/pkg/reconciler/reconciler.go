@@ -127,9 +127,16 @@ func (r *Reconciler) processEvent(ctx context.Context, event bson.M, watcher Wat
 	nodeName := healthEventWithStatus.HealthEvent.NodeName
 	nodeQuarantined := healthEventWithStatus.HealthEventStatus.NodeQuarantined
 
-	if nodeQuarantined != nil && *nodeQuarantined == model.UnQuarantined {
-		r.handleUnquarantineEvent(ctx, nodeName, watcher)
-		return
+	if nodeQuarantined != nil {
+		if *nodeQuarantined == model.UnQuarantined {
+			r.handleUnquarantineEvent(ctx, nodeName, watcher)
+			return
+		}
+
+		if *nodeQuarantined == model.Cancelled {
+			r.handleCancelledEvent(ctx, nodeName, healthEventWithStatus.HealthEvent, watcher)
+			return
+		}
 	}
 
 	r.handleRemediationEvent(ctx, &healthEventWithStatus, event, watcher, collection)
@@ -262,6 +269,39 @@ func (r *Reconciler) handleUnquarantineEvent(
 	}
 
 	if err := watcher.MarkProcessed(context.Background()); err != nil {
+		processingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
+		slog.Error("Error updating resume token", "error", err)
+	}
+}
+
+func (r *Reconciler) handleCancelledEvent(
+	ctx context.Context,
+	nodeName string,
+	healthEvent *protos.HealthEvent,
+	watcher WatcherInterface,
+) {
+	slog.Info("Node manually uncordoned, removing from remediation state",
+		"node", nodeName)
+
+	group := common.GetRemediationGroupForAction(healthEvent.RecommendedAction)
+	if group == "" {
+		slog.Info("No remediation group for cancelled event, skipping annotation cleanup",
+			"node", nodeName,
+			"action", healthEvent.RecommendedAction.String())
+	} else {
+		if err := r.annotationManager.RemoveGroupFromState(ctx, nodeName, group); err != nil {
+			slog.Error("Failed to remove group from remediation state for manually uncordoned node",
+				"node", nodeName,
+				"group", group,
+				"error", err)
+		} else {
+			slog.Info("Removed group from remediation state for manually uncordoned node",
+				"node", nodeName,
+				"group", group)
+		}
+	}
+
+	if err := watcher.MarkProcessed(ctx); err != nil {
 		processingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
 		slog.Error("Error updating resume token", "error", err)
 	}

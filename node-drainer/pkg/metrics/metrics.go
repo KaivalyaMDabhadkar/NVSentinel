@@ -63,6 +63,14 @@ var (
 		[]string{"error_type", "node"},
 	)
 
+	// CancelledEvent tracks cancelled events from manual uncordon operations
+	CancelledEvent = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "node_drainer_cancelled_event_total",
+			Help: "Total number of cancelled events due to manual uncordon operations.",
+		}, []string{"node", "check_name"},
+	)
+
 	// Node draining metrics
 
 	// NodeDrainTimeout tracks node drainer operations in deleteAfterTimeout mode

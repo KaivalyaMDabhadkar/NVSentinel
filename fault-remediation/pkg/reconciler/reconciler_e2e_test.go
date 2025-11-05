@@ -916,6 +916,298 @@ func cleanupNodeAnnotations(ctx context.Context, t *testing.T, nodeName string) 
 	}
 }
 
+// TestReconciler_CancelledEventCleansAnnotation validates that Cancelled events remove group from annotation
+func TestReconciler_CancelledEventCleansAnnotation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
+	defer cancel()
+
+	nodeName := "test-cancelled-" + primitive.NewObjectID().Hex()[:8]
+	createTestNode(ctx, nodeName, nil, map[string]string{"test": "label"})
+	defer func() {
+		testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+	}()
+
+	cleanupNodeAnnotations(ctx, t, nodeName)
+
+	remediationClient := createTestRemediationClient(t, false)
+
+	cfg := ReconcilerConfig{
+		RemediationClient: remediationClient,
+		StateManager:      statemanager.NewStateManager(testClient),
+		UpdateMaxRetries:  3,
+		UpdateRetryDelay:  100 * time.Millisecond,
+	}
+	reconcilerInstance := NewReconciler(cfg, false)
+
+	mockWatcher := storewatcher.NewFakeChangeStreamWatcher()
+	mockColl := &MockCollection{
+		updateOneFn: func(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error) {
+			return &mongo.UpdateResult{ModifiedCount: 1}, nil
+		},
+	}
+
+	reconcilerDone := make(chan struct{})
+	go func() {
+		defer close(reconcilerDone)
+		mockWatcher.Start(ctx)
+		for event := range mockWatcher.Events() {
+			reconcilerInstance.processEvent(ctx, event, mockWatcher, mockColl)
+		}
+	}()
+
+	t.Log("Send Quarantined event to create CR and annotation")
+	eventID1 := primitive.NewObjectID()
+	event1 := createQuarantineEvent(eventID1, nodeName, protos.RecommendedAction_RESTART_BM)
+	mockWatcher.EventsChan <- event1
+
+	var crName string
+	require.Eventually(t, func() bool {
+		state, err := reconcilerInstance.annotationManager.GetRemediationState(ctx, nodeName)
+		if err != nil {
+			return false
+		}
+		if grp, ok := state.EquivalenceGroups["restart"]; ok {
+			crName = grp.MaintenanceCR
+			return crName != ""
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "CR and annotation should be created")
+
+	t.Log("Send Cancelled event to remove group from annotation")
+	cancelledEvent := bson.M{
+		"operationType": "update",
+		"fullDocument": bson.M{
+			"_id": eventID1,
+			"healtheventstatus": bson.M{
+				"nodequarantined": model.Cancelled,
+			},
+			"healthevent": bson.M{
+				"nodename":          nodeName,
+				"recommendedaction": int32(protos.RecommendedAction_RESTART_BM),
+			},
+		},
+	}
+	mockWatcher.EventsChan <- cancelledEvent
+
+	t.Log("Verify group removed from annotation")
+	require.Eventually(t, func() bool {
+		state, err := reconcilerInstance.annotationManager.GetRemediationState(ctx, nodeName)
+		if err != nil {
+			return false
+		}
+		_, hasRestart := state.EquivalenceGroups["restart"]
+		return !hasRestart
+	}, 5*time.Second, 100*time.Millisecond, "Restart group should be removed from annotation after cancellation")
+
+	close(mockWatcher.EventsChan)
+	<-reconcilerDone
+
+	gvr := schema.GroupVersionResource{
+		Group:    "janitor.dgxc.nvidia.com",
+		Version:  "v1alpha1",
+		Resource: "rebootnodes",
+	}
+	testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
+}
+
+// TestReconciler_CancelledEventMultipleGroups validates granular group removal with multiple groups
+func TestReconciler_CancelledEventMultipleGroups(t *testing.T) {
+	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
+	defer cancel()
+
+	nodeName := "test-multi-cancel-" + primitive.NewObjectID().Hex()[:8]
+	createTestNode(ctx, nodeName, nil, map[string]string{"test": "label"})
+	defer func() {
+		testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+	}()
+
+	annotationMgr := NewNodeAnnotationManager(testClient)
+
+	t.Log("Create annotation with two groups")
+	err := annotationMgr.UpdateRemediationState(ctx, nodeName, "restart", "cr-restart-1")
+	require.NoError(t, err)
+	err = annotationMgr.UpdateRemediationState(ctx, nodeName, "component-reset", "cr-component-1")
+	require.NoError(t, err)
+
+	state, err := annotationMgr.GetRemediationState(ctx, nodeName)
+	require.NoError(t, err)
+	assert.Len(t, state.EquivalenceGroups, 2, "Should have 2 groups initially")
+
+	remediationClient := createTestRemediationClient(t, false)
+	cfg := ReconcilerConfig{
+		RemediationClient: remediationClient,
+		StateManager:      statemanager.NewStateManager(testClient),
+		UpdateMaxRetries:  3,
+		UpdateRetryDelay:  100 * time.Millisecond,
+	}
+	reconcilerInstance := NewReconciler(cfg, false)
+
+	mockWatcher := storewatcher.NewFakeChangeStreamWatcher()
+	mockColl := &MockCollection{
+		updateOneFn: func(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error) {
+			return &mongo.UpdateResult{ModifiedCount: 1}, nil
+		},
+	}
+
+	reconcilerDone := make(chan struct{})
+	go func() {
+		defer close(reconcilerDone)
+		mockWatcher.Start(ctx)
+		for event := range mockWatcher.Events() {
+			reconcilerInstance.processEvent(ctx, event, mockWatcher, mockColl)
+		}
+	}()
+
+	t.Log("Send Cancelled event for restart action only")
+	cancelledEvent := bson.M{
+		"operationType": "update",
+		"fullDocument": bson.M{
+			"_id": primitive.NewObjectID(),
+			"healtheventstatus": bson.M{
+				"nodequarantined": model.Cancelled,
+			},
+			"healthevent": bson.M{
+				"nodename":          nodeName,
+				"recommendedaction": int32(protos.RecommendedAction_RESTART_BM),
+			},
+		},
+	}
+	mockWatcher.EventsChan <- cancelledEvent
+
+	t.Log("Verify only restart group removed, component-reset remains")
+	require.Eventually(t, func() bool {
+		state, err := annotationMgr.GetRemediationState(ctx, nodeName)
+		if err != nil {
+			return false
+		}
+		_, hasRestart := state.EquivalenceGroups["restart"]
+		_, hasComponent := state.EquivalenceGroups["component-reset"]
+		return !hasRestart && hasComponent
+	}, 5*time.Second, 100*time.Millisecond, "Only restart group should be removed")
+
+	state, err = annotationMgr.GetRemediationState(ctx, nodeName)
+	require.NoError(t, err)
+	assert.Len(t, state.EquivalenceGroups, 1, "Should have 1 group remaining")
+	assert.Contains(t, state.EquivalenceGroups, "component-reset", "component-reset group should remain")
+
+	close(mockWatcher.EventsChan)
+	<-reconcilerDone
+}
+
+// TestReconciler_CancelledVsUnQuarantined validates different handling for Cancelled vs UnQuarantined
+func TestReconciler_CancelledVsUnQuarantined(t *testing.T) {
+	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
+	defer cancel()
+
+	t.Run("UnQuarantined_ClearsEntireAnnotation", func(t *testing.T) {
+		nodeName := "test-unquarantine-" + primitive.NewObjectID().Hex()[:8]
+		createTestNode(ctx, nodeName, nil, map[string]string{"test": "label"})
+		defer func() {
+			testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+		}()
+
+		annotationMgr := NewNodeAnnotationManager(testClient)
+		err := annotationMgr.UpdateRemediationState(ctx, nodeName, "restart", "cr-1")
+		require.NoError(t, err)
+
+		remediationClient := createTestRemediationClient(t, false)
+		cfg := ReconcilerConfig{
+			RemediationClient: remediationClient,
+			StateManager:      statemanager.NewStateManager(testClient),
+			UpdateMaxRetries:  3,
+			UpdateRetryDelay:  100 * time.Millisecond,
+		}
+		reconcilerInstance := NewReconciler(cfg, false)
+
+		mockWatcher := storewatcher.NewFakeChangeStreamWatcher()
+		mockColl := &MockCollection{}
+
+		reconcilerDone := make(chan struct{})
+		go func() {
+			defer close(reconcilerDone)
+			mockWatcher.Start(ctx)
+			for event := range mockWatcher.Events() {
+				reconcilerInstance.processEvent(ctx, event, mockWatcher, mockColl)
+			}
+		}()
+
+		unquarantineEvent := createUnquarantineEvent(nodeName)
+		mockWatcher.EventsChan <- unquarantineEvent
+
+		require.Eventually(t, func() bool {
+			node, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			_, hasAnnotation := node.Annotations[AnnotationKey]
+			return !hasAnnotation
+		}, 5*time.Second, 100*time.Millisecond, "Annotation should be completely removed for UnQuarantined")
+
+		close(mockWatcher.EventsChan)
+		<-reconcilerDone
+	})
+
+	t.Run("Cancelled_RemovesOnlySpecificGroup", func(t *testing.T) {
+		nodeName := "test-cancelled-grp-" + primitive.NewObjectID().Hex()[:8]
+		createTestNode(ctx, nodeName, nil, map[string]string{"test": "label"})
+		defer func() {
+			testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+		}()
+
+		annotationMgr := NewNodeAnnotationManager(testClient)
+		err := annotationMgr.UpdateRemediationState(ctx, nodeName, "restart", "cr-1")
+		require.NoError(t, err)
+
+		remediationClient := createTestRemediationClient(t, false)
+		cfg := ReconcilerConfig{
+			RemediationClient: remediationClient,
+			StateManager:      statemanager.NewStateManager(testClient),
+			UpdateMaxRetries:  3,
+			UpdateRetryDelay:  100 * time.Millisecond,
+		}
+		reconcilerInstance := NewReconciler(cfg, false)
+
+		mockWatcher := storewatcher.NewFakeChangeStreamWatcher()
+		mockColl := &MockCollection{}
+
+		reconcilerDone := make(chan struct{})
+		go func() {
+			defer close(reconcilerDone)
+			mockWatcher.Start(ctx)
+			for event := range mockWatcher.Events() {
+				reconcilerInstance.processEvent(ctx, event, mockWatcher, mockColl)
+			}
+		}()
+
+		cancelledEvent := bson.M{
+			"operationType": "update",
+			"fullDocument": bson.M{
+				"_id": primitive.NewObjectID(),
+				"healtheventstatus": bson.M{
+					"nodequarantined": model.Cancelled,
+				},
+				"healthevent": bson.M{
+					"nodename":          nodeName,
+					"recommendedaction": int32(protos.RecommendedAction_RESTART_BM),
+				},
+			},
+		}
+		mockWatcher.EventsChan <- cancelledEvent
+
+		require.Eventually(t, func() bool {
+			node, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+			if err != nil {
+				return false
+			}
+			_, hasAnnotation := node.Annotations[AnnotationKey]
+			return !hasAnnotation
+		}, 5*time.Second, 100*time.Millisecond, "Annotation should be removed when last group is cancelled")
+
+		close(mockWatcher.EventsChan)
+		<-reconcilerDone
+	})
+}
+
 // Metrics E2E Tests
 
 // TestMetrics_ProcessingErrors tests error tracking

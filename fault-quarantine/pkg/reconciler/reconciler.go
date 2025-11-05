@@ -1152,8 +1152,10 @@ func (r *Reconciler) handleManualUncordon(nodeName string) error {
 		common.QuarantinedNodeUncordonedManuallyAnnotationKey: common.QuarantinedNodeUncordonedManuallyAnnotationValue,
 	}
 
+	ctx := context.Background()
+
 	if err := r.k8sClient.HandleManualUncordonCleanup(
-		context.Background(),
+		ctx,
 		nodeName,
 		taintsToRemove,
 		annotationsToRemove,
@@ -1166,6 +1168,16 @@ func (r *Reconciler) handleManualUncordon(nodeName string) error {
 		return err
 	}
 
+	if err := r.eventWatcher.CancelLatestQuarantiningEvents(ctx, nodeName); err != nil {
+		slog.Error("Failed to cancel latest quarantining events for manually uncordoned node",
+			"node", nodeName,
+			"error", err)
+		metrics.ProcessingErrors.WithLabelValues("mongodb_cancelled_update_error").Inc()
+
+		return err
+	}
+
+	metrics.TotalNodesManuallyUncordoned.WithLabelValues(nodeName).Inc()
 	metrics.CurrentQuarantinedNodes.WithLabelValues(nodeName).Set(0)
 	slog.Info("Set currentQuarantinedNodes to 0 for manually uncordoned node", "node", nodeName)
 

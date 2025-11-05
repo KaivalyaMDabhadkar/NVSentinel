@@ -34,6 +34,7 @@ import (
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/healthEventsAnnotation"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/informer"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/metrics"
+	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/mongodb"
 	storeclientsdk "github.com/nvidia/nvsentinel/store-client/pkg/storewatcher"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
@@ -41,6 +42,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -161,6 +164,66 @@ type E2EReconcilerConfig struct {
 	TomlConfig           config.TomlConfig
 	CircuitBreakerConfig *breaker.CircuitBreakerConfig
 	DryRun               bool
+}
+
+// MockMongoCollectionForCancellation mocks MongoDB collection for manual uncordon testing
+type MockMongoCollectionForCancellation struct {
+	cancelledNodeName string
+	cancelCallCount   int
+	mu                sync.Mutex
+}
+
+func (m *MockMongoCollectionForCancellation) GetCancelledNodeName() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cancelledNodeName
+}
+
+func (m *MockMongoCollectionForCancellation) GetCancelCallCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.cancelCallCount
+}
+
+func (m *MockMongoCollectionForCancellation) FindOne(ctx context.Context, filter interface{}, opts ...*options.FindOneOptions) *mongo.SingleResult {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	result := bson.M{
+		"_id":       primitive.NewObjectID(),
+		"createdat": time.Now(),
+		"healtheventstatus": bson.M{
+			"nodequarantined": model.Quarantined,
+		},
+	}
+
+	return mongo.NewSingleResultFromDocument(result, nil, nil)
+}
+
+func (m *MockMongoCollectionForCancellation) UpdateOne(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error) {
+	return &mongo.UpdateResult{
+		MatchedCount:  1,
+		ModifiedCount: 1,
+	}, nil
+}
+
+func (m *MockMongoCollectionForCancellation) UpdateMany(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	filterMap, ok := filter.(bson.M)
+	if !ok {
+		return &mongo.UpdateResult{}, nil
+	}
+
+	nodeName, _ := filterMap["healthevent.nodename"].(string)
+	m.cancelledNodeName = nodeName
+	m.cancelCallCount++
+
+	return &mongo.UpdateResult{
+		MatchedCount:  1,
+		ModifiedCount: 1,
+	}, nil
 }
 
 // setupE2EReconciler creates a test reconciler with mock watcher
@@ -318,6 +381,27 @@ func setupE2EReconcilerWithOptions(t *testing.T, ctx context.Context, cfg E2ERec
 	}
 
 	return r, mockWatcher, getStatus, cb
+}
+
+// setupE2EReconcilerWithMongoDBMock creates a test reconciler with real EventWatcher using mock MongoDB collection
+func setupE2EReconcilerWithMongoDBMock(t *testing.T, ctx context.Context, tomlConfig config.TomlConfig) (*Reconciler, *storeclientsdk.FakeChangeStreamWatcher, StatusGetter, *MockMongoCollectionForCancellation) {
+	t.Helper()
+
+	r, mockWatcher, getStatus, _ := setupE2EReconciler(t, ctx, tomlConfig, nil)
+
+	mockCollection := &MockMongoCollectionForCancellation{}
+
+	eventWatcher := mongodb.NewEventWatcher(
+		storeclientsdk.MongoDBConfig{},
+		storeclientsdk.TokenConfig{},
+		mongo.Pipeline{},
+		mockCollection,
+		r,
+	)
+
+	r.SetEventWatcher(eventWatcher)
+
+	return r, mockWatcher, getStatus, mockCollection
 }
 
 func verifyHealthEventInAnnotation(t *testing.T, node *corev1.Node, expectedCheckName, expectedAgent, expectedComponentClass string, expectedEntityType, expectedEntityValue string) {
@@ -1322,9 +1406,7 @@ func TestE2E_ManualUncordon(t *testing.T) {
 		LabelPrefix: "k8s.nvidia.com/",
 	}
 
-	// Setup reconciler to watch for manual uncordon events
-	// The node informer callbacks are registered during setup and will detect the manual uncordon
-	setupE2EReconciler(t, ctx, tomlConfig, nil)
+	setupE2EReconcilerWithMongoDBMock(t, ctx, tomlConfig)
 
 	t.Log("Manually uncordon the node")
 	quarantinedNode, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
@@ -1357,6 +1439,198 @@ func TestE2E_ManualUncordon(t *testing.T) {
 
 		return fqTaintCount == 0
 	}, eventuallyTimeout, eventuallyPollInterval, "Manual uncordon should clean up FQ state")
+}
+
+func TestE2E_ManualUncordonWithMongoDBCancellation(t *testing.T) {
+	ctx, cancel := context.WithTimeout(e2eTestContext, 30*time.Second)
+	defer cancel()
+
+	nodeName := "e2e-manual-mongo-" + primitive.NewObjectID().Hex()[:8]
+	createE2ETestNode(ctx, t, nodeName, nil, nil, nil, false)
+	defer func() {
+		_ = e2eTestClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+	}()
+
+	tomlConfig := config.TomlConfig{
+		LabelPrefix: "k8s.nvidia.com/",
+		RuleSets: []config.RuleSet{
+			{
+				Name:     "gpu-xid-errors",
+				Version:  "1",
+				Priority: 10,
+				Match: config.Match{
+					Any: []config.Rule{
+						{Kind: "HealthEvent", Expression: "event.checkName == 'GpuXidError' && event.isFatal == true"},
+					},
+				},
+				Taint:  config.Taint{Key: "nvidia.com/gpu-xid-error", Value: "true", Effect: "NoSchedule"},
+				Cordon: config.Cordon{ShouldCordon: true},
+			},
+		},
+	}
+
+	_, mockWatcher, getStatus, mockCollection := setupE2EReconcilerWithMongoDBMock(t, ctx, tomlConfig)
+
+	beforeManualUncordon := getCounterVecValue(t, metrics.TotalNodesManuallyUncordoned, nodeName)
+	beforeCurrentQuarantined := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
+
+	t.Log("Sending unhealthy event to quarantine node")
+	eventID1 := primitive.NewObjectID()
+	mockWatcher.EventsChan <- createHealthEventBSON(
+		eventID1,
+		nodeName,
+		"GpuXidError",
+		false,
+		true,
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		model.StatusInProgress,
+	)
+
+	t.Log("Waiting for node to be quarantined")
+	require.Eventually(t, func() bool {
+		status := getStatus(eventID1)
+		return status != nil && *status == model.Quarantined
+	}, statusCheckTimeout, statusCheckPollInterval, "Status should be Quarantined")
+
+	require.Eventually(t, func() bool {
+		node, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		return err == nil && node.Spec.Unschedulable
+	}, eventuallyTimeout, eventuallyPollInterval, "Node should be quarantined")
+
+	t.Log("Manually uncordon the node")
+	quarantinedNode, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	require.NoError(t, err)
+	quarantinedNode.Spec.Unschedulable = false
+	_, err = e2eTestClient.CoreV1().Nodes().Update(ctx, quarantinedNode, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	t.Log("Verify manual uncordon cleanup")
+	require.Eventually(t, func() bool {
+		node, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+
+		return node.Annotations[common.QuarantinedNodeUncordonedManuallyAnnotationKey] == common.QuarantinedNodeUncordonedManuallyAnnotationValue &&
+			node.Annotations[common.QuarantineHealthEventAnnotationKey] == ""
+	}, eventuallyTimeout, eventuallyPollInterval, "Manual uncordon should clean up annotations")
+
+	t.Log("Verify MongoDB cancellation was triggered")
+	require.Eventually(t, func() bool {
+		return mockCollection.GetCancelledNodeName() == nodeName && mockCollection.GetCancelCallCount() == 1
+	}, statusCheckTimeout, statusCheckPollInterval, "MongoDB cancellation should be called once for node")
+
+	t.Log("Verify manual uncordon metric incremented")
+	afterManualUncordon := getCounterVecValue(t, metrics.TotalNodesManuallyUncordoned, nodeName)
+	assert.Equal(t, beforeManualUncordon+1, afterManualUncordon, "TotalNodesManuallyUncordoned should increment")
+
+	t.Log("Verify current quarantined nodes gauge updated")
+	afterCurrentQuarantined := getGaugeVecValue(t, metrics.CurrentQuarantinedNodes, nodeName)
+	assert.Equal(t, float64(0), afterCurrentQuarantined, "CurrentQuarantinedNodes should be 0")
+	assert.GreaterOrEqual(t, beforeCurrentQuarantined, float64(0), "Gauge should have been set before")
+}
+
+func TestE2E_ManualUncordonMultipleEvents(t *testing.T) {
+	ctx, cancel := context.WithTimeout(e2eTestContext, 30*time.Second)
+	defer cancel()
+
+	nodeName := "e2e-manual-multi-" + primitive.NewObjectID().Hex()[:8]
+	createE2ETestNode(ctx, t, nodeName, nil, nil, nil, false)
+	defer func() {
+		_ = e2eTestClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+	}()
+
+	tomlConfig := config.TomlConfig{
+		LabelPrefix: "k8s.nvidia.com/",
+		RuleSets: []config.RuleSet{
+			{
+				Name:     "gpu-xid-errors",
+				Version:  "1",
+				Priority: 10,
+				Match: config.Match{
+					Any: []config.Rule{
+						{Kind: "HealthEvent", Expression: "event.checkName == 'GpuXidError'"},
+					},
+				},
+				Taint:  config.Taint{Key: "nvidia.com/gpu-xid-error", Value: "true", Effect: "NoSchedule"},
+				Cordon: config.Cordon{ShouldCordon: true},
+			},
+		},
+	}
+
+	_, mockWatcher, getStatus, mockCollection := setupE2EReconcilerWithMongoDBMock(t, ctx, tomlConfig)
+
+	t.Log("Send first unhealthy event (Quarantined)")
+	eventID1 := primitive.NewObjectID()
+	mockWatcher.EventsChan <- createHealthEventBSON(
+		eventID1,
+		nodeName,
+		"GpuXidError",
+		false,
+		true,
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "0"}},
+		model.StatusInProgress,
+	)
+
+	require.Eventually(t, func() bool {
+		status := getStatus(eventID1)
+		return status != nil && *status == model.Quarantined
+	}, statusCheckTimeout, statusCheckPollInterval, "First event should be Quarantined")
+
+	t.Log("Send second unhealthy event (AlreadyQuarantined)")
+	eventID2 := primitive.NewObjectID()
+	mockWatcher.EventsChan <- createHealthEventBSON(
+		eventID2,
+		nodeName,
+		"GpuXidError",
+		false,
+		true,
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "1"}},
+		model.StatusInProgress,
+	)
+
+	require.Eventually(t, func() bool {
+		status := getStatus(eventID2)
+		return status != nil && *status == model.AlreadyQuarantined
+	}, statusCheckTimeout, statusCheckPollInterval, "Second event should be AlreadyQuarantined")
+
+	t.Log("Send third unhealthy event (AlreadyQuarantined)")
+	eventID3 := primitive.NewObjectID()
+	mockWatcher.EventsChan <- createHealthEventBSON(
+		eventID3,
+		nodeName,
+		"GpuXidError",
+		false,
+		true,
+		[]*protos.Entity{{EntityType: "GPU", EntityValue: "2"}},
+		model.StatusInProgress,
+	)
+
+	require.Eventually(t, func() bool {
+		status := getStatus(eventID3)
+		return status != nil && *status == model.AlreadyQuarantined
+	}, statusCheckTimeout, statusCheckPollInterval, "Third event should be AlreadyQuarantined")
+
+	t.Log("Manually uncordon the node")
+	quarantinedNode, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	require.NoError(t, err)
+	quarantinedNode.Spec.Unschedulable = false
+	_, err = e2eTestClient.CoreV1().Nodes().Update(ctx, quarantinedNode, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	t.Log("Verify MongoDB cancellation was triggered")
+	require.Eventually(t, func() bool {
+		return mockCollection.GetCancelledNodeName() == nodeName && mockCollection.GetCancelCallCount() == 1
+	}, statusCheckTimeout, statusCheckPollInterval, "MongoDB cancellation should be called once for node")
+
+	t.Log("Verify manual uncordon annotation is set")
+	require.Eventually(t, func() bool {
+		node, err := e2eTestClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		return node.Annotations[common.QuarantinedNodeUncordonedManuallyAnnotationKey] == common.QuarantinedNodeUncordonedManuallyAnnotationValue
+	}, eventuallyTimeout, eventuallyPollInterval, "Manual uncordon annotation should be set")
 }
 
 func TestE2E_BackwardCompatibilityOldFormat(t *testing.T) {

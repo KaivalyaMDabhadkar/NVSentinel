@@ -35,6 +35,7 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 |------------|------|--------|-------------|
 | `fault_quarantine_nodes_quarantined_total` | Counter | `node` | Total number of nodes quarantined |
 | `fault_quarantine_nodes_unquarantined_total` | Counter | `node` | Total number of nodes unquarantined |
+| `fault_quarantine_nodes_manually_uncordoned_total` | Counter | `node` | Total number of manually uncordons for nodes |
 | `fault_quarantine_current_quarantined_nodes` | Gauge | `node` | Current number of quarantined nodes |
 
 ### Taint and Cordon Metrics
@@ -73,6 +74,7 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 | `node_drainer_events_received_total` | Counter | - | Total number of events received from the watcher |
 | `node_drainer_events_replayed_total` | Counter | - | Total number of in-progress events replayed at startup |
 | `node_drainer_events_processed_total` | Counter | `drain_status`, `node` | Total number of events processed by drain status outcome. Drain status values: `drained`, `cancelled`, `skipped` |
+| `node_drainer_cancelled_event_total` | Counter | `node`, `check_name` | Total number of cancelled events due to manual uncordon operations |
 | `node_drainer_processing_errors_total` | Counter | `error_type`, `node` | Total number of errors encountered during event processing and node draining |
 | `node_drainer_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
 | `node_drainer_queue_depth` | Gauge | - | Total number of pending events in the queue |

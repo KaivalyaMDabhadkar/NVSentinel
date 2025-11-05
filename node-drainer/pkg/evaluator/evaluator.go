@@ -35,15 +35,18 @@ func NewNodeDrainEvaluator(cfg config.TomlConfig, informers InformersInterface) 
 func (e *NodeDrainEvaluator) EvaluateEvent(ctx context.Context, healthEvent model.HealthEventWithStatus,
 	collection queue.MongoCollectionAPI) (*DrainActionResult, error) {
 	nodeName := healthEvent.HealthEvent.NodeName
-
-	// Handle UnQuarantined events - cancel any ongoing drain
 	statusPtr := healthEvent.HealthEventStatus.NodeQuarantined
-	if statusPtr != nil && *statusPtr == model.UnQuarantined {
-		slog.Info("Node became healthy (UnQuarantined), stopping drain", "node", nodeName)
 
-		return &DrainActionResult{
-			Action: ActionSkip,
-		}, nil
+	if statusPtr != nil {
+		if *statusPtr == model.UnQuarantined {
+			slog.Info("UnQuarantine event for node, stopping drain", "node", nodeName)
+			return &DrainActionResult{Action: ActionSkip}, nil
+		}
+
+		if *statusPtr == model.Cancelled {
+			slog.Info("Cancelled quarantine event for node, stopping drain", "node", nodeName)
+			return &DrainActionResult{Action: ActionSkip}, nil
+		}
 	}
 
 	if isTerminalStatus(healthEvent.HealthEventStatus.UserPodsEvictionStatus.Status) {

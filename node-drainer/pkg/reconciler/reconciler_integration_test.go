@@ -163,6 +163,33 @@ func TestReconciler_ProcessEvent(t *testing.T) {
 			},
 		},
 		{
+			name:            "Cancelled event stops draining and removes label",
+			nodeName:        "cancelled-node",
+			namespaces:      []string{"test-ns"},
+			nodeQuarantined: model.Cancelled,
+			pods:            []*v1.Pod{},
+			existingNodeLabels: map[string]string{
+				statemanager.NVSentinelStateLabelKey: string(statemanager.DrainingLabelValue),
+			},
+			expectError:       false,
+			expectedNodeLabel: nil,
+			validateFunc: func(t *testing.T, client kubernetes.Interface, ctx context.Context, nodeName string, err error) {
+				assert.NoError(t, err)
+
+				require.Eventually(t, func() bool {
+					node, err := client.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+					require.NoError(t, err)
+					_, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
+					return !exists
+				}, 30*time.Second, 1*time.Second, "draining label should be removed for cancelled event")
+
+				cancelledCount := getCounterVecValue(t, metrics.CancelledEvent, nodeName, "test-check")
+				processedCount := getCounterVecValue(t, metrics.EventsProcessed, metrics.DrainStatusCancelled, nodeName)
+				assert.GreaterOrEqual(t, cancelledCount, float64(1), "CancelledEvent metric should increment")
+				assert.GreaterOrEqual(t, processedCount, float64(1), "EventsProcessed with drain_status=cancelled should increment")
+			},
+		},
+		{
 			name:            "AllowCompletion mode waits for pods to complete",
 			nodeName:        "completion-node",
 			namespaces:      []string{"completion-test"},
@@ -642,14 +669,20 @@ func createPod(ctx context.Context, t *testing.T, client kubernetes.Interface, n
 
 type healthEventOptions struct {
 	nodeName        string
+	checkName       string
 	nodeQuarantined model.Status
 	drainForce      bool
 }
 
 func createHealthEvent(opts healthEventOptions) bson.M {
+	checkName := opts.checkName
+	if checkName == "" {
+		checkName = "test-check"
+	}
+
 	healthEvent := &protos.HealthEvent{
 		NodeName:  opts.nodeName,
-		CheckName: "test-check",
+		CheckName: checkName,
 	}
 
 	if opts.drainForce {
@@ -725,6 +758,49 @@ func assertPodsEvicted(t *testing.T, client kubernetes.Interface, ctx context.Co
 		}
 		return len(pods.Items) == 0
 	}, 10*time.Second, 200*time.Millisecond)
+}
+
+// TestReconciler_CancelledEventWithOngoingDrain validates that Cancelled events stop ongoing drain operations
+func TestReconciler_CancelledEventWithOngoingDrain(t *testing.T) {
+	setup := setupRequeueTest(t, []config.UserNamespace{
+		{Name: "completion-*", Mode: config.ModeAllowCompletion},
+	})
+
+	nodeName := "cancel-during-drain-node"
+	createNode(setup.ctx, t, setup.client, nodeName)
+
+	ns := &v1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "completion-test"}}
+	_, err := setup.client.CoreV1().Namespaces().Create(setup.ctx, ns, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	createPod(setup.ctx, t, setup.client, "completion-test", "running-pod", nodeName, v1.PodRunning)
+
+	beforeCancelled := getCounterVecValue(t, metrics.CancelledEvent, nodeName, "test-check")
+
+	t.Log("Enqueue Quarantined event - should start waiting for pod completion")
+	enqueueHealthEvent(setup.ctx, t, setup.queueMgr, setup.mockCollection, nodeName)
+
+	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
+
+	t.Log("Enqueue Cancelled event - should stop draining")
+	cancelEvent := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		nodeQuarantined: model.Cancelled,
+	})
+	err = setup.queueMgr.EnqueueEvent(setup.ctx, nodeName, cancelEvent, setup.mockCollection)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		node, err := setup.client.CoreV1().Nodes().Get(setup.ctx, nodeName, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		_, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
+		return !exists
+	}, 10*time.Second, 500*time.Millisecond, "draining label should be removed after cancellation")
+
+	afterCancelled := getCounterVecValue(t, metrics.CancelledEvent, nodeName, "test-check")
+	assert.Equal(t, beforeCancelled+1, afterCancelled, "CancelledEvent metric should increment")
 }
 
 // Metrics Tests
