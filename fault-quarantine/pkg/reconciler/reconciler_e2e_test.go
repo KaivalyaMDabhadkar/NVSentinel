@@ -191,7 +191,7 @@ func (m *MockMongoCollectionForCancellation) FindOne(ctx context.Context, filter
 
 	result := bson.M{
 		"_id":       primitive.NewObjectID(),
-		"createdat": time.Now(),
+		"createdAt": time.Now(),
 		"healtheventstatus": bson.M{
 			"nodequarantined": model.Quarantined,
 		},

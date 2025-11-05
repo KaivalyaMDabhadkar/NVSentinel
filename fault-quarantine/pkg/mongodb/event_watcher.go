@@ -31,8 +31,10 @@ import (
 )
 
 type MongoCollectionInterface interface {
-	UpdateOne(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error)
-	UpdateMany(ctx context.Context, filter interface{}, update interface{}, opts ...*options.UpdateOptions) (*mongo.UpdateResult, error)
+	UpdateOne(ctx context.Context, filter interface{}, update interface{},
+		opts ...*options.UpdateOptions) (*mongo.UpdateResult, error)
+	UpdateMany(ctx context.Context, filter interface{}, update interface{},
+		opts ...*options.UpdateOptions) (*mongo.UpdateResult, error)
 	FindOne(ctx context.Context, filter interface{}, opts ...*options.FindOneOptions) *mongo.SingleResult
 }
 
@@ -256,6 +258,7 @@ func (w *EventWatcher) CancelLatestQuarantiningEvents(
 	ctx context.Context,
 	nodeName string,
 ) error {
+	// Find the latest Quarantined or UnQuarantined event to check current state of node
 	filter := bson.M{
 		"healthevent.nodename": nodeName,
 		"healtheventstatus.nodequarantined": bson.M{
@@ -263,11 +266,11 @@ func (w *EventWatcher) CancelLatestQuarantiningEvents(
 		},
 	}
 
-	findOptions := options.FindOne().SetSort(bson.D{{Key: "createdat", Value: -1}})
+	findOptions := options.FindOne().SetSort(bson.D{{Key: "createdAt", Value: -1}})
 
 	var latestEvent struct {
 		ID                primitive.ObjectID `bson:"_id"`
-		CreatedAt         time.Time          `bson:"createdat"`
+		CreatedAt         time.Time          `bson:"createdAt"`
 		HealthEventStatus struct {
 			NodeQuarantined *model.Status `bson:"nodequarantined"`
 		} `bson:"healtheventstatus"`
@@ -283,14 +286,17 @@ func (w *EventWatcher) CancelLatestQuarantiningEvents(
 		return fmt.Errorf("error finding latest quarantining event for node %s: %w", nodeName, err)
 	}
 
+	// Only cancel if latest status is Quarantined (not if already UnQuarantined by healthy event)
 	if *latestEvent.HealthEventStatus.NodeQuarantined != model.Quarantined {
 		slog.Info("No latest quarantining event found for node, no events to cancel", "node", nodeName)
 		return nil
 	}
 
+	// Update all events from the current quarantine session (Quarantined + AlreadyQuarantined)
+	// This includes the first event and all subsequent events that occurred after it
 	updateFilter := bson.M{
 		"healthevent.nodename": nodeName,
-		"createdat":            bson.M{"$gte": latestEvent.CreatedAt},
+		"createdAt":            bson.M{"$gte": latestEvent.CreatedAt},
 		"healtheventstatus.nodequarantined": bson.M{
 			"$in": []model.Status{model.Quarantined, model.AlreadyQuarantined},
 		},
