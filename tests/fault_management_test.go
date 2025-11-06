@@ -141,6 +141,36 @@ func TestDryRunMode(t *testing.T) {
 			helpers.DeleteNamespace(ctx, t, client, testNamespace)
 		}
 
+		// Clean up dry-run annotations before restoring deployment
+		// In dry-run mode, annotations are added but node is not cordoned,
+		// so normal cleanup won't remove them
+		if testCtx != nil && testCtx.NodeName != "" {
+			t.Logf("Manually cleaning dry-run annotations from node: %s", testCtx.NodeName)
+			node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
+			if err == nil && node.Annotations != nil {
+				annotationsToRemove := []string{
+					"quarantineHealthEvent",
+					"quarantineHealthEventAppliedTaints",
+					"quarantineHealthEventIsCordoned",
+				}
+				annotationsRemoved := false
+				for _, key := range annotationsToRemove {
+					if _, exists := node.Annotations[key]; exists {
+						delete(node.Annotations, key)
+						annotationsRemoved = true
+						t.Logf("Removed annotation: %s", key)
+					}
+				}
+				if annotationsRemoved {
+					if err := client.Resources().Update(ctx, node); err != nil {
+						t.Logf("Warning: Failed to clean dry-run annotations: %v", err)
+					} else {
+						t.Log("Successfully cleaned dry-run annotations")
+					}
+				}
+			}
+		}
+
 		if originalDeployment != nil {
 			t.Log("Restoring original deployment (disabling dry-run mode)")
 			helpers.RestoreFQDeployment(ctx, t, client, originalDeployment)
