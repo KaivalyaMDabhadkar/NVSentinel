@@ -391,6 +391,18 @@ func (r *Reconciler) isEventCancelled(eventID string, nodeName string) bool {
 	// Check node-level cancellation flag first (handles race condition where
 	// UnQuarantined arrives before events are processed)
 	if _, cancelled := r.cancelledNodes[nodeName]; cancelled {
+		// Ensure the event is tracked in nodeEventsMap so that clearEventStatus
+		// can eventually clean up the node-level flag when all events complete
+		eventsMap, exists := r.nodeEventsMap[nodeName]
+		if !exists {
+			eventsMap = make(eventStatusMap)
+			r.nodeEventsMap[nodeName] = eventsMap
+		}
+
+		if _, ok := eventsMap[eventID]; !ok {
+			eventsMap[eventID] = model.Cancelled
+		}
+
 		return true
 	}
 
