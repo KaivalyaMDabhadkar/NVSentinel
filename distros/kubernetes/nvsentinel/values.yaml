@@ -43,6 +43,8 @@ global:
     enabled: true
   labeler:
     enabled: true
+  metadataCollector:
+    enabled: true
   inclusterFileServer:
     enabled: false
     metricsPort: 9001

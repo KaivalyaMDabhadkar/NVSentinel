@@ -64,6 +64,9 @@ global:
   mongodbStore:
     enabled: true
 
+  metadataCollector:
+    enabled: false
+
 mongodb-store:
   mongodb:
     replicaCount: 1
