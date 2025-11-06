@@ -254,11 +254,9 @@ func (r *Reconciler) handleCancellationEvent(
 	status model.Status,
 	watcher WatcherInterface,
 ) {
-	if status == model.UnQuarantined {
-		slog.Info("Node unquarantined, clearing all remediation state", "node", nodeName)
-	} else {
-		slog.Info("Node manually uncordoned, clearing all remediation state", "node", nodeName)
-	}
+	slog.Info("Cancellation event received, clearing all remediation state",
+		"node", nodeName,
+		"status", status)
 
 	if err := r.annotationManager.ClearRemediationState(ctx, nodeName); err != nil {
 		slog.Error("Failed to clear remediation state for node",

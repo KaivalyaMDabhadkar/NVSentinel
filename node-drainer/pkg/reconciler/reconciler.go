@@ -103,7 +103,9 @@ func (r *Reconciler) ProcessEvent(ctx context.Context,
 
 	metrics.TotalEventsReceived.Inc()
 
-	if r.isEventCancelled(eventID, nodeName) {
+	nodeQuarantinedStatus := healthEventWithStatus.HealthEventStatus.NodeQuarantined
+
+	if r.isEventCancelled(eventID, nodeName, nodeQuarantinedStatus) {
 		slog.Info("Event was cancelled, performing cleanup", "node", nodeName, "eventID", eventID)
 		return r.handleCancelledEvent(ctx, nodeName, &healthEventWithStatus, event, collection, eventID)
 	}
@@ -384,15 +386,20 @@ func (r *Reconciler) HandleCancellation(eventID string, nodeName string, status 
 	}
 }
 
-func (r *Reconciler) isEventCancelled(eventID string, nodeName string) bool {
+func (r *Reconciler) isEventCancelled(eventID string, nodeName string, nodeQuarantinedStatus *model.Status) bool {
 	r.nodeEventsMapMu.Lock()
 	defer r.nodeEventsMapMu.Unlock()
 
-	// Check node-level cancellation flag first (handles race condition where
-	// UnQuarantined arrives before events are processed)
-	if _, cancelled := r.cancelledNodes[nodeName]; cancelled {
-		// Ensure the event is tracked in nodeEventsMap so that clearEventStatus
-		// can eventually clean up the node-level flag when all events complete
+	// Don't apply node-level cancellation to UnQuarantined events themselves.
+	// UnQuarantined events must process normally to set userpodsevictionstatus=Succeeded
+	// so that FR can process them and clear remediation annotations.
+	isUnQuarantinedEvent := nodeQuarantinedStatus != nil && *nodeQuarantinedStatus == model.UnQuarantined
+	_, nodeCancelled := r.cancelledNodes[nodeName]
+
+	// Check node-level cancellation flag for non-UnQuarantined events
+	// (handles race condition where UnQuarantined arrives before Quarantined events are processed)
+	if !isUnQuarantinedEvent && nodeCancelled {
+		// Ensure the event is tracked so clearEventStatus can clean up the flag
 		eventsMap, exists := r.nodeEventsMap[nodeName]
 		if !exists {
 			eventsMap = make(eventStatusMap)
