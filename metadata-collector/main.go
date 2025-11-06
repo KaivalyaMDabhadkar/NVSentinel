@@ -15,84 +15,92 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 
-	"github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/nvidia/nvsentinel/commons/pkg/logger"
+	"github.com/nvidia/nvsentinel/metadata-collector/pkg/collector"
+	"github.com/nvidia/nvsentinel/metadata-collector/pkg/nvml"
+	"github.com/nvidia/nvsentinel/metadata-collector/pkg/writer"
 )
 
 const (
-	defaultAgentName = "metadata-collector"
+	defaultAgentName  = "metadata-collector"
+	defaultOutputPath = "/var/lib/nvsentinel/gpu_metadata.json"
 )
 
 var (
 	version = "dev"
 	commit  = "none"
 	date    = "unknown"
+
+	outputPath = flag.String("output-path", defaultOutputPath, "Path to write the GPU metadata JSON file")
 )
 
 func main() {
+	flag.Parse()
+
 	logger.SetDefaultStructuredLogger(defaultAgentName, version)
 	slog.Info("Starting metadata-collector", "version", version, "commit", commit, "date", date)
 
-	if err := run(); err != nil {
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+
+	if err := run(ctx); err != nil {
 		slog.Error("Metadata collector failed", "error", err)
+		cancel()
 		os.Exit(1)
 	}
+
+	cancel()
+	slog.Info("Metadata collector completed successfully")
 }
 
-func run() error {
-	ret := nvml.Init()
-	if ret != nvml.SUCCESS {
-		return fmt.Errorf("failed to initialize NVML: %v", nvml.ErrorString(ret))
+func run(ctx context.Context) error {
+	slog.Info("Initializing NVML")
+
+	nvmlWrapper := &nvml.NVMLWrapper{}
+	if err := nvmlWrapper.Init(); err != nil {
+		return fmt.Errorf("failed to initialize NVML: %w", err)
 	}
 
 	defer func() {
-		ret := nvml.Shutdown()
-		if ret != nvml.SUCCESS {
-			slog.Error("Failed to shutdown NVML", "error", nvml.ErrorString(ret))
+		if err := nvmlWrapper.Shutdown(); err != nil {
+			slog.Error("Failed to shutdown NVML", "error", err)
 		}
 	}()
 
-	count, ret := nvml.DeviceGetCount()
-	if ret != nvml.SUCCESS {
-		return fmt.Errorf("failed to get device count: %v", nvml.ErrorString(ret))
+	slog.Info("Collecting GPU metadata")
+
+	metadataCollector := collector.NewCollector(nvmlWrapper)
+
+	metadata, err := metadataCollector.Collect(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to collect GPU metadata: %w", err)
 	}
 
-	hostname, _ := os.Hostname()
+	slog.Info("GPU metadata collected",
+		"node", metadata.NodeName,
+		"gpu_count", len(metadata.GPUs),
+		"nvswitch_count", len(metadata.NVSwitches),
+	)
 
-	slog.Info("GPU metadata collection started", "node", hostname, "gpu_count", count)
+	slog.Info("Writing metadata to file", "output_path", *outputPath)
 
-	if nvmlVersion, ret := nvml.SystemGetNVMLVersion(); ret == nvml.SUCCESS {
-		slog.Info("NVML version", "version", nvmlVersion)
+	metadataWriter, err := writer.NewWriter(*outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create metadata writer: %w", err)
 	}
 
-	fmt.Printf("\n=== GPU Metadata Collector ===\n")
-	fmt.Printf("Node: %s\n", hostname)
-	fmt.Printf("GPUs Found: %d\n", count)
-
-	fmt.Println("\n=== GPU Details ===")
-
-	for i := range count {
-		device, ret := nvml.DeviceGetHandleByIndex(i)
-		if ret != nvml.SUCCESS {
-			slog.Warn("Failed to get device", "gpu_id", i, "error", nvml.ErrorString(ret))
-			continue
-		}
-
-		name, _ := device.GetName()
-		uuid, _ := device.GetUUID()
-
-		slog.Info("GPU discovered", "gpu_id", i, "name", name, "uuid", uuid)
-
-		fmt.Printf("\nGPU %d:\n", i)
-		fmt.Printf("  Name: %s\n", name)
-		fmt.Printf("  UUID: %s\n", uuid)
+	if err := metadataWriter.Write(metadata); err != nil {
+		return fmt.Errorf("failed to write metadata: %w", err)
 	}
 
-	slog.Info("Metadata collector hello world completed successfully")
+	slog.Info("Successfully wrote GPU metadata", "output_path", *outputPath)
 
 	return nil
 }

@@ -17,7 +17,7 @@ FROM golang:1.25-bookworm AS builder
 WORKDIR /workspace
 
 COPY commons/ commons/
-
+COPY data-models/ data-models/
 
 COPY metadata-collector/go.mod metadata-collector/go.sum metadata-collector/
 WORKDIR /workspace/metadata-collector
@@ -27,7 +27,7 @@ COPY metadata-collector/ .
 
 RUN CGO_ENABLED=1 GOOS=linux go build -a -ldflags="-s -w" -o metadata-collector main.go
 
-FROM ubuntu:22.04
+FROM nvidia/cuda:12.3.0-base-ubuntu22.04
 
 RUN groupadd -r nvsentinel && useradd -r -g nvsentinel nvsentinel
 
