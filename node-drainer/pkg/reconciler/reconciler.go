@@ -365,14 +365,18 @@ func (r *Reconciler) HandleCancellation(eventID interface{}, nodeName string, st
 		r.nodeEventsMap[nodeName][eventID] = model.Cancelled
 		slog.Info("Marked specific event as cancelled", "node", nodeName, "eventID", eventID)
 	case model.UnQuarantined:
-		eventsMap, exists := r.nodeEventsMap[nodeName]
-		if !exists {
-			slog.Debug("No in-progress events found for node", "node", nodeName)
-			return
+		// Always create the map entry for this node (even if empty).
+		// This serves as a node-level cancellation signal for any events
+		// that are queued but haven't been processed yet (race condition protection).
+		// When those queued events eventually reach ProcessEvent, isEventCancelled will
+		// detect the empty map and know the node was cancelled.
+		if r.nodeEventsMap[nodeName] == nil {
+			r.nodeEventsMap[nodeName] = make(map[interface{}]model.Status)
+			slog.Info("Marked node as cancelled (no in-progress events yet)", "node", nodeName)
 		}
 
-		for evtID := range eventsMap {
-			eventsMap[evtID] = model.Cancelled
+		for evtID := range r.nodeEventsMap[nodeName] {
+			r.nodeEventsMap[nodeName][evtID] = model.Cancelled
 			slog.Info("Marked event as cancelled for node", "node", nodeName, "eventID", evtID)
 		}
 	}
@@ -384,12 +388,26 @@ func (r *Reconciler) isEventCancelled(eventID interface{}, nodeName string) bool
 
 	eventsMap, exists := r.nodeEventsMap[nodeName]
 	if !exists {
+		// No map entry means node was never cancelled
 		return false
 	}
 
-	status, exists := eventsMap[eventID]
+	// Check if this specific event is marked as cancelled
+	status, eventExists := eventsMap[eventID]
+	if eventExists && status == model.Cancelled {
+		return true
+	}
 
-	return exists && status == model.Cancelled
+	// If map exists but is empty, it means UnQuarantined arrived before
+	// any events were processed (race condition). This empty map serves as
+	// a node-level cancellation signal for queued events.
+	if len(eventsMap) == 0 {
+		slog.Info("Event cancelled via node-level signal (race condition handled)",
+			"node", nodeName, "eventID", eventID)
+		return true
+	}
+
+	return false
 }
 
 func (r *Reconciler) markEventInProgress(eventID interface{}, nodeName string) {
@@ -414,6 +432,8 @@ func (r *Reconciler) clearEventStatus(eventID interface{}, nodeName string) {
 
 	delete(eventsMap, eventID)
 
+	// Clean up the node entry when no events remain.
+	// This clears both the event-level tracking and node-level cancellation signal.
 	if len(eventsMap) == 0 {
 		delete(r.nodeEventsMap, nodeName)
 	}
