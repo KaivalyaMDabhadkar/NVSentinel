@@ -404,6 +404,7 @@ func (r *Reconciler) isEventCancelled(eventID interface{}, nodeName string) bool
 	if len(eventsMap) == 0 {
 		slog.Info("Event cancelled via node-level signal (race condition handled)",
 			"node", nodeName, "eventID", eventID)
+
 		return true
 	}
 
