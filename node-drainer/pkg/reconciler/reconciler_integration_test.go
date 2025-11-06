@@ -756,7 +756,7 @@ func TestReconciler_CancelledEventWithOngoingDrain(t *testing.T) {
 		nodeQuarantined: model.Quarantined,
 	})
 	document := event["fullDocument"].(bson.M)
-	eventID := document["_id"]
+	eventID := fmt.Sprintf("%v", document["_id"])
 
 	err = setup.queueMgr.EnqueueEvent(setup.ctx, nodeName, event, setup.mockCollection)
 	require.NoError(t, err)
@@ -810,7 +810,7 @@ func TestReconciler_UnQuarantinedEventCancelsOngoingDrain(t *testing.T) {
 	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
 
 	t.Log("Simulate UnQuarantined event from change stream - should cancel in-progress drains")
-	setup.reconciler.HandleCancellation(nil, nodeName, model.UnQuarantined)
+	setup.reconciler.HandleCancellation("", nodeName, model.UnQuarantined)
 
 	t.Log("Enqueue UnQuarantined event - should process and clean up")
 	unquarantinedEvent := createHealthEvent(healthEventOptions{
@@ -878,7 +878,7 @@ func TestReconciler_MultipleEventsOnNodeCancelledByUnQuarantine(t *testing.T) {
 	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
 
 	t.Log("Simulate UnQuarantined event - should cancel ALL in-progress events for the node")
-	setup.reconciler.HandleCancellation(nil, nodeName, model.UnQuarantined)
+	setup.reconciler.HandleCancellation("", nodeName, model.UnQuarantined)
 
 	unquarantinedEvent := createHealthEvent(healthEventOptions{
 		nodeName:        nodeName,

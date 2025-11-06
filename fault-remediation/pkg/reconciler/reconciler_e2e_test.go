@@ -1010,8 +1010,8 @@ func TestReconciler_CancelledEventCleansAnnotation(t *testing.T) {
 	testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
 }
 
-// TestReconciler_CancelledEventMultipleGroups validates granular group removal with multiple groups
-func TestReconciler_CancelledEventMultipleGroups(t *testing.T) {
+// TestReconciler_CancelledEventClearsAllGroups validates that Cancelled events clear all remediation state
+func TestReconciler_CancelledEventClearsAllGroups(t *testing.T) {
 	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
 	defer cancel()
 
@@ -1058,7 +1058,7 @@ func TestReconciler_CancelledEventMultipleGroups(t *testing.T) {
 		}
 	}()
 
-	t.Log("Send Cancelled event for restart action only")
+	t.Log("Send Cancelled event (clears all remediation state)")
 	cancelledEvent := bson.M{
 		"operationType": "update",
 		"fullDocument": bson.M{
@@ -1074,28 +1074,21 @@ func TestReconciler_CancelledEventMultipleGroups(t *testing.T) {
 	}
 	mockWatcher.EventsChan <- cancelledEvent
 
-	t.Log("Verify only restart group removed, component-reset remains")
+	t.Log("Verify all remediation state cleared (both groups removed)")
 	require.Eventually(t, func() bool {
 		state, err := annotationMgr.GetRemediationState(ctx, nodeName)
 		if err != nil {
 			return false
 		}
-		_, hasRestart := state.EquivalenceGroups["restart"]
-		_, hasComponent := state.EquivalenceGroups["component-reset"]
-		return !hasRestart && hasComponent
-	}, 5*time.Second, 100*time.Millisecond, "Only restart group should be removed")
-
-	state, err = annotationMgr.GetRemediationState(ctx, nodeName)
-	require.NoError(t, err)
-	assert.Len(t, state.EquivalenceGroups, 1, "Should have 1 group remaining")
-	assert.Contains(t, state.EquivalenceGroups, "component-reset", "component-reset group should remain")
+		return state == nil || len(state.EquivalenceGroups) == 0
+	}, 5*time.Second, 100*time.Millisecond, "All remediation state should be cleared for cancelled event")
 
 	close(mockWatcher.EventsChan)
 	<-reconcilerDone
 }
 
-// TestReconciler_CancelledVsUnQuarantined validates different handling for Cancelled vs UnQuarantined
-func TestReconciler_CancelledVsUnQuarantined(t *testing.T) {
+// TestReconciler_CancelledAndUnQuarantinedClearAllState validates that both Cancelled and UnQuarantined clear all remediation state
+func TestReconciler_CancelledAndUnQuarantinedClearAllState(t *testing.T) {
 	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
 	defer cancel()
 
@@ -1147,7 +1140,7 @@ func TestReconciler_CancelledVsUnQuarantined(t *testing.T) {
 		<-reconcilerDone
 	})
 
-	t.Run("Cancelled_RemovesOnlySpecificGroup", func(t *testing.T) {
+	t.Run("Cancelled_ClearsAllState", func(t *testing.T) {
 		nodeName := "test-cancelled-grp-" + primitive.NewObjectID().Hex()[:8]
 		createTestNode(ctx, nodeName, nil, map[string]string{"test": "label"})
 		defer func() {

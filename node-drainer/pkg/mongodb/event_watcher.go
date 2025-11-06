@@ -34,7 +34,7 @@ type EventWatcher struct {
 	mongoPipeline       mongo.Pipeline
 	queueManager        queue.EventQueueManager
 	collection          queue.MongoCollectionAPI
-	onCancellationEvent func(eventID interface{}, nodeName string, status model.Status)
+	onCancellationEvent func(eventID string, nodeName string, status model.Status)
 }
 
 func NewEventWatcher(
@@ -95,7 +95,7 @@ func (w *EventWatcher) Stop() error {
 }
 
 func (w *EventWatcher) SetCancellationCallback(
-	callback func(eventID interface{}, nodeName string, status model.Status)) {
+	callback func(eventID string, nodeName string, status model.Status)) {
 	w.onCancellationEvent = callback
 }
 
@@ -164,7 +164,8 @@ func (w *EventWatcher) preprocessAndEnqueueEvent(ctx context.Context, event bson
 		return fmt.Errorf("error extracting fullDocument from event: %+v", event)
 	}
 
-	eventID := document["_id"]
+	eventIDRaw := document["_id"]
+	eventID := fmt.Sprintf("%v", eventIDRaw)
 
 	nodeName := healthEventWithStatus.HealthEvent.NodeName
 	statusPtr := healthEventWithStatus.HealthEventStatus.NodeQuarantined
@@ -190,7 +191,7 @@ func (w *EventWatcher) preprocessAndEnqueueEvent(ctx context.Context, event bson
 		slog.Any("userPodEvictingStatus", healthEventWithStatus.HealthEventStatus.UserPodsEvictionStatus))
 
 	filter := bson.M{
-		"_id": eventID,
+		"_id": eventIDRaw,
 		"healtheventstatus.userpodsevictionstatus.status": bson.M{"$ne": model.StatusInProgress},
 	}
 	update := bson.M{
