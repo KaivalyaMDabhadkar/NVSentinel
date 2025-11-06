@@ -3528,6 +3528,15 @@ func TestE2E_DryRunMode(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, node.Spec.Unschedulable, "Node should NOT be cordoned in dry run mode")
 
+	t.Log("Verify taints are NOT applied in dry run mode")
+	fqTaintCount := 0
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == "nvidia.com/gpu-xid-error" {
+			fqTaintCount++
+		}
+	}
+	assert.Equal(t, 0, fqTaintCount, "Node should NOT have taints applied in dry run mode")
+
 	// Annotations ARE added in dry run (only spec changes are skipped)
 	assert.NotEmpty(t, node.Annotations[common.QuarantineHealthEventAnnotationKey], "Annotations are still added in dry run")
 }

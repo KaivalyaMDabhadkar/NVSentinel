@@ -61,9 +61,7 @@ func TestDryRunMode(t *testing.T) {
 		return newCtx
 	})
 
-	// Taints should not be applied in dry-run mode
-	// TODO: Verify the same after https://github.com/NVIDIA/NVSentinel/issues/193 is fixed
-	feature.Assess("taints applied in dry-run", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("taints not applied in dry-run", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
@@ -72,7 +70,7 @@ func TestDryRunMode(t *testing.T) {
 			WithMessage("XID error occurred")
 		helpers.SendHealthEvent(ctx, t, event)
 
-		require.Eventually(t, func() bool {
+		assert.Never(t, func() bool {
 			node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
 			if err != nil {
 				return false
@@ -86,7 +84,7 @@ func TestDryRunMode(t *testing.T) {
 				}
 			}
 			return false
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval)
+		}, 10*time.Second, helpers.WaitInterval, "Taint should NOT be applied in dry-run mode")
 
 		return ctx
 	})
