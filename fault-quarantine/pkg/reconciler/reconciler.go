@@ -1165,7 +1165,7 @@ func (r *Reconciler) handleManualUncordon(nodeName string) error {
 		slog.Error("Failed to clean up manually uncordoned node", "node", nodeName, "error", err)
 		metrics.ProcessingErrors.WithLabelValues("manual_uncordon_cleanup_error").Inc()
 
-		return err
+		return fmt.Errorf("failed to clean up manually uncordoned node %s: %w", nodeName, err)
 	}
 
 	if err := r.eventWatcher.CancelLatestQuarantiningEvents(ctx, nodeName); err != nil {
@@ -1174,7 +1174,7 @@ func (r *Reconciler) handleManualUncordon(nodeName string) error {
 			"error", err)
 		metrics.ProcessingErrors.WithLabelValues("mongodb_cancelled_update_error").Inc()
 
-		return err
+		return fmt.Errorf("failed to cancel latest quarantining events for node %s: %w", nodeName, err)
 	}
 
 	metrics.TotalNodesManuallyUncordoned.WithLabelValues(nodeName).Inc()
