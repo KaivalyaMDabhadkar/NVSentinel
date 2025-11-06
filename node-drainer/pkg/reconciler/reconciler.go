@@ -42,6 +42,8 @@ type Reconciler struct {
 	informers           *informers.Informers
 	evaluator           evaluator.DrainEvaluator
 	kubernetesClient    kubernetes.Interface
+	eventStatusMap      sync.Map
+	nodeToEventIDsMap   sync.Map
 }
 
 func NewReconciler(cfg config.ReconcilerConfig,
@@ -86,7 +88,22 @@ func (r *Reconciler) ProcessEvent(ctx context.Context,
 		return fmt.Errorf("failed to unmarshal health event: %w", err)
 	}
 
+	document, ok := event["fullDocument"].(bson.M)
+	if !ok {
+		metrics.ProcessingErrors.WithLabelValues("extract_document_error", nodeName).Inc()
+		return fmt.Errorf("error extracting fullDocument from event")
+	}
+
+	eventID := document["_id"]
+
 	metrics.TotalEventsReceived.Inc()
+
+	if r.isEventCancelled(eventID) {
+		slog.Info("Event was cancelled, performing cleanup", "node", nodeName, "eventID", eventID)
+		return r.handleCancelledEvent(ctx, nodeName, &healthEventWithStatus, event, collection, eventID)
+	}
+
+	r.markEventInProgress(eventID, nodeName)
 
 	actionResult, err := r.evaluator.EvaluateEvent(ctx, healthEventWithStatus, collection)
 	if err != nil {
@@ -98,15 +115,17 @@ func (r *Reconciler) ProcessEvent(ctx context.Context,
 		"node", nodeName,
 		"action", actionResult.Action.String())
 
-	return r.executeAction(ctx, actionResult, healthEventWithStatus, event, collection)
+	return r.executeAction(ctx, actionResult, healthEventWithStatus, event, collection, eventID)
 }
 
-func (r *Reconciler) executeAction(ctx context.Context, action *evaluator.DrainActionResult,
-	healthEvent model.HealthEventWithStatus, event bson.M, collection queue.MongoCollectionAPI) error {
+func (r *Reconciler) executeAction(ctx context.Context,
+	action *evaluator.DrainActionResult, healthEvent model.HealthEventWithStatus,
+	event bson.M, collection queue.MongoCollectionAPI, eventID interface{}) error {
 	nodeName := healthEvent.HealthEvent.NodeName
 
 	switch action.Action {
 	case evaluator.ActionSkip:
+		r.clearEventStatus(eventID, nodeName)
 		return r.executeSkip(ctx, nodeName, healthEvent, event, collection)
 
 	case evaluator.ActionWait:
@@ -122,16 +141,18 @@ func (r *Reconciler) executeAction(ctx context.Context, action *evaluator.DrainA
 
 	case evaluator.ActionEvictWithTimeout:
 		r.updateNodeDrainStatus(ctx, nodeName, &healthEvent, true)
-		return r.executeTimeoutEviction(ctx, action, healthEvent)
+		return r.executeTimeoutEviction(ctx, action, healthEvent, eventID)
 
 	case evaluator.ActionCheckCompletion:
 		r.updateNodeDrainStatus(ctx, nodeName, &healthEvent, true)
 		return r.executeCheckCompletion(ctx, action, healthEvent)
 
 	case evaluator.ActionMarkAlreadyDrained:
+		r.clearEventStatus(eventID, nodeName)
 		return r.executeMarkAlreadyDrained(ctx, healthEvent, event, collection)
 
 	case evaluator.ActionUpdateStatus:
+		r.clearEventStatus(eventID, nodeName)
 		return r.executeUpdateStatus(ctx, healthEvent, event, collection)
 
 	default:
@@ -145,27 +166,22 @@ func (r *Reconciler) executeSkip(ctx context.Context,
 	slog.Info("Skipping event for node", "node", nodeName)
 
 	if statusPtr := healthEvent.HealthEventStatus.NodeQuarantined; statusPtr != nil &&
-		(*statusPtr == model.UnQuarantined || *statusPtr == model.Cancelled) {
-		if *statusPtr == model.Cancelled {
-			metrics.CancelledEvent.WithLabelValues(nodeName, healthEvent.HealthEvent.CheckName).Inc()
-		}
-
+		*statusPtr == model.UnQuarantined {
 		podsEvictionStatus := &healthEvent.HealthEventStatus.UserPodsEvictionStatus
 		podsEvictionStatus.Status = model.StatusSucceeded
 
 		if err := r.updateNodeUserPodsEvictedStatus(ctx, collection, event, podsEvictionStatus, nodeName,
 			metrics.DrainStatusCancelled); err != nil {
-			slog.Error("Failed to update MongoDB status for node",
+			slog.Error("Failed to update MongoDB status for unquarantined node",
 				"node", nodeName,
 				"error", err)
 
 			return fmt.Errorf("failed to update MongoDB status for node %s: %w", nodeName, err)
 		}
 
-		slog.Info("Updated MongoDB status for node",
+		slog.Info("Updated MongoDB status for unquarantined node",
 			"node", nodeName,
-			"status", "succeeded",
-			"reason", *statusPtr)
+			"status", "succeeded")
 	}
 
 	r.updateNodeDrainStatus(ctx, nodeName, &healthEvent, false)
@@ -187,12 +203,12 @@ func (r *Reconciler) executeImmediateEviction(ctx context.Context,
 }
 
 func (r *Reconciler) executeTimeoutEviction(ctx context.Context,
-	action *evaluator.DrainActionResult, healthEvent model.HealthEventWithStatus) error {
+	action *evaluator.DrainActionResult, healthEvent model.HealthEventWithStatus, eventID interface{}) error {
 	nodeName := healthEvent.HealthEvent.NodeName
 	timeoutMinutes := int(action.Timeout.Minutes())
 
 	if err := r.informers.DeletePodsAfterTimeout(ctx,
-		nodeName, action.Namespaces, timeoutMinutes, &healthEvent); err != nil {
+		nodeName, action.Namespaces, timeoutMinutes, &healthEvent, r.isEventCancelled, eventID); err != nil {
 		metrics.ProcessingErrors.WithLabelValues("timeout_eviction_error", nodeName).Inc()
 		return fmt.Errorf("failed timeout eviction for node %s: %w", nodeName, err)
 	}
@@ -284,12 +300,10 @@ func (r *Reconciler) updateNodeDrainStatus(ctx context.Context,
 		return
 	}
 
-	// Handle UnQuarantined or Cancelled events - remove draining label
-	if *healthEvent.HealthEventStatus.NodeQuarantined == model.UnQuarantined ||
-		*healthEvent.HealthEventStatus.NodeQuarantined == model.Cancelled {
+	if *healthEvent.HealthEventStatus.NodeQuarantined == model.UnQuarantined {
 		if _, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx,
 			nodeName, statemanager.DrainingLabelValue, true); err != nil {
-			slog.Error("Failed to remove draining label for node",
+			slog.Error("Failed to remove draining label for unquarantined node",
 				"node", nodeName,
 				"error", err)
 		}
@@ -297,7 +311,6 @@ func (r *Reconciler) updateNodeDrainStatus(ctx context.Context,
 		return
 	}
 
-	// Handle Quarantined/AlreadyQuarantined events
 	if isDraining {
 		if _, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx,
 			nodeName, statemanager.DrainingLabelValue, false); err != nil {
@@ -333,6 +346,111 @@ func (r *Reconciler) updateNodeUserPodsEvictedStatus(ctx context.Context, collec
 		"documentID", document["_id"],
 		"evictionStatus", userPodsEvictionStatus.Status)
 	metrics.EventsProcessed.WithLabelValues(drainStatus, nodeName).Inc()
+
+	return nil
+}
+
+func (r *Reconciler) MarkEventCancelled(eventID interface{}) {
+	r.eventStatusMap.Store(eventID, model.Cancelled)
+	slog.Info("Marked specific event as cancelled in status map", "eventID", eventID)
+}
+
+func (r *Reconciler) MarkNodeEventsCancelled(nodeName string) {
+	val, exists := r.nodeToEventIDsMap.Load(nodeName)
+	if !exists {
+		slog.Debug("No in-progress events found for node", "node", nodeName)
+		return
+	}
+
+	eventIDs, ok := val.([]interface{})
+	if !ok {
+		return
+	}
+
+	for _, eventID := range eventIDs {
+		r.eventStatusMap.Store(eventID, model.Cancelled)
+		slog.Info("Marked event as cancelled for node", "node", nodeName, "eventID", eventID)
+	}
+}
+
+func (r *Reconciler) isEventCancelled(eventID interface{}) bool {
+	val, exists := r.eventStatusMap.Load(eventID)
+	if !exists {
+		return false
+	}
+
+	status, ok := val.(model.Status)
+
+	return ok && status == model.Cancelled
+}
+
+func (r *Reconciler) markEventInProgress(eventID interface{}, nodeName string) {
+	r.eventStatusMap.Store(eventID, model.StatusInProgress)
+
+	val, _ := r.nodeToEventIDsMap.LoadOrStore(nodeName, []interface{}{})
+
+	eventIDs, ok := val.([]interface{})
+	if !ok {
+		eventIDs = []interface{}{}
+	}
+
+	eventIDs = append(eventIDs, eventID)
+	r.nodeToEventIDsMap.Store(nodeName, eventIDs)
+}
+
+func (r *Reconciler) clearEventStatus(eventID interface{}, nodeName string) {
+	r.eventStatusMap.Delete(eventID)
+
+	val, exists := r.nodeToEventIDsMap.Load(nodeName)
+	if !exists {
+		return
+	}
+
+	eventIDs, ok := val.([]interface{})
+	if !ok {
+		return
+	}
+
+	filtered := make([]interface{}, 0, len(eventIDs))
+	for _, id := range eventIDs {
+		if id != eventID {
+			filtered = append(filtered, id)
+		}
+	}
+
+	if len(filtered) == 0 {
+		r.nodeToEventIDsMap.Delete(nodeName)
+	} else {
+		r.nodeToEventIDsMap.Store(nodeName, filtered)
+	}
+}
+
+func (r *Reconciler) handleCancelledEvent(ctx context.Context, nodeName string,
+	healthEvent *model.HealthEventWithStatus, event bson.M, collection queue.MongoCollectionAPI,
+	eventID interface{}) error {
+	r.clearEventStatus(eventID, nodeName)
+
+	podsEvictionStatus := &healthEvent.HealthEventStatus.UserPodsEvictionStatus
+	podsEvictionStatus.Status = model.StatusSucceeded
+
+	if err := r.updateNodeUserPodsEvictedStatus(ctx, collection, event, podsEvictionStatus, nodeName,
+		metrics.DrainStatusCancelled); err != nil {
+		slog.Error("Failed to update MongoDB status for cancelled event",
+			"node", nodeName,
+			"error", err)
+
+		return fmt.Errorf("failed to update MongoDB status for cancelled event on node %s: %w", nodeName, err)
+	}
+
+	if _, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx,
+		nodeName, statemanager.DrainingLabelValue, true); err != nil {
+		slog.Error("Failed to remove draining label for cancelled event",
+			"node", nodeName,
+			"error", err)
+	}
+
+	metrics.CancelledEvent.WithLabelValues(nodeName, healthEvent.HealthEvent.CheckName).Inc()
+	slog.Info("Successfully cleaned up cancelled event", "node", nodeName, "eventID", eventID)
 
 	return nil
 }

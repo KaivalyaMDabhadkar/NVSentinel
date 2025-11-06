@@ -97,6 +97,8 @@ func InitializeAll(ctx context.Context, params InitializationParams) (*Component
 		collection,
 	)
 
+	eventWatcher.SetCancellationCallbacks(reconciler.MarkEventCancelled, reconciler.MarkNodeEventsCancelled)
+
 	slog.Info("Initialization completed successfully")
 
 	return &Components{

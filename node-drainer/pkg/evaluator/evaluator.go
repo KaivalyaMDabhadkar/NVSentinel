@@ -37,16 +37,8 @@ func (e *NodeDrainEvaluator) EvaluateEvent(ctx context.Context, healthEvent mode
 	nodeName := healthEvent.HealthEvent.NodeName
 	statusPtr := healthEvent.HealthEventStatus.NodeQuarantined
 
-	if statusPtr != nil {
-		if *statusPtr == model.UnQuarantined {
-			slog.Info("UnQuarantine event for node, stopping drain", "node", nodeName)
-			return &DrainActionResult{Action: ActionSkip}, nil
-		}
-
-		if *statusPtr == model.Cancelled {
-			slog.Info("Cancelled quarantine event for node, stopping drain", "node", nodeName)
-			return &DrainActionResult{Action: ActionSkip}, nil
-		}
+	if statusPtr != nil && *statusPtr == model.UnQuarantined {
+		return &DrainActionResult{Action: ActionSkip}, nil
 	}
 
 	if isTerminalStatus(healthEvent.HealthEventStatus.UserPodsEvictionStatus.Status) {
