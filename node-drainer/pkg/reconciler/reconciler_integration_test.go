@@ -764,7 +764,7 @@ func TestReconciler_CancelledEventWithOngoingDrain(t *testing.T) {
 	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
 
 	t.Log("Simulate Cancelled event from change stream - should stop draining immediately")
-	setup.reconciler.MarkEventCancelled(eventID)
+	setup.reconciler.HandleCancellation(eventID, nodeName, model.Cancelled)
 
 	require.Eventually(t, func() bool {
 		node, err := setup.client.CoreV1().Nodes().Get(setup.ctx, nodeName, metav1.GetOptions{})
@@ -810,7 +810,7 @@ func TestReconciler_UnQuarantinedEventCancelsOngoingDrain(t *testing.T) {
 	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
 
 	t.Log("Simulate UnQuarantined event from change stream - should cancel in-progress drains")
-	setup.reconciler.MarkNodeEventsCancelled(nodeName)
+	setup.reconciler.HandleCancellation(nil, nodeName, model.UnQuarantined)
 
 	t.Log("Enqueue UnQuarantined event - should process and clean up")
 	unquarantinedEvent := createHealthEvent(healthEventOptions{
@@ -878,7 +878,7 @@ func TestReconciler_MultipleEventsOnNodeCancelledByUnQuarantine(t *testing.T) {
 	assertNodeLabel(t, setup.client, setup.ctx, nodeName, statemanager.DrainingLabelValue)
 
 	t.Log("Simulate UnQuarantined event - should cancel ALL in-progress events for the node")
-	setup.reconciler.MarkNodeEventsCancelled(nodeName)
+	setup.reconciler.HandleCancellation(nil, nodeName, model.UnQuarantined)
 
 	unquarantinedEvent := createHealthEvent(healthEventOptions{
 		nodeName:        nodeName,

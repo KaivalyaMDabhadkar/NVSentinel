@@ -42,8 +42,8 @@ type Reconciler struct {
 	informers           *informers.Informers
 	evaluator           evaluator.DrainEvaluator
 	kubernetesClient    kubernetes.Interface
-	eventStatusMap      sync.Map
-	nodeToEventIDsMap   sync.Map
+	nodeEventsMap       map[string]map[interface{}]model.Status // nodeName → map[eventID]status
+	nodeEventsMapMu     sync.Mutex
 }
 
 func NewReconciler(cfg config.ReconcilerConfig,
@@ -59,6 +59,7 @@ func NewReconciler(cfg config.ReconcilerConfig,
 		informers:           informersInstance,
 		evaluator:           drainEvaluator,
 		kubernetesClient:    kubeClient,
+		nodeEventsMap:       make(map[string]map[interface{}]model.Status),
 	}
 
 	queueManager.SetEventProcessor(reconciler)
@@ -98,7 +99,7 @@ func (r *Reconciler) ProcessEvent(ctx context.Context,
 
 	metrics.TotalEventsReceived.Inc()
 
-	if r.isEventCancelled(eventID) {
+	if r.isEventCancelled(eventID, nodeName) {
 		slog.Info("Event was cancelled, performing cleanup", "node", nodeName, "eventID", eventID)
 		return r.handleCancelledEvent(ctx, nodeName, &healthEventWithStatus, event, collection, eventID)
 	}
@@ -141,7 +142,7 @@ func (r *Reconciler) executeAction(ctx context.Context,
 
 	case evaluator.ActionEvictWithTimeout:
 		r.updateNodeDrainStatus(ctx, nodeName, &healthEvent, true)
-		return r.executeTimeoutEviction(ctx, action, healthEvent, eventID)
+		return r.executeTimeoutEviction(ctx, action, healthEvent)
 
 	case evaluator.ActionCheckCompletion:
 		r.updateNodeDrainStatus(ctx, nodeName, &healthEvent, true)
@@ -203,12 +204,12 @@ func (r *Reconciler) executeImmediateEviction(ctx context.Context,
 }
 
 func (r *Reconciler) executeTimeoutEviction(ctx context.Context,
-	action *evaluator.DrainActionResult, healthEvent model.HealthEventWithStatus, eventID interface{}) error {
+	action *evaluator.DrainActionResult, healthEvent model.HealthEventWithStatus) error {
 	nodeName := healthEvent.HealthEvent.NodeName
 	timeoutMinutes := int(action.Timeout.Minutes())
 
 	if err := r.informers.DeletePodsAfterTimeout(ctx,
-		nodeName, action.Namespaces, timeoutMinutes, &healthEvent, r.isEventCancelled, eventID); err != nil {
+		nodeName, action.Namespaces, timeoutMinutes, &healthEvent); err != nil {
 		metrics.ProcessingErrors.WithLabelValues("timeout_eviction_error", nodeName).Inc()
 		return fmt.Errorf("failed timeout eviction for node %s: %w", nodeName, err)
 	}
@@ -350,78 +351,71 @@ func (r *Reconciler) updateNodeUserPodsEvictedStatus(ctx context.Context, collec
 	return nil
 }
 
-func (r *Reconciler) MarkEventCancelled(eventID interface{}) {
-	r.eventStatusMap.Store(eventID, model.Cancelled)
-	slog.Info("Marked specific event as cancelled in status map", "eventID", eventID)
+func (r *Reconciler) HandleCancellation(eventID interface{}, nodeName string, status model.Status) {
+	r.nodeEventsMapMu.Lock()
+	defer r.nodeEventsMapMu.Unlock()
+
+	//nolint:exhaustive
+	switch status {
+	case model.Cancelled:
+		if r.nodeEventsMap[nodeName] == nil {
+			r.nodeEventsMap[nodeName] = make(map[interface{}]model.Status)
+		}
+
+		r.nodeEventsMap[nodeName][eventID] = model.Cancelled
+		slog.Info("Marked specific event as cancelled", "node", nodeName, "eventID", eventID)
+	case model.UnQuarantined:
+		eventsMap, exists := r.nodeEventsMap[nodeName]
+		if !exists {
+			slog.Debug("No in-progress events found for node", "node", nodeName)
+			return
+		}
+
+		for evtID := range eventsMap {
+			eventsMap[evtID] = model.Cancelled
+			slog.Info("Marked event as cancelled for node", "node", nodeName, "eventID", evtID)
+		}
+	}
 }
 
-func (r *Reconciler) MarkNodeEventsCancelled(nodeName string) {
-	val, exists := r.nodeToEventIDsMap.Load(nodeName)
-	if !exists {
-		slog.Debug("No in-progress events found for node", "node", nodeName)
-		return
-	}
+func (r *Reconciler) isEventCancelled(eventID interface{}, nodeName string) bool {
+	r.nodeEventsMapMu.Lock()
+	defer r.nodeEventsMapMu.Unlock()
 
-	eventIDs, ok := val.([]interface{})
-	if !ok {
-		return
-	}
-
-	for _, eventID := range eventIDs {
-		r.eventStatusMap.Store(eventID, model.Cancelled)
-		slog.Info("Marked event as cancelled for node", "node", nodeName, "eventID", eventID)
-	}
-}
-
-func (r *Reconciler) isEventCancelled(eventID interface{}) bool {
-	val, exists := r.eventStatusMap.Load(eventID)
+	eventsMap, exists := r.nodeEventsMap[nodeName]
 	if !exists {
 		return false
 	}
 
-	status, ok := val.(model.Status)
+	status, exists := eventsMap[eventID]
 
-	return ok && status == model.Cancelled
+	return exists && status == model.Cancelled
 }
 
 func (r *Reconciler) markEventInProgress(eventID interface{}, nodeName string) {
-	r.eventStatusMap.Store(eventID, model.StatusInProgress)
+	r.nodeEventsMapMu.Lock()
+	defer r.nodeEventsMapMu.Unlock()
 
-	val, _ := r.nodeToEventIDsMap.LoadOrStore(nodeName, []interface{}{})
-
-	eventIDs, ok := val.([]interface{})
-	if !ok {
-		eventIDs = []interface{}{}
+	if r.nodeEventsMap[nodeName] == nil {
+		r.nodeEventsMap[nodeName] = make(map[interface{}]model.Status)
 	}
 
-	eventIDs = append(eventIDs, eventID)
-	r.nodeToEventIDsMap.Store(nodeName, eventIDs)
+	r.nodeEventsMap[nodeName][eventID] = model.StatusInProgress
 }
 
 func (r *Reconciler) clearEventStatus(eventID interface{}, nodeName string) {
-	r.eventStatusMap.Delete(eventID)
+	r.nodeEventsMapMu.Lock()
+	defer r.nodeEventsMapMu.Unlock()
 
-	val, exists := r.nodeToEventIDsMap.Load(nodeName)
+	eventsMap, exists := r.nodeEventsMap[nodeName]
 	if !exists {
 		return
 	}
 
-	eventIDs, ok := val.([]interface{})
-	if !ok {
-		return
-	}
+	delete(eventsMap, eventID)
 
-	filtered := make([]interface{}, 0, len(eventIDs))
-	for _, id := range eventIDs {
-		if id != eventID {
-			filtered = append(filtered, id)
-		}
-	}
-
-	if len(filtered) == 0 {
-		r.nodeToEventIDsMap.Delete(nodeName)
-	} else {
-		r.nodeToEventIDsMap.Store(nodeName, filtered)
+	if len(eventsMap) == 0 {
+		delete(r.nodeEventsMap, nodeName)
 	}
 }
 
@@ -431,7 +425,7 @@ func (r *Reconciler) handleCancelledEvent(ctx context.Context, nodeName string,
 	r.clearEventStatus(eventID, nodeName)
 
 	podsEvictionStatus := &healthEvent.HealthEventStatus.UserPodsEvictionStatus
-	podsEvictionStatus.Status = model.StatusSucceeded
+	podsEvictionStatus.Status = model.Cancelled
 
 	if err := r.updateNodeUserPodsEvictedStatus(ctx, collection, event, podsEvictionStatus, nodeName,
 		metrics.DrainStatusCancelled); err != nil {

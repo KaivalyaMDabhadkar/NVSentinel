@@ -230,5 +230,6 @@ func (e *NodeDrainEvaluator) handleDeleteAfterTimeoutNamespaces(ns namespaces, n
 func isTerminalStatus(status model.Status) bool {
 	return status == model.StatusSucceeded ||
 		status == model.StatusFailed ||
+		status == model.Cancelled ||
 		status == model.AlreadyDrained
 }

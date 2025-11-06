@@ -472,7 +472,7 @@ func (i *Informers) UpdateNodeEvent(ctx context.Context, nodeName string, reason
 }
 
 func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string, namespaces []string,
-	timeout int, event *model.HealthEventWithStatus, isEventCancelled func(interface{}) bool, eventID interface{}) error {
+	timeout int, event *model.HealthEventWithStatus) error {
 	drainTimeout, err := i.getNodeDrainTimeout(timeout, event)
 	if err != nil {
 		slog.Error("Failed to get node drain timeout", "error", err)
@@ -482,11 +482,6 @@ func (i *Informers) DeletePodsAfterTimeout(ctx context.Context, nodeName string,
 	timeoutDeadline := event.CreatedAt.Add(time.Duration(timeout) * time.Minute)
 	deleteDateTimeUTC := timeoutDeadline.UTC().Format(time.RFC3339)
 	timeoutReached := drainTimeout <= 0
-
-	if isEventCancelled(eventID) {
-		slog.Info("Event cancelled, stopping drain operation", "node", nodeName, "eventID", eventID)
-		return nil
-	}
 
 	evicted, remainingPods := i.checkIfPodsPresentInNamespaceAndNode(namespaces, nodeName)
 	if evicted {

@@ -29,13 +29,12 @@ import (
 )
 
 type EventWatcher struct {
-	mongoConfig           storewatcher.MongoDBConfig
-	tokenConfig           storewatcher.TokenConfig
-	mongoPipeline         mongo.Pipeline
-	queueManager          queue.EventQueueManager
-	collection            queue.MongoCollectionAPI
-	onEventCancelled      func(eventID interface{})
-	onNodeEventsCancelled func(nodeName string)
+	mongoConfig         storewatcher.MongoDBConfig
+	tokenConfig         storewatcher.TokenConfig
+	mongoPipeline       mongo.Pipeline
+	queueManager        queue.EventQueueManager
+	collection          queue.MongoCollectionAPI
+	onCancellationEvent func(eventID interface{}, nodeName string, status model.Status)
 }
 
 func NewEventWatcher(
@@ -95,11 +94,9 @@ func (w *EventWatcher) Stop() error {
 	return nil
 }
 
-func (w *EventWatcher) SetCancellationCallbacks(
-	onEventCancelled func(eventID interface{}),
-	onNodeEventsCancelled func(nodeName string)) {
-	w.onEventCancelled = onEventCancelled
-	w.onNodeEventsCancelled = onNodeEventsCancelled
+func (w *EventWatcher) SetCancellationCallback(
+	callback func(eventID interface{}, nodeName string, status model.Status)) {
+	w.onCancellationEvent = callback
 }
 
 func (w *EventWatcher) handleColdStart(ctx context.Context) error {
@@ -176,7 +173,7 @@ func (w *EventWatcher) preprocessAndEnqueueEvent(ctx context.Context, event bson
 		slog.Info("Detected Cancelled event, marking specific event as cancelled (not enqueueing)",
 			"node", nodeName,
 			"eventID", eventID)
-		w.onEventCancelled(eventID)
+		w.onCancellationEvent(eventID, nodeName, model.Cancelled)
 
 		return nil
 	}
@@ -185,7 +182,7 @@ func (w *EventWatcher) preprocessAndEnqueueEvent(ctx context.Context, event bson
 		slog.Info("Detected UnQuarantined event, marking all in-progress events for node as cancelled",
 			"node", nodeName,
 			"eventID", eventID)
-		w.onNodeEventsCancelled(nodeName)
+		w.onCancellationEvent(eventID, nodeName, model.UnQuarantined)
 	}
 
 	slog.Info("Enqueuing",
@@ -218,5 +215,6 @@ func (w *EventWatcher) preprocessAndEnqueueEvent(ctx context.Context, event bson
 func isTerminalStatus(status model.Status) bool {
 	return status == model.StatusSucceeded ||
 		status == model.StatusFailed ||
+		status == model.Cancelled ||
 		status == model.AlreadyDrained
 }
