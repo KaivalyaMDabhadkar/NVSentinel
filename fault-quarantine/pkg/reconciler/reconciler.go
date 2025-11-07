@@ -412,6 +412,27 @@ func (r *Reconciler) handleAlreadyQuarantinedNode(
 	event *protos.HealthEvent,
 	ruleSetEvals []evaluator.RuleSetEvaluatorIface,
 ) *model.Status {
+	healthEventsAnnotationMap, _, err := r.getHealthEventsFromAnnotation(event)
+
+	// Only propagate events to ND/FR if they will modify node annotations
+	// Returning nil prevents unnecessary MongoDB writes and downstream processing
+	switch {
+	case err != nil:
+		if errors.Is(err, errNoQuarantineAnnotation) {
+			return nil
+		}
+
+		metrics.ProcessingErrors.WithLabelValues("get_node_annotations_error").Inc()
+	case event.IsHealthy:
+		_, hasExistingCheck := healthEventsAnnotationMap.GetEvent(event)
+		if !hasExistingCheck {
+			return nil
+		}
+	case !r.eventMatchesAnyRule(event, ruleSetEvals):
+		return nil
+	}
+
+	// Event will modify annotations, proceed with quarantine handling and propagate to ND/FR
 	var status model.Status
 
 	if r.handleQuarantinedNode(ctx, event, ruleSetEvals) {
