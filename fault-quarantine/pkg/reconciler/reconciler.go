@@ -423,6 +423,8 @@ func (r *Reconciler) handleAlreadyQuarantinedNode(
 		}
 
 		metrics.ProcessingErrors.WithLabelValues("get_node_annotations_error").Inc()
+		// Cannot proceed without valid annotation data
+		return nil
 	case event.IsHealthy:
 		_, hasExistingCheck := healthEventsAnnotationMap.GetEvent(event)
 		if !hasExistingCheck {
