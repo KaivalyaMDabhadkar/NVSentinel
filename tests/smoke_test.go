@@ -32,6 +32,7 @@ type testContextKey int
 const (
 	keyNodeName testContextKey = iota
 	keyNamespace
+	keyPodName
 )
 
 func TestFatalHealthEvent(t *testing.T) {

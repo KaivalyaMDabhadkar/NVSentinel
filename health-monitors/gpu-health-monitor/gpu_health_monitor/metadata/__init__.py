@@ -12,22 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-image:
-  repository: ghcr.io/nvidia/nvsentinel/metadata-collector
-  pullPolicy: IfNotPresent
-  tag: ""
+from .reader import MetadataReader
 
-pauseImage:
-  repository: registry.k8s.io/pause
-  tag: "3.10"
-
-podAnnotations: {}
-
-resources: 
-  limits:
-    cpu: 500m
-    memory: 256Mi
-  requests:
-    cpu: 100m
-    memory: 128Mi
-
+__all__ = ["MetadataReader"]
