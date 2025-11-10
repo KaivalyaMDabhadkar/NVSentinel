@@ -434,10 +434,19 @@ func (r *Reconciler) handleAlreadyQuarantinedNode(
 		return nil
 	}
 
-	// Event will modify annotations, proceed with quarantine handling and propagate to ND/FR
-	var status model.Status
+	// Event will modify FQ annotations, proceed with quarantine handling
+	stayQuarantined := r.handleQuarantinedNode(ctx, event, ruleSetEvals)
 
-	if r.handleQuarantinedNode(ctx, event, ruleSetEvals) {
+	// Partial recovery: healthy event that doesn't fully unquarantine the node should
+	// not be propagated to ND/FR
+	if event.IsHealthy && stayQuarantined {
+		return nil
+	}
+
+	var status model.Status
+	if stayQuarantined {
+		// Only for an unhealthy event, set status to AlreadyQuarantined and
+		// propagate to ND/FR
 		status = model.AlreadyQuarantined
 	} else {
 		status = model.UnQuarantined
