@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+{{- if .Values.global.mongodbStore.enabled }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -54,6 +56,21 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+      - name: wait-for-mongodb-users
+        image: "{{ .Values.psmdb.helperImages.kubectl.repository }}:{{ .Values.psmdb.helperImages.kubectl.tag }}"
+        imagePullPolicy: {{ .Values.psmdb.helperImages.kubectl.pullPolicy }}
+        command:
+        - sh
+        - -c
+        - |
+          echo "Waiting for MongoDB operator-generated users secret..."
+          while ! kubectl get secret internal-nvsentinel-mongodb-users -n {{ .Release.Namespace }} >/dev/null 2>&1; do
+            echo "Secret internal-nvsentinel-mongodb-users not found yet, waiting..."
+            sleep 5
+          done
+          echo "MongoDB users secret is available, proceeding..."
+{{- else }}
       - name: wait-for-mongodb-secret
         image: "{{ .Values.mongodb.helperImages.kubectl.repository }}:{{ .Values.mongodb.helperImages.kubectl.tag }}"
         imagePullPolicy: {{ .Values.mongodb.helperImages.kubectl.pullPolicy }}
@@ -67,10 +84,16 @@ spec:
             sleep 5
           done
           echo "Secret mongodb is available, proceeding..."
+{{- end }}
       containers:
       - name: mongo-client
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+        image: "{{ .Values.psmdb.helperImages.mongosh.repository }}:{{ .Values.psmdb.helperImages.mongosh.tag }}"
+        imagePullPolicy: {{ .Values.psmdb.helperImages.mongosh.pullPolicy }}
+{{- else }}
         image: "{{ .Values.mongodb.helperImages.mongosh.repository }}:{{ .Values.mongodb.helperImages.mongosh.tag }}"
         imagePullPolicy: {{ .Values.mongodb.helperImages.mongosh.pullPolicy }}
+{{- end }}
         command:
           - sh
           - -c
@@ -95,7 +118,11 @@ spec:
 
             until mongosh "$MONGODB_URI" \
               --authenticationMechanism SCRAM-SHA-256 \
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+              --username "$MONGODB_ROOT_USER" --password "$MONGODB_ROOT_PASSWORD" --authenticationDatabase admin \
+{{- else }}
               --username root --password "$MONGODB_ROOT_PASSWORD" --authenticationDatabase admin \
+{{- end }}
               --tls \
               --tlsCAFile /certs/ca.crt \
               --tlsCertificateKeyFile /tmp/tls.pem \
@@ -178,11 +205,29 @@ spec:
             echo "mongodb user creation completed."
             echo "=============================="
         env:
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+          - name: MONGODB_CLUSTER_MONITOR_USER
+            valueFrom:
+              secretKeyRef:
+                name: internal-nvsentinel-mongodb-users
+                key: MONGODB_CLUSTER_MONITOR_USER
+          - name: MONGODB_ROOT_USER
+            valueFrom:
+              secretKeyRef:
+                name: internal-nvsentinel-mongodb-users
+                key: MONGODB_DATABASE_ADMIN_USER
+          - name: MONGODB_ROOT_PASSWORD
+            valueFrom:
+              secretKeyRef:
+                name: internal-nvsentinel-mongodb-users
+                key: MONGODB_DATABASE_ADMIN_PASSWORD
+{{- else }}
           - name: MONGODB_ROOT_PASSWORD
             valueFrom:
               secretKeyRef:
                 name: mongodb
                 key: mongodb-root-password
+{{- end }}
           - name: MONGODB_APPLICATION_USER_DN
             value: "CN=mongo-user-client,OU=DGXC,O=Nvidia,L=SantaClara,ST=California,C=US"
           - name: MONGODB_DGXCOPS_USER_DN
@@ -205,6 +250,16 @@ spec:
                 path: tls.key
               - key: ca.crt
                 path: ca.crt
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+      {{- with .Values.psmdb.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.psmdb.jobTolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- else }}
       {{- with .Values.mongodb.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -213,4 +268,6 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}
       restartPolicy: OnFailure
+{{- end }}

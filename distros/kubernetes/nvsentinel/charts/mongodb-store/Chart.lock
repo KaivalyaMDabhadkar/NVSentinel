@@ -2,5 +2,11 @@ dependencies:
 - name: mongodb
   repository: ""
   version: 16.2.2
-digest: sha256:7bc0222d2ca507e5b3c38829401a888800575ea76a693b42b4ab8edb2cd0ff37
-generated: "2025-09-19T18:55:22.424746878+05:30"
+- name: psmdb-operator
+  repository: https://percona.github.io/percona-helm-charts
+  version: 1.21.1
+- name: psmdb-db
+  repository: https://percona.github.io/percona-helm-charts
+  version: 1.21.1
+digest: sha256:43954132079671769fc43fc397e624ab46a8672059bc818822c08b1b474432b8
+generated: "2025-11-13T15:43:07.889174963+05:30"

@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{- if and .Values.global.mongodbStore.enabled (not (index .Values "mongodb-store" "usePerconaOperator")) }}
 {{ if (eq .Values.mode "manual") }}
 {{- range $i := until (.Values.mongodb.replicaCount | default 3 | int) }}
 # PV for MongoDB replica {{ $i }}
@@ -34,3 +35,5 @@ spec:
 ---
 {{- end }}
 {{ end }}
+{{- end }}
+

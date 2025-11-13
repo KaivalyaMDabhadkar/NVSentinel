@@ -12,7 +12,98 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# MongoDB Server Certificates
+{{- if .Values.global.mongodbStore.enabled }}
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- $existingCASecret := lookup "v1" "Secret" .Release.Namespace (printf "%s-mongodb-ca-cert" .Release.Name) }}
+{{- if not $existingCASecret }}
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ .Release.Name }}-mongodb-ca-bootstrap
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ .Release.Name }}-mongodb-ca-cert
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  isCA: true
+  commonName: "{{ .Release.Name }}-mongodb-ca"
+  secretName: {{ .Release.Name }}-mongodb-ca-cert
+  duration: 87600h  # 10 years
+  renewBefore: 720h  # 30 days before expiration
+  privateKey:
+    algorithm: RSA
+    size: 4096
+  issuerRef:
+    name: {{ .Release.Name }}-mongodb-ca-bootstrap
+    kind: Issuer
+    group: cert-manager.io
+{{- end }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mongo-app-client-cert
+  namespace: {{ $.Release.Namespace }}
+spec:
+  secretName: mongo-app-client-cert-secret
+  duration: 8760h
+  renewBefore: 360h
+  commonName: mongo-user-client
+  subject:
+    organizations:
+      - Nvidia
+    organizationalUnits:
+      - DGXC
+    localities:
+      - SantaClara
+    provinces:
+      - California
+    countries:
+      - US
+  # References operator-managed issuer (uses our persistent CA)
+  issuerRef:
+    name: {{ $.Release.Name }}-mongodb-persistent-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: mongo-dgxcops-client-cert
+  namespace: {{ $.Release.Namespace }}
+spec:
+  secretName: mongo-dgxcops-client-cert-secret
+  duration: 8760h
+  renewBefore: 360h
+  commonName: mongo-dgxcops-client
+  subject:
+    organizations:
+      - Nvidia
+    organizationalUnits:
+      - DGXC
+    localities:
+      - SantaClara
+    provinces:
+      - California
+    countries:
+      - US
+  # References operator-managed issuer (uses our persistent CA)
+  issuerRef:
+    name: {{ $.Release.Name }}-mongodb-persistent-issuer
+    kind: Issuer
+    group: cert-manager.io
+{{- else }}
+
 {{- $replicaCount := int .Values.mongodb.replicaCount }}
 {{- range $i := until $replicaCount }}
 apiVersion: cert-manager.io/v1
@@ -34,7 +125,6 @@ spec:
 ---
 {{- end }}
 
-# MongoDB Client Certificate
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -60,7 +150,6 @@ spec:
     name: mongo-ca-issuer
     kind: Issuer
 ---
-# MongoDB DGXCOPS Client Certificate
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -120,3 +209,5 @@ spec:
   issuerRef:
     name: selfsigned-ca-issuer
     kind: Issuer
+{{- end }}
+{{- end }}

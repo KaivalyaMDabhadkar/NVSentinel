@@ -12,27 +12,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{- if .Values.global.mongodbStore.enabled }}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: mongodb-networkpolicy
 spec:
-  # Select the MongoDB pods in nvsentinel
   podSelector:
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+    matchLabels:
+      app.kubernetes.io/name: percona-server-mongodb
+{{- else }}
     matchLabels:
       app.kubernetes.io/component: mongodb
       app.kubernetes.io/instance: {{ .Release.Namespace }}
       app.kubernetes.io/name: mongodb
-
+{{- end }}
   policyTypes:
     - Ingress
-
   ingress:
     - ports:
         - port: 27017
           protocol: TCP
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+        - port: 9216
+          protocol: TCP
+{{- end }}
       from:
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: {{ .Release.Namespace }}
-
+{{- end }}

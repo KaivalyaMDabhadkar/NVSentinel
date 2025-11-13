@@ -12,12 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+{{- if .Values.global.mongodbStore.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: mongodb-config
 data:
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+  MONGODB_URI: {{ printf "mongodb://%s-mongodb-rs0.%s.svc.cluster.local:27017/?replicaSet=rs0&tls=true" .Release.Name .Release.Namespace }}
+{{- else }}
   MONGODB_URI: {{ printf "mongodb://mongodb-headless.%s.svc.cluster.local:27017/?replicaSet=rs0&tls=true" .Release.Namespace }}
+{{- end }}
   MONGODB_DATABASE_NAME: "HealthEventsDatabase"
   MONGODB_COLLECTION_NAME: "HealthEvents"
   MONGODB_MAINTENANCE_EVENT_COLLECTION_NAME: "MaintenanceEvents"
@@ -30,3 +35,4 @@ data:
   MONGODB_CHANGE_STREAM_RETRY_INTERVAL_SECONDS: "5"
   UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS: "25"
   MONGODB_COLLECTION_EXPIRY_SECONDS: "2592000"
+{{- end }}
