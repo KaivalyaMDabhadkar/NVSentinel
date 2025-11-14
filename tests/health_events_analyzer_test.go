@@ -37,6 +37,10 @@ func TestMultipleRemediationsCompleted(t *testing.T) {
 		var newCtx context.Context
 		newCtx, testCtx = helpers.SetupHealthEventsAnalyzerTest(ctx, t, c, "data/health-events-analyzer-config.yaml", "health-events-analyzer-test")
 
+		t.Log("Waiting 90 seconds for the MultipleRemediations rule time window to complete")
+		time.Sleep(90 * time.Second)
+
+		t.Log("Triggering multiple remediations cycle")
 		client, err := c.NewClient()
 		require.NoError(t, err)
 		helpers.TriggerMultipleRemediationsCycle(ctx, t, client, testCtx.NodeName)

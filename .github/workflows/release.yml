@@ -85,7 +85,7 @@ jobs:
       - name: Install helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
         with:
-          version: 'latest'
+          version: 'v3.14.4'
 
       - name: Configure Helm for GitHub Packages
         run: |

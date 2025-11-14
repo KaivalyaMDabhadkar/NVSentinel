@@ -7,7 +7,7 @@ data:
   config.toml: |
     [[rules]]
     name = "MultipleRemediations"
-    description = "Detect if multiple remediations are performed within 3 minutes on a node"
+    description = "Detect if multiple remediations are performed within 1.5 minutes on a node"
     recommended_action = "CONTACT_SUPPORT"
 
     stage = [
@@ -17,7 +17,7 @@ data:
           "$expr": {
             "$gte": [
               "$healthevent.generatedtimestamp.seconds",
-              {"$subtract": [{"$divide": [{"$toLong": "$$NOW"}, 1000]}, 180]}
+              {"$subtract": [{"$divide": [{"$toLong": "$$NOW"}, 1000]}, 90]}
             ]
           }
         }
@@ -38,7 +38,7 @@ data:
 
     [[rules]]
     name = "RepeatedXidError"
-    description = "Detect occurrence of fatal XIDs 2 times within 3 minutes where the burst window is 10 seconds and sticky XIDs window is 20seconds"
+    description = "Detect occurrence of fatal XIDs 2 times within 2 minutes where the burst window is 10 seconds and sticky XIDs window is 20seconds"
     recommended_action = "CONTACT_SUPPORT"
     stage = [
       '''
@@ -47,7 +47,7 @@ data:
           "$expr": {
             "$gte": [
               "$healthevent.generatedtimestamp.seconds",
-              {"$subtract": [{"$divide": [{"$toLong": "$$NOW"}, 1000]}, 180]}
+              {"$subtract": [{"$divide": [{"$toLong": "$$NOW"}, 1000]}, 120]}
             ]
           }
         }

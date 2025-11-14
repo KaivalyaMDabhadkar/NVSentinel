@@ -71,6 +71,8 @@ platformConnector:
 
   podAnnotations: {}
 
+  tolerations: []
+
   k8sConnector:
     enabled: true
     qps: 5.0
@@ -105,3 +107,21 @@ platformConnector:
       - "cloud.google.com/gce-topology-subblock"
 
 socketPath: "/var/run/nvsentinel.sock"
+
+# Node condition cleanup hook configuration
+nodeConditionCleanup:
+  enabled: false
+  deprecatedConditions: []
+  # - "OldConditionType1"
+  # - "OldConditionType2"
+  image:
+    repository: docker.io/bitnamilegacy/kubectl
+    tag: "1.30.6"
+    pullPolicy: IfNotPresent
+  resources:
+    limits:
+      cpu: 100m
+      memory: 128Mi
+    requests:
+      cpu: 50m
+      memory: 64Mi
