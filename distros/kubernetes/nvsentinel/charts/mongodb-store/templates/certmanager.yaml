@@ -14,40 +14,6 @@
 
 {{- if .Values.global.mongodbStore.enabled }}
 {{- if index .Values "mongodb-store" "usePerconaOperator" }}
-{{- $existingCASecret := lookup "v1" "Secret" .Release.Namespace (printf "%s-mongodb-ca-cert" .Release.Name) }}
-{{- if not $existingCASecret }}
----
-apiVersion: cert-manager.io/v1
-kind: Issuer
-metadata:
-  name: {{ .Release.Name }}-mongodb-ca-bootstrap
-  namespace: {{ .Release.Namespace }}
-  annotations:
-    helm.sh/resource-policy: keep
-spec:
-  selfSigned: {}
----
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: {{ .Release.Name }}-mongodb-ca-cert
-  namespace: {{ .Release.Namespace }}
-  annotations:
-    helm.sh/resource-policy: keep
-spec:
-  isCA: true
-  commonName: "{{ .Release.Name }}-mongodb-ca"
-  secretName: {{ .Release.Name }}-mongodb-ca-cert
-  duration: 87600h  # 10 years
-  renewBefore: 720h  # 30 days before expiration
-  privateKey:
-    algorithm: RSA
-    size: 4096
-  issuerRef:
-    name: {{ .Release.Name }}-mongodb-ca-bootstrap
-    kind: Issuer
-    group: cert-manager.io
-{{- end }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate
@@ -59,6 +25,10 @@ spec:
   duration: 8760h
   renewBefore: 360h
   commonName: mongo-user-client
+  # Add unique URI to force reissuance on each install
+  # Ensures client cert always regenerates with current CA
+  uris:
+    - "spiffe://cluster.local/ns/nvsentinel/mongo-user/{{ randAlphaNum 12 }}"
   subject:
     organizations:
       - Nvidia
@@ -70,12 +40,12 @@ spec:
       - California
     countries:
       - US
-  # References operator-managed issuer (uses our persistent CA)
   issuerRef:
-    name: {{ $.Release.Name }}-mongodb-persistent-issuer
+    name: mongodb-psmdb-issuer
     kind: Issuer
     group: cert-manager.io
 ---
+# Client Certificate for DGXCOps Users
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -86,6 +56,8 @@ spec:
   duration: 8760h
   renewBefore: 360h
   commonName: mongo-dgxcops-client
+  uris:
+    - "spiffe://cluster.local/ns/nvsentinel/mongo-dgxcops/{{ randAlphaNum 12 }}"
   subject:
     organizations:
       - Nvidia
@@ -97,9 +69,8 @@ spec:
       - California
     countries:
       - US
-  # References operator-managed issuer (uses our persistent CA)
   issuerRef:
-    name: {{ $.Release.Name }}-mongodb-persistent-issuer
+    name: mongodb-psmdb-issuer
     kind: Issuer
     group: cert-manager.io
 {{- else }}

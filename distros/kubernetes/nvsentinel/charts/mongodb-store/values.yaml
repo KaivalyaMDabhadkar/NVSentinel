@@ -29,8 +29,8 @@ mongodb-store:
   # IMPORTANT: These flags control which chart dependencies are loaded.
   # Both must be set correctly to avoid loading unnecessary charts.
   
-  useBitnami: false          # Load Bitnami mongodb chart (default for backward compatibility)
-  usePerconaOperator: true # Load Percona psmdb-operator and psmdb-db charts
+  useBitnami: true
+  usePerconaOperator: false
 
 # =============================================================================
 # Bitnami MongoDB Configuration (used when usePerconaOperator=false)
@@ -241,26 +241,28 @@ psmdb-operator:
 
 psmdb-db:
   nameOverride: mongodb
+  fullnameOverride: mongodb
   replsets:
     rs0:
       name: rs0
       size: 3
       configuration: |
-        net:
-          tls:
-            allowConnectionsWithoutCertificates: true
         setParameter:
           authenticationMechanisms: "MONGODB-X509,SCRAM-SHA-256,SCRAM-SHA-1"
-      readinessProbe:
-        initialDelaySeconds: 60
-        timeoutSeconds: 10
+      replsetOverrides:
+        mongodb-rs0-0:
+          priority: 3  # Preferred primary
+        mongodb-rs0-1:
+          priority: 1
+        mongodb-rs0-2:
+          priority: 1
       resources:
         requests:
-          cpu: "200m"
-          memory: "512Mi"
+          cpu: "1"
+          memory: "1.5Gi"
         limits:
-          cpu: "500m"
-          memory: "1Gi"
+          cpu: "1.5"
+          memory: "2Gi"
       volumeSpec:
         pvc:
           resources:
@@ -290,12 +292,12 @@ psmdb-db:
             - name: MONGODB_USER
               valueFrom:
                 secretKeyRef:
-                  name: internal-nvsentinel-mongodb-users
+                  name: internal-mongodb-users
                   key: MONGODB_CLUSTER_MONITOR_USER
             - name: MONGODB_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: internal-nvsentinel-mongodb-users
+                  name: internal-mongodb-users
                   key: MONGODB_CLUSTER_MONITOR_PASSWORD
             - name: MONGODB_URI
               value: "mongodb://localhost:27017/admin?directConnection=true&tls=true&tlsInsecure=true&authMechanism=SCRAM-SHA-256"
@@ -306,13 +308,15 @@ psmdb-db:
   
   sharding:
     enabled: false
+    
+  logcollector:
+    enabled: false
   
   tls:
     mode: requireTLS
-    issuerConf:
-      name: nvsentinel-mongodb-persistent-issuer
-      kind: Issuer
-      group: cert-manager.io
+
+  secrets:
+    keyFile: mongodb-keyfile
   
   backup:
     enabled: false

@@ -65,8 +65,8 @@ spec:
         - -c
         - |
           echo "Waiting for MongoDB operator-generated users secret..."
-          while ! kubectl get secret internal-nvsentinel-mongodb-users -n {{ .Release.Namespace }} >/dev/null 2>&1; do
-            echo "Secret internal-nvsentinel-mongodb-users not found yet, waiting..."
+          while ! kubectl get secret internal-mongodb-users -n {{ .Release.Namespace }} >/dev/null 2>&1; do
+            echo "Secret internal-mongodb-users not found yet, waiting..."
             sleep 5
           done
           echo "MongoDB users secret is available, proceeding..."
@@ -209,17 +209,17 @@ spec:
           - name: MONGODB_CLUSTER_MONITOR_USER
             valueFrom:
               secretKeyRef:
-                name: internal-nvsentinel-mongodb-users
+                name: internal-mongodb-users
                 key: MONGODB_CLUSTER_MONITOR_USER
           - name: MONGODB_ROOT_USER
             valueFrom:
               secretKeyRef:
-                name: internal-nvsentinel-mongodb-users
+                name: internal-mongodb-users
                 key: MONGODB_DATABASE_ADMIN_USER
           - name: MONGODB_ROOT_PASSWORD
             valueFrom:
               secretKeyRef:
-                name: internal-nvsentinel-mongodb-users
+                name: internal-mongodb-users
                 key: MONGODB_DATABASE_ADMIN_PASSWORD
 {{- else }}
           - name: MONGODB_ROOT_PASSWORD

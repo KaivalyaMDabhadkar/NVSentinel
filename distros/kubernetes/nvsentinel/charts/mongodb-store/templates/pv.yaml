@@ -12,10 +12,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if and .Values.global.mongodbStore.enabled (not (index .Values "mongodb-store" "usePerconaOperator")) }}
+{{- if .Values.global.mongodbStore.enabled }}
 {{ if (eq .Values.mode "manual") }}
+{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- /* Percona PVs - one per replica */ -}}
+{{- $replicaCount := index .Values "psmdb-db" "replsets" "rs0" "size" | default 3 | int }}
+{{- range $i := until $replicaCount }}
+---
+# PV for Percona MongoDB replica {{ $i }}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: mongodb-rs0-pv-{{ $i }}
+  labels:
+    type: local
+spec:
+  capacity:
+    storage: "8Gi"
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: manual-mongodb
+  hostPath:
+    path: /data/mongodb-rs0-{{ $i }}
+    type: DirectoryOrCreate
+{{- end }}
+{{- else }}
 {{- range $i := until (.Values.mongodb.replicaCount | default 3 | int) }}
-# PV for MongoDB replica {{ $i }}
+---
+# PV for Bitnami MongoDB replica {{ $i }}
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -32,7 +57,7 @@ spec:
   hostPath:
     path: /data/mongodb-{{ $i }}
     type: DirectoryOrCreate
----
+{{- end }}
 {{- end }}
 {{ end }}
 {{- end }}

@@ -20,17 +20,14 @@ version: 0.1.0
 appVersion: "1.16.0"
 
 dependencies:
-  # Bitnami MongoDB chart (default, backward compatible)
   - name: mongodb
     version: "16.2.2"
     repository: ""
     condition: mongodb-store.useBitnami
-  # Percona MongoDB Operator (only when usePerconaOperator=true)
   - name: psmdb-operator
     version: "1.21.1"
     repository: "https://percona.github.io/percona-helm-charts"
     condition: mongodb-store.usePerconaOperator
-  # Percona MongoDB Database (only when usePerconaOperator=true)
   - name: psmdb-db
     version: "1.21.1"
     repository: "https://percona.github.io/percona-helm-charts"
