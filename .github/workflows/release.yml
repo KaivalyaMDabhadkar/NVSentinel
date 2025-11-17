@@ -82,10 +82,16 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
 
+      - name: Load Helm version from .versions.yaml
+        id: helm-version
+        run: |
+          HELM_VERSION=$(yq eval '.testing_tools.helm' .versions.yaml)
+          echo "helm_version=${HELM_VERSION}" >> $GITHUB_OUTPUT
+
       - name: Install helm
         uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4  # v4.3.1
         with:
-          version: 'v3.14.4'
+          version: ${{ steps.helm-version.outputs.helm_version }}
 
       - name: Configure Helm for GitHub Packages
         run: |
