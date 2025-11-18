@@ -12,9 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ include "kubernetes-object-monitor.fullname" . }}
-  labels:
-    {{- include "kubernetes-object-monitor.labels" . | nindent 4 }}
+
+# Required terraform and GCP provider versions
+
+terraform {
+  required_version = ">= 1.13"
+
+  required_providers {
+    google = {
+      source  = "hashicorp/google"
+      version = "~> 7.9"
+    }
+  }
+}
+
+provider "google" {
+  project = var.project_id
+}

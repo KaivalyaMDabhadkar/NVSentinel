@@ -13,8 +13,16 @@
 # limitations under the License.
 
 apiVersion: v1
-kind: ServiceAccount
+kind: ResourceQuota
 metadata:
-  name: {{ include "kubernetes-object-monitor.fullname" . }}
-  labels:
-    {{- include "kubernetes-object-monitor.labels" . | nindent 4 }}
+  name: gpu-operator-quota
+spec:
+  hard:
+    pods: 100
+  scopeSelector:
+    matchExpressions:
+    - operator: In
+      scopeName: PriorityClass
+      values:
+        - system-node-critical
+        - system-cluster-critical

@@ -12,9 +12,36 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ include "kubernetes-object-monitor.fullname" . }}
-  labels:
-    {{- include "kubernetes-object-monitor.labels" . | nindent 4 }}
+prometheus:
+  enabled: true
+  prometheusSpec:
+    retention: 1h
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+
+alertmanager:
+  enabled: false
+
+grafana:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: false
+
+nodeExporter:
+  enabled: false
+
+prometheusOperator:
+  enabled: true
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

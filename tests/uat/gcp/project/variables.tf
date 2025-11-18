@@ -12,9 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: {{ include "kubernetes-object-monitor.fullname" . }}
-  labels:
-    {{- include "kubernetes-object-monitor.labels" . | nindent 4 }}
+# List of variables which can be provided ar runtime to override the specified defaults 
+variable "project_id" {
+  description = "GCP Project ID"
+  type        = string
+  default     = "nv-dgxck8s-20250306"
+}
+
+variable "git_repo" {
+  description = "GitHub Repo"
+  type        = string
+  default     = "NVIDIA/NVSentinel"
+}
