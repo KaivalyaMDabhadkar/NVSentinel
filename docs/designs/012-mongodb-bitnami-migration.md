@@ -143,7 +143,9 @@ Instead of directly templating a `StatefulSet`, we now create a high-level `Perc
 
 **Percona Approach (Current):**
 - The Percona Operator **auto-generates server certificates** internally when `tls.mode: requireTLS` is set, eliminating the need for per-replica certificate templates
-- We continue using cert-manager to generate **client certificates** (`mongo-app-client-cert`, `mongo-dgxcops-client-cert`) that reference our custom `mongodb-psmdb-issuer`
+- We continue using cert-manager to generate a **client certificate** (`mongo-app-client-cert`) that references our custom `mongodb-psmdb-issuer`
+- **CA Validation on Reinstall:** A Job init container validates that the client certificate's CA matches the current issuer CA after `helm uninstall`/`helm install` cycles. If mismatched (indicating a new CA was generated), the old client certificate secret is deleted, triggering cert-manager to reissue with the current CA. This avoids Argo CD drift while ensuring certificates stay in sync with the CA.
+- **Argo CD Compatibility:** Secrets (keyfile, encryption key) are created by Job init containers instead of Helm templates.
 - This hybrid approach simplifies our Helm templates by removing the complex per-replica server certificate loop while maintaining cert-manager integration for client authentication
 
 **Simplification Achieved:**
@@ -182,8 +184,13 @@ The removal of the per-replica server certificate generation (the `{{- range $i 
    - **Consideration:** We're now dependent on Percona's operator for database management. If we want to switch to a different operator in the future, that would require another migration.
    - **Mitigation:** Percona Operator is open source (Apache 2.0), actively maintained, and has a strong community.
 
+2. **Job-Based Secret Management:**
+   - **Consideration:** Using Job init containers to create secrets (keyfile, encryption key) and validate CAs means these operations happen at Job execution time rather than during `helm template` rendering. This adds a runtime dependency on the Job's successful execution before MongoDB can start.
+   - **Mitigation:** The Job has proper error handling, RBAC permissions, and idempotent logic (reuses existing secrets).
+
 ## References
 
+### Percona Operator
 - Percona Operator for MongoDB documentation (features, configuration, TLS, backups, sidecars): https://docs.percona.com/percona-operator-for-mongodb/index.html
 - Percona Operator for MongoDB release notes (active maintenance cadence): https://docs.percona.com/percona-operator-for-mongodb/RN/index.html
 - Percona Server for MongoDB 8.0 release notes (source-available build, compatibility): https://docs.percona.com/percona-server-for-mongodb/8.0/release_notes/8.0.12-4.html

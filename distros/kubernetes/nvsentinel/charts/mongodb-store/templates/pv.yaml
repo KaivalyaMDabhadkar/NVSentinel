@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if .Values.global.mongodbStore.enabled }}
 {{ if (eq .Values.mode "manual") }}
 {{- if index .Values "mongodb-store" "usePerconaOperator" }}
 {{- /* Percona PVs - one per replica */ -}}
@@ -60,5 +59,4 @@ spec:
 {{- end }}
 {{- end }}
 {{ end }}
-{{- end }}
 

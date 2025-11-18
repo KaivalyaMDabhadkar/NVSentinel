@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if .Values.global.mongodbStore.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -35,4 +34,3 @@ data:
   MONGODB_CHANGE_STREAM_RETRY_INTERVAL_SECONDS: "5"
   UNPROCESSED_EVENTS_METRIC_UPDATE_INTERVAL_SECONDS: "25"
   MONGODB_COLLECTION_EXPIRY_SECONDS: "2592000"
-{{- end }}

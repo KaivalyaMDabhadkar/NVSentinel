@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if .Values.global.mongodbStore.enabled }}
 {{- if index .Values "mongodb-store" "usePerconaOperator" }}
 ---
 apiVersion: cert-manager.io/v1
@@ -25,39 +24,6 @@ spec:
   duration: 8760h
   renewBefore: 360h
   commonName: mongo-user-client
-  # Add unique URI to force reissuance on each install
-  # Ensures client cert always regenerates with current CA
-  uris:
-    - "spiffe://cluster.local/ns/nvsentinel/mongo-user/{{ randAlphaNum 12 }}"
-  subject:
-    organizations:
-      - Nvidia
-    organizationalUnits:
-      - DGXC
-    localities:
-      - SantaClara
-    provinces:
-      - California
-    countries:
-      - US
-  issuerRef:
-    name: mongodb-psmdb-issuer
-    kind: Issuer
-    group: cert-manager.io
----
-# Client Certificate for DGXCOps Users
-apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: mongo-dgxcops-client-cert
-  namespace: {{ $.Release.Namespace }}
-spec:
-  secretName: mongo-dgxcops-client-cert-secret
-  duration: 8760h
-  renewBefore: 360h
-  commonName: mongo-dgxcops-client
-  uris:
-    - "spiffe://cluster.local/ns/nvsentinel/mongo-dgxcops/{{ randAlphaNum 12 }}"
   subject:
     organizations:
       - Nvidia
@@ -122,31 +88,6 @@ spec:
     kind: Issuer
 ---
 apiVersion: cert-manager.io/v1
-kind: Certificate
-metadata:
-  name: mongo-dgxcops-client-cert
-  namespace: {{ $.Release.Namespace }}
-spec:
-  secretName: mongo-dgxcops-client-cert-secret
-  duration: 8760h
-  renewBefore: 360h
-  commonName: mongo-dgxcops-client
-  subject:
-    organizations:
-      - Nvidia
-    organizationalUnits:
-      - DGXC
-    localities:
-      - SantaClara
-    provinces:
-      - California
-    countries:
-      - US
-  issuerRef:
-    name: mongo-ca-issuer
-    kind: Issuer
----
-apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:
   name: mongo-ca-issuer
@@ -180,5 +121,4 @@ spec:
   issuerRef:
     name: selfsigned-ca-issuer
     kind: Issuer
-{{- end }}
 {{- end }}
