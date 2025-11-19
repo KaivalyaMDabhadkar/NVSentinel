@@ -71,8 +71,8 @@ global:
     enabled: true
 
 mongodb-store:
-  useBitnami: true
-  usePerconaOperator: false
+  useBitnami: false
+  usePerconaOperator: true
   
   job:
     nodeSelector:

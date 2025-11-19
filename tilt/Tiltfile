@@ -170,6 +170,12 @@ k8s_resource(
     resource_deps=['wait-for-janitor-cert'],
 )
 
+if use_percona:
+    k8s_resource(
+        'nvsentinel-psmdb-operator',
+        resource_deps=['wait-for-cert-manager-crds'],
+    )
+
 k8s_resource(
     'create-mongodb-database',
     resource_deps=['wait-for-cert-manager-crds', 'nvsentinel-psmdb-operator'] if use_percona else ['wait-for-cert-manager-crds'],

@@ -3,10 +3,10 @@ dependencies:
   repository: ""
   version: 16.2.2
 - name: psmdb-operator
-  repository: https://percona.github.io/percona-helm-charts
+  repository: ""
   version: 1.21.1
 - name: psmdb-db
-  repository: https://percona.github.io/percona-helm-charts
+  repository: ""
   version: 1.21.1
-digest: sha256:43954132079671769fc43fc397e624ab46a8672059bc818822c08b1b474432b8
-generated: "2025-11-13T15:43:07.889174963+05:30"
+digest: sha256:6c3f19302e146b500b13919d0b3b89a0f37e069ce719e8daadfda1a82302418d
+generated: "2025-11-19T14:50:21.20416968+05:30"

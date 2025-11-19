@@ -26,9 +26,9 @@ dependencies:
     condition: mongodb-store.useBitnami
   - name: psmdb-operator
     version: "1.21.1"
-    repository: "https://percona.github.io/percona-helm-charts"
+    repository: ""
     condition: mongodb-store.usePerconaOperator
   - name: psmdb-db
     version: "1.21.1"
-    repository: "https://percona.github.io/percona-helm-charts"
+    repository: ""
     condition: mongodb-store.usePerconaOperator
