@@ -706,7 +706,11 @@ tilt-ci: ## Run Tilt in CI mode (no UI, waits for all resources)
 			echo "StatefulSet $$name rolled out successfully"; \
 		else \
 			echo "Rollout status not available, checking ready replicas..."; \
-			desired=$$(kubectl get statefulset $$name -n $$ns -o jsonpath='{.spec.replicas}'); \
+			desired=$$(kubectl get statefulset $$name -n $$ns -o jsonpath='{.spec.replicas}' 2>/dev/null); \
+			if [ -z "$$desired" ]; then \
+				echo "Failed to get replica count for statefulset $$name"; \
+				exit 1; \
+			fi; \
 			timeout=300; elapsed=0; \
 			while [ $$elapsed -lt $$timeout ]; do \
 				ready=$$(kubectl get statefulset $$name -n $$ns -o jsonpath='{.status.readyReplicas}' 2>/dev/null || echo "0"); \
