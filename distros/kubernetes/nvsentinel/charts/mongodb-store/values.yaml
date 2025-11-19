@@ -29,8 +29,8 @@ mongodb-store:
   # IMPORTANT: These flags control which chart dependencies are loaded.
   # Both must be set correctly to avoid loading unnecessary charts.
   
-  useBitnami: false
-  usePerconaOperator: true
+  useBitnami: true
+  usePerconaOperator: false
   
   # Common Job configuration (applies to both Bitnami and Percona)
   # If not set, falls back to mongodb.jobTolerations and mongodb.nodeSelector for backward compatibility
