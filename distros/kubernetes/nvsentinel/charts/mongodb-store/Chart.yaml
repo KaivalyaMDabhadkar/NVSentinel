@@ -23,12 +23,12 @@ dependencies:
   - name: mongodb
     version: "16.2.2"
     repository: ""
-    condition: mongodb-store.useBitnami
+    condition: useBitnami
   - name: psmdb-operator
     version: "1.21.1"
     repository: ""
-    condition: mongodb-store.usePerconaOperator
+    condition: usePerconaOperator
   - name: psmdb-db
     version: "1.21.1"
     repository: ""
-    condition: mongodb-store.usePerconaOperator
+    condition: usePerconaOperator

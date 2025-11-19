@@ -8,5 +8,5 @@ dependencies:
 - name: psmdb-db
   repository: ""
   version: 1.21.1
-digest: sha256:6c3f19302e146b500b13919d0b3b89a0f37e069ce719e8daadfda1a82302418d
-generated: "2025-11-19T14:50:21.20416968+05:30"
+digest: sha256:52544f60c2e88079cc18da78164440e042103e5adc065668a648864e2ad938b9
+generated: "2025-11-19T15:26:21.985280107+05:30"

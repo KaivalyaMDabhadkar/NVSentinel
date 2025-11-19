@@ -17,7 +17,7 @@ kind: ConfigMap
 metadata:
   name: mongodb-config
 data:
-{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- if .Values.usePerconaOperator }}
   MONGODB_URI: {{ printf "mongodb://mongodb-rs0.%s.svc.cluster.local:27017/?replicaSet=rs0&tls=true" .Release.Namespace }}
 {{- else }}
   MONGODB_URI: {{ printf "mongodb://mongodb-headless.%s.svc.cluster.local:27017/?replicaSet=rs0&tls=true" .Release.Namespace }}

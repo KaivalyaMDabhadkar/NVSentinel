@@ -1,4 +1,4 @@
-{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- if .Values.usePerconaOperator }}
 apiVersion: v1
 kind: Service
 metadata:

@@ -18,7 +18,7 @@ metadata:
   name: mongodb-networkpolicy
 spec:
   podSelector:
-{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- if .Values.usePerconaOperator }}
     matchLabels:
       app.kubernetes.io/name: percona-server-mongodb
 {{- else }}
@@ -33,7 +33,7 @@ spec:
     - ports:
         - port: 27017
           protocol: TCP
-{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- if .Values.usePerconaOperator }}
         - port: 9216
           protocol: TCP
 {{- end }}

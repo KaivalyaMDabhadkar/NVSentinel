@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- if .Values.usePerconaOperator }}
 ---
 apiVersion: cert-manager.io/v1
 kind: Certificate

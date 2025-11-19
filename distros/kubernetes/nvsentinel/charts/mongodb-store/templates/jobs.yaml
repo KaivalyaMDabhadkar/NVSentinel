@@ -44,7 +44,7 @@ subjects:
 {{- $issuerSecret := "mongo-root-ca-secret" }}
 {{- $passwordSecretName := "mongodb" }}
 {{- $passwordSecretKey := "mongodb-root-password" }}
-{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- if .Values.usePerconaOperator }}
   {{- $helperImages = .Values.psmdb.helperImages }}
   {{- $rootUsername = "$MONGODB_ROOT_USER" }}
   {{- $issuerSecret = "mongodb-ca-cert" }}
@@ -68,7 +68,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       initContainers:
-{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- if .Values.usePerconaOperator }}
       # Percona-specific init containers
       # Create MongoDB keyfile and encryption key secrets if they don't exist
       - name: create-mongodb-secrets
@@ -332,7 +332,7 @@ spec:
             echo "mongodb user creation completed."
             echo "=============================="
         env:
-{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- if .Values.usePerconaOperator }}
           - name: MONGODB_CLUSTER_MONITOR_USER
             valueFrom:
               secretKeyRef:

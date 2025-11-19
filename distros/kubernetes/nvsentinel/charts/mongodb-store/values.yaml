@@ -12,31 +12,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-mongodb-store:
-  # Feature flags to switch between Bitnami MongoDB and Percona MongoDB Operator
-  # Due to Helm limitations, both flags must be explicitly set when switching modes
-  # 
-  # Default (Bitnami MongoDB - backward compatible):
-  #   global.mongodbStore.enabled: true
-  #   mongodb-store.useBitnami: true           # Default
-  #   mongodb-store.usePerconaOperator: false  # Default
-  # 
-  # Percona MongoDB Operator:
-  #   global.mongodbStore.enabled: true
-  #   mongodb-store.useBitnami: false          # Must explicitly disable
-  #   mongodb-store.usePerconaOperator: true   # Must explicitly enable
-  #
-  # IMPORTANT: These flags control which chart dependencies are loaded.
-  # Both must be set correctly to avoid loading unnecessary charts.
-  
-  useBitnami: true
-  usePerconaOperator: false
-  
-  # Common Job configuration (applies to both Bitnami and Percona)
-  # If not set, falls back to mongodb.jobTolerations and mongodb.nodeSelector for backward compatibility
-  job:
-    nodeSelector: {}
-    tolerations: []
+# Feature flags to switch between Bitnami MongoDB and Percona MongoDB Operator
+# Due to Helm limitations, both flags must be explicitly set when switching modes
+# 
+# Default (Bitnami MongoDB - backward compatible):
+#   global.mongodbStore.enabled: true
+#   mongodb-store.useBitnami: true           # Default
+#   mongodb-store.usePerconaOperator: false  # Default
+# 
+# Percona MongoDB Operator:
+#   global.mongodbStore.enabled: true
+#   mongodb-store.useBitnami: false          # Must explicitly disable
+#   mongodb-store.usePerconaOperator: true   # Must explicitly enable
+#
+# IMPORTANT: These flags control which chart dependencies are loaded.
+# Both must be set correctly to avoid loading unnecessary charts.
+
+useBitnami: true
+usePerconaOperator: false
+
+# Common Job configuration (applies to both Bitnami and Percona)
+# If not set, falls back to mongodb.jobTolerations and mongodb.nodeSelector for backward compatibility
+job:
+  nodeSelector: {}
+  tolerations: []
 
 # =============================================================================
 # Bitnami MongoDB Configuration (used when usePerconaOperator=false)

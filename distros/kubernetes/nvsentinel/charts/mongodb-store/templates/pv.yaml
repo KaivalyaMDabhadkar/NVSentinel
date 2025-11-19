@@ -13,7 +13,7 @@
 # limitations under the License.
 
 {{ if (eq .Values.mode "manual") }}
-{{- if index .Values "mongodb-store" "usePerconaOperator" }}
+{{- if .Values.usePerconaOperator }}
 {{- /* Percona PVs - one per replica */ -}}
 {{- $replicaCount := index .Values "psmdb-db" "replsets" "rs0" "size" | default 3 | int }}
 {{- range $i := until $replicaCount }}
