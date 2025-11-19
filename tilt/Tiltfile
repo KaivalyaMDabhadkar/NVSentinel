@@ -177,10 +177,9 @@ k8s_resource(
 
 if not use_percona:
     k8s_resource(
-        'mongodb-0',
-        new_name='mongodb',
+        'mongodb',
         resource_deps=['wait-for-cert-manager-crds'],
-)
+    )
 
 k8s_resource(
     new_name='prometheus-resources',
