@@ -17,6 +17,12 @@ image:
   pullPolicy: IfNotPresent
   tag: ""
 
+# Init container image for waiting on metadata file availability
+metadataWaitInitContainerImage:
+  repository: busybox
+  tag: "1.37"
+  pullPolicy: IfNotPresent
+
 podAnnotations: {}
 
 resources: 

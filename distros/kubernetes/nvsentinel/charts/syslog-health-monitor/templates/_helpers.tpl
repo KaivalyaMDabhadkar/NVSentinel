@@ -77,6 +77,34 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- if $root.Values.global.metadataCollector.enabled }}
+      initContainers:
+        - name: wait-for-metadata
+          image: "{{ $root.Values.metadataWaitInitContainerImage.repository }}:{{ $root.Values.metadataWaitInitContainerImage.tag }}"
+          imagePullPolicy: {{ $root.Values.metadataWaitInitContainerImage.pullPolicy }}
+          command:
+            - sh
+            - -c
+            - |
+              echo "Waiting for GPU metadata file..."
+              TIMEOUT=600
+              ELAPSED=0
+              while [ ! -f {{ $root.Values.global.metadataPath }} ] && [ $ELAPSED -lt $TIMEOUT ]; do
+                echo "Metadata file not found at {{ $root.Values.global.metadataPath }}, waiting... (${ELAPSED}s/${TIMEOUT}s)"
+                sleep 2
+                ELAPSED=$((ELAPSED + 2))
+              done
+              
+              if [ ! -f {{ $root.Values.global.metadataPath }} ]; then
+                echo "WARNING: Metadata file not found after ${TIMEOUT}s, syslog health monitor will start without metadata enrichment"
+              else
+                echo "Metadata file found after ${ELAPSED}s, syslog health monitor can start"
+              fi
+          volumeMounts:
+            - name: metadata-vol
+              mountPath: /var/lib/nvsentinel
+              readOnly: true
+      {{- end }}
       containers:
         - name: syslog-health-monitor
           securityContext:
