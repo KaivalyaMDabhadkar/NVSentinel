@@ -345,8 +345,7 @@ func WaitForNodeLabelNotEqual(
 		"expected node %s label %s to not equal %s", nodeName, labelKey, notExpectedValue)
 }
 
-func WaitForNodeEvent(ctx context.Context, t *testing.T, c klient.Client, nodeName string,
-	expectedEvent v1.Event) {
+func WaitForNodeEvent(ctx context.Context, t *testing.T, c klient.Client, nodeName string, expectedEvent v1.Event) {
 	require.Eventually(t, func() bool {
 		fieldSelector := resources.WithFieldSelector(fmt.Sprintf("involvedObject.name=%s,involvedObject.kind=Node", nodeName))
 
@@ -360,19 +359,7 @@ func WaitForNodeEvent(ctx context.Context, t *testing.T, c klient.Client, nodeNa
 
 		for _, event := range eventsForNode.Items {
 			if event.Type == expectedEvent.Type && event.Reason == expectedEvent.Reason {
-				if expectedEvent.Message != "" {
-					t.Logf("Matching message for event %v", expectedEvent.Type)
-					t.Logf("Event message: %s", event.Message)
-					t.Logf("Expected message: %s", expectedEvent.Message)
-
-					if event.Message != expectedEvent.Message {
-						t.Logf("Event message does not match expected message: %s != %s", event.Message, expectedEvent.Message)
-						continue
-					}
-				}
-
 				t.Logf("Matching event for node %s: %v", nodeName, event)
-
 				return true
 			}
 		}

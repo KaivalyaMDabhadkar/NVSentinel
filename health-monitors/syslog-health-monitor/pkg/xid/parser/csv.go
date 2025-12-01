@@ -149,19 +149,6 @@ func (p *CSVParser) parseStandardXID(message string) (*Response, error) {
 
 	recommendedAction := p.getRecommendedActionForXid(xidCode, message)
 
-	metadata := make(map[string]string)
-
-	if xidCode == 13 {
-		gpc, tpc, sm := fetchXID13MetadataFromMessage(message)
-		if gpc != "" && tpc != "" && sm != "" {
-			metadata = map[string]string{
-				"GPC": gpc,
-				"TPC": tpc,
-				"SM":  sm,
-			}
-		}
-	}
-
 	xidDetails := XIDDetails{
 		DecodedXIDStr: fmt.Sprintf("%d", xidCode),
 		Driver:        "",
@@ -170,7 +157,6 @@ func (p *CSVParser) parseStandardXID(message string) (*Response, error) {
 		Number:        xidCode,
 		PCIE:          pciAddr,
 		Resolution:    recommendedAction.String(),
-		Metadata:      metadata,
 	}
 
 	return &Response{
@@ -269,15 +255,4 @@ func (p *CSVParser) doesXIDIntrInfoMatchRule(intrinfoBinaryPattern string, intrI
 	}
 
 	return true
-}
-
-func fetchXID13MetadataFromMessage(message string) (string, string, string) {
-	re := regexp.MustCompile(`\(GPC\s+(\d+),\s*TPC\s+(\d+),\s*SM\s+(\d+)\)`)
-	matches := re.FindStringSubmatch(message)
-
-	if len(matches) != 4 {
-		return "", "", ""
-	}
-
-	return matches[1], matches[2], matches[3]
 }

@@ -25,7 +25,6 @@ type HealthEventsAnalyzerRule struct {
 	Description       string   `toml:"description"`
 	Stage             []string `toml:"stage"`
 	RecommendedAction string   `toml:"recommended_action"`
-	Message           string   `toml:"message"`
 }
 
 type TomlConfig struct {

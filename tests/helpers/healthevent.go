@@ -251,8 +251,8 @@ func sendHealthEventData(nodeNames []string, eventData []byte) error {
 
 func SendHealthEvent(ctx context.Context, t *testing.T, event *HealthEventTemplate) {
 	t.Helper()
-	t.Logf("Sending health event to node %s: checkName=%s, isFatal=%v, errorCode=%v",
-		event.NodeName, event.CheckName, event.IsFatal, event.ErrorCode)
+	t.Logf("Sending health event to node %s: checkName=%s, isFatal=%v",
+		event.NodeName, event.CheckName, event.IsFatal)
 
 	eventData, err := json.MarshalIndent(event, "", "    ")
 	require.NoError(t, err)
