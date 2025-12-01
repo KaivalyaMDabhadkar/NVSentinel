@@ -65,6 +65,7 @@ Each module has additional configuration options documented in its dedicated gui
 
 - [GPU Health Monitor](./gpu-health-monitor.md)
 - [Syslog Health Monitor](./syslog-health-monitor.md)
+- [CSP Health Monitor](./csp-health-monitor.md)
 - [Kubernetes Object Monitor](./kubernetes-object-monitor.md)
 - [Platform Connectors](./platform-connectors.md)
 - [Metadata Collector](./metadata-collector.md)

@@ -38,7 +38,7 @@ Individual component feature documentation:
 
 - [GPU Health Monitor](./gpu-health-monitor.md)
 - [Syslog Health Monitor](./syslog-health-monitor.md)
-- [CSP Health Monitor IAM Requirements](./csp-health-monitor-iam.md)
+- [CSP Health Monitor IAM Setup](./csp-health-monitor-iam.md)
 - [Fault Quarantine](./fault-quarantine.md)
 - [Node Drainer](./node-drainer.md)
 - [Fault Remediation](./fault-remediation.md)
