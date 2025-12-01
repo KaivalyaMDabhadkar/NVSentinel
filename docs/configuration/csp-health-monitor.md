@@ -235,22 +235,3 @@ csp-health-monitor:
   
   affinity: {}
 ```
-
-## Verification
-
-After deployment, verify the configuration:
-
-```bash
-# Check pod is running
-kubectl get pods -n nvsentinel -l app.kubernetes.io/name=csp-health-monitor
-
-# Check ServiceAccount annotation (GCP)
-kubectl get serviceaccount csp-health-monitor -n nvsentinel -o jsonpath='{.metadata.annotations.iam\.gke\.io/gcp-service-account}'
-
-# Check ServiceAccount annotation (AWS)
-kubectl get serviceaccount csp-health-monitor -n nvsentinel -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}'
-
-# Check logs
-kubectl logs -n nvsentinel -l app.kubernetes.io/name=csp-health-monitor -c csp-health-monitor --tail=50
-```
-

@@ -1,15 +1,15 @@
-# Runbook: CSP Health Monitor Troubleshooting
+# Runbook: CSP Health Monitor IAM Troubleshooting
 
 ## Overview
 
-The CSP Health Monitor detects cloud provider maintenance events by polling CSP APIs. This runbook covers common issues and their resolution.
+This runbook covers IAM permission issues for the CSP Health Monitor on GCP and AWS.
 
 ## GCP Issues
 
 ### Symptom: PERMISSION_DENIED Errors
 
 **Logs show:**
-```
+```log
 Error iterating GCP log entries: rpc error: code = PermissionDenied desc = The caller does not have permission
 ```
 
@@ -75,7 +75,7 @@ gcloud logging read "logName=\"projects/<PROJECT_ID>/logs/cloudaudit.googleapis.
 ### Symptom: AccessDeniedException Errors
 
 **Logs show:**
-```
+```log
 Error while fetching maintenance events: operation error Health: DescribeEvents, https response error StatusCode: 403, AccessDeniedException
 ```
 
@@ -133,7 +133,7 @@ aws health describe-events --filter "services=EC2" --max-items 1
 ### Symptom: Events Detected but Nodes Not Quarantined
 
 **Logs show:**
-```
+```log
 No Kubernetes node found matching GCP numeric instance ID
 Instance ID not found in node map
 ```
@@ -174,51 +174,4 @@ If RBAC is missing, verify the ClusterRole and ClusterRoleBinding were created b
 kubectl get clusterrole csp-health-monitor
 kubectl get clusterrolebinding csp-health-monitor
 ```
-
-## General Diagnostics
-
-### Check Monitor Status
-
-```bash
-# Check pod status
-kubectl get pods -n nvsentinel -l app.kubernetes.io/name=csp-health-monitor
-
-# Check both containers
-kubectl logs -n nvsentinel <POD_NAME> -c csp-health-monitor --tail=100
-kubectl logs -n nvsentinel <POD_NAME> -c maintenance-notifier --tail=100
-
-# Check ConfigMap
-kubectl get configmap -n nvsentinel csp-health-monitor-config -o yaml
-```
-
-### Check Metrics
-
-```bash
-# Port-forward to metrics endpoint
-kubectl port-forward -n nvsentinel <POD_NAME> 2112:2112
-
-# Query metrics (in another terminal)
-curl http://localhost:2112/metrics | grep csp_health_monitor
-```
-
-Key metrics to check:
-- `csp_health_monitor_csp_api_errors_total` - CSP API errors
-- `csp_health_monitor_csp_events_received_total` - Events received
-- `csp_health_monitor_main_processing_errors_total` - Processing errors
-
-### Common Configuration Issues
-
-**Issue**: Pod CrashLoopBackOff
-
-Check logs for:
-- Missing required Helm values (`clusterName`, `targetProjectId`, `region`, etc.)
-- Invalid `logFilter` syntax (GCP)
-- MongoDB connection failures
-
-**Issue**: No events detected
-
-Verify:
-- `cspName` is set correctly (`"gcp"` or `"aws"`)
-- Cloud provider credentials are configured
-- Maintenance events actually exist in the cloud provider
 
