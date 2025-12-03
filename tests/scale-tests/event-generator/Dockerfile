@@ -12,14 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-enabled: true
-additional_trustees:
-  - dims
-  - lalitadithya
-  - Jay-Madden
-  - nitz2407
-  - XRFXLP
-  - mchmarny
-  - tanishagoyal2
-  - ksaur
-  - deesharma24
+FROM public.ecr.aws/docker/library/alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /root/
+
+# Copy the pre-built binary from local build
+# Build with: go build -o event-generator .
+COPY event-generator ./
+
+ENTRYPOINT ["./event-generator"]

@@ -2052,6 +2052,27 @@ func WaitForLogCollectorJobStatus(
 	return foundJob
 }
 
+// VerifyNoLogCollectorJobExists verifies that no log-collector job exists for the node.
+func VerifyNoLogCollectorJobExists(ctx context.Context, t *testing.T, c klient.Client, nodeName string) {
+	t.Helper()
+
+	t.Logf("Waiting %v to verify no log-collector job exists for node %s", NeverWaitTimeout, nodeName)
+
+	time.Sleep(NeverWaitTimeout)
+
+	var jobList batchv1.JobList
+
+	err := c.Resources(NVSentinelNamespace).List(ctx, &jobList, resources.WithLabelSelector("app=log-collector"))
+	require.NoError(t, err, "failed to list log-collector jobs")
+
+	for _, job := range jobList.Items {
+		if job.Spec.Template.Spec.NodeName == nodeName {
+			t.Fatalf("Found log-collector job %s for node %s - log-collector should NOT run for unsupported events",
+				job.Name, nodeName)
+		}
+	}
+}
+
 // VerifyNodeLabelNotEqual verifies that a node's label is NOT equal to the specified value.
 func VerifyNodeLabelNotEqual(
 	ctx context.Context, t *testing.T, c klient.Client, nodeName, labelKey, notExpectedValue string,
