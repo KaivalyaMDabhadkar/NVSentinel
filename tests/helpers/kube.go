@@ -419,7 +419,9 @@ func SelectTestNodeWithEmptyProviderID(ctx context.Context, t *testing.T, client
 		}
 	}
 
-	require.Fail(t, "no uncordoned node with empty providerID found - CSP monitor tests require nodes without providerID set")
+	require.Fail(t,
+		"no uncordoned node with empty providerID found - CSP monitor tests require nodes without providerID set")
+
 	return ""
 }
 
@@ -1124,6 +1126,7 @@ func SetDeploymentEnvVars(
 		}
 
 		found := false
+
 		for i := range deployment.Spec.Template.Spec.Containers {
 			container := &deployment.Spec.Template.Spec.Containers[i]
 
@@ -1132,6 +1135,7 @@ func SetDeploymentEnvVars(
 			}
 
 			found = true
+
 			setEnvVarsOnContainer(container, envVars)
 		}
 
@@ -1146,6 +1150,7 @@ func SetDeploymentEnvVars(
 func setEnvVarsOnContainer(container *v1.Container, envVars map[string]string) {
 	for key, value := range envVars {
 		exists := false
+
 		for i := range container.Env {
 			if container.Env[i].Name == key {
 				container.Env[i].Value = value

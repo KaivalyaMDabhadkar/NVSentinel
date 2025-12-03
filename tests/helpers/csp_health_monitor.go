@@ -100,6 +100,7 @@ func setupCSPHealthMonitorTest(
 
 	backupData, err := BackupConfigMap(ctx, client, cspHealthMonitorConfigMapName, NVSentinelNamespace)
 	require.NoError(t, err, "failed to backup ConfigMap")
+
 	testCtx.ConfigMapBackup = backupData
 
 	err = updateCSPHealthMonitorConfig(ctx, client, targetCSP, thresholdMinutes)
@@ -126,7 +127,9 @@ func setupCSPHealthMonitorTest(
 	return ctx, testCtx
 }
 
-func TeardownCSPHealthMonitorTest(ctx context.Context, t *testing.T, c *envconf.Config, testCtx *CSPHealthMonitorTestContext) context.Context {
+func TeardownCSPHealthMonitorTest(
+	ctx context.Context, t *testing.T, c *envconf.Config, testCtx *CSPHealthMonitorTestContext,
+) context.Context {
 	client, err := c.NewClient()
 	if err != nil {
 		t.Logf("Warning: failed to create client for teardown: %v", err)
@@ -172,25 +175,31 @@ func updateCSPHealthMonitorConfig(
 			switch targetCSP {
 			case CSPGCP:
 				cfg.GCP.Enabled = true
+
 				cfg.AWS.Enabled = false
 				if cfg.GCP.TargetProjectID == "" {
 					cfg.GCP.TargetProjectID = "test-project"
 				}
+
 				if cfg.GCP.LogFilter == "" {
 					cfg.GCP.LogFilter = `logName="projects/test-project/logs/cloudaudit.googleapis.com%2Fsystem_event"`
 				}
+
 				cfg.GCP.APIPollingIntervalSeconds = testAPIPollingIntervalSeconds
 				cfg.GCP.EndpointOverride = "csp-api-mock.nvsentinel.svc.cluster.local:50051"
 
 			case CSPAWS:
 				cfg.GCP.Enabled = false
+
 				cfg.AWS.Enabled = true
 				if cfg.AWS.AccountID == "" {
 					cfg.AWS.AccountID = "123456789012"
 				}
+
 				if cfg.AWS.Region == "" {
 					cfg.AWS.Region = "us-east-1"
 				}
+
 				cfg.AWS.PollingIntervalSeconds = testAPIPollingIntervalSeconds
 				cfg.AWS.EndpointOverride = "http://csp-api-mock.nvsentinel.svc.cluster.local:8080/aws/health"
 
@@ -222,13 +231,17 @@ func cleanupCSPTestNode(ctx context.Context, client klient.Client, nodeName stri
 		if err != nil {
 			return err
 		}
+
 		if node.Annotations != nil {
 			delete(node.Annotations, "container.googleapis.com/instance_id")
 		}
+
 		if node.Labels != nil {
 			delete(node.Labels, "topology.kubernetes.io/zone")
 		}
+
 		node.Spec.Unschedulable = false
+
 		return client.Resources().Update(ctx, node)
 	})
 }
@@ -245,11 +258,13 @@ func AddGCPInstanceIDAnnotation(ctx context.Context, client klient.Client, nodeN
 		if node.Annotations == nil {
 			node.Annotations = make(map[string]string)
 		}
+
 		node.Annotations["container.googleapis.com/instance_id"] = instanceID
 
 		if node.Labels == nil {
 			node.Labels = make(map[string]string)
 		}
+
 		node.Labels["topology.kubernetes.io/zone"] = zone
 
 		return client.Resources().Update(ctx, node)
@@ -284,40 +299,65 @@ func WaitForCSPMaintenanceCondition(
 			return false
 		}
 
-		if node.Spec.Unschedulable != expectCordoned {
-			if expectCordoned {
-				t.Logf("Node %s is not cordoned yet", nodeName)
-			} else {
-				t.Logf("Node %s is still cordoned, waiting for recovery...", nodeName)
-			}
+		if !checkCordonState(t, node, nodeName, expectCordoned) {
 			return false
 		}
 
-		hasCondition := false
-		for _, condition := range node.Status.Conditions {
-			if string(condition.Type) == "CSPMaintenance" && condition.Status == v1.ConditionTrue {
-				hasCondition = true
-				t.Logf("Node %s has CSPMaintenance condition: %s", nodeName, condition.Message)
-				break
-			}
-		}
+		hasCondition := checkCSPMaintenanceCondition(t, node, nodeName)
 
-		if expectCondition && !hasCondition {
-			t.Logf("Node %s is cordoned but CSPMaintenance condition not set yet", nodeName)
+		if !validateConditionExpectation(t, nodeName, hasCondition, expectCondition) {
 			return false
 		}
 
-		if !expectCondition && hasCondition {
-			t.Logf("CSPMaintenance condition still True, waiting for it to be cleared...")
-			return false
-		}
-
-		if expectCondition {
-			t.Logf("Node %s is quarantined with CSPMaintenance condition", nodeName)
-		} else {
-			t.Logf("Node %s has been recovered (uncordoned, CSPMaintenance cleared)", nodeName)
-		}
+		logConditionResult(t, nodeName, expectCondition)
 
 		return true
 	}, EventuallyWaitTimeout, WaitInterval)
+}
+
+func checkCordonState(t *testing.T, node *v1.Node, nodeName string, expectCordoned bool) bool {
+	if node.Spec.Unschedulable != expectCordoned {
+		if expectCordoned {
+			t.Logf("Node %s is not cordoned yet", nodeName)
+		} else {
+			t.Logf("Node %s is still cordoned, waiting for recovery...", nodeName)
+		}
+
+		return false
+	}
+
+	return true
+}
+
+func checkCSPMaintenanceCondition(t *testing.T, node *v1.Node, nodeName string) bool {
+	for _, condition := range node.Status.Conditions {
+		if string(condition.Type) == "CSPMaintenance" && condition.Status == v1.ConditionTrue {
+			t.Logf("Node %s has CSPMaintenance condition: %s", nodeName, condition.Message)
+			return true
+		}
+	}
+
+	return false
+}
+
+func validateConditionExpectation(t *testing.T, nodeName string, hasCondition, expectCondition bool) bool {
+	if expectCondition && !hasCondition {
+		t.Logf("Node %s is cordoned but CSPMaintenance condition not set yet", nodeName)
+		return false
+	}
+
+	if !expectCondition && hasCondition {
+		t.Logf("CSPMaintenance condition still True, waiting for it to be cleared...")
+		return false
+	}
+
+	return true
+}
+
+func logConditionResult(t *testing.T, nodeName string, expectCondition bool) {
+	if expectCondition {
+		t.Logf("Node %s is quarantined with CSPMaintenance condition", nodeName)
+	} else {
+		t.Logf("Node %s has been recovered (uncordoned, CSPMaintenance cleared)", nodeName)
+	}
 }

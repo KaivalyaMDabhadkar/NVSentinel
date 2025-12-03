@@ -112,6 +112,7 @@ func (c *CSPAPIMockClient) Close() {
 // eventARN is only populated for AWS events.
 func (c *CSPAPIMockClient) InjectEvent(event CSPMaintenanceEvent) (string, string, error) {
 	endpoint := fmt.Sprintf("/%s/inject", event.CSP)
+
 	resp, err := c.post(endpoint, event)
 	if err != nil {
 		return "", "", err
@@ -124,6 +125,7 @@ func (c *CSPAPIMockClient) InjectEvent(event CSPMaintenanceEvent) (string, strin
 	if err := json.Unmarshal(resp, &result); err != nil {
 		return "", "", fmt.Errorf("failed to decode response: %w", err)
 	}
+
 	return result.EventID, result.EventARN, nil
 }
 
@@ -147,7 +149,15 @@ func (c *CSPAPIMockClient) post(endpoint string, payload interface{}) ([]byte, e
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	resp, err := c.httpClient.Post(c.baseURL+endpoint, "application/json", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(
+		context.Background(), http.MethodPost, c.baseURL+endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
@@ -162,7 +172,14 @@ func (c *CSPAPIMockClient) post(endpoint string, payload interface{}) ([]byte, e
 }
 
 func (c *CSPAPIMockClient) postEmpty(endpoint string) error {
-	resp, err := c.httpClient.Post(c.baseURL+endpoint, "application/json", nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, c.baseURL+endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
