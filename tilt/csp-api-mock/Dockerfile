@@ -12,18 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build and deploy csp-health-monitor
-custom_build(
-    'ghcr.io/nvidia/nvsentinel/csp-health-monitor',
-    '../../scripts/ko-tilt-build.sh ./cmd/csp-health-monitor $EXPECTED_REF',
-    deps=['./', '../../store-client'],
-    skips_local_docker=True
-)
+FROM public.ecr.aws/docker/library/golang:1.25-trixie AS builder
 
-# Build and deploy maintenance-notifier sidecar
-custom_build(
-    'ghcr.io/nvidia/nvsentinel/maintenance-notifier',
-    '../../scripts/ko-tilt-build.sh ./cmd/maintenance-notifier $EXPECTED_REF',
-    deps=['./', '../../store-client'],
-    skips_local_docker=True
-)
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o csp-api-mock .
+
+FROM public.ecr.aws/docker/library/debian:bookworm-slim AS runtime
+
+COPY --from=builder /app/csp-api-mock /app/csp-api-mock
+
+EXPOSE 8080 50051
+
+ENTRYPOINT ["/app/csp-api-mock"]
