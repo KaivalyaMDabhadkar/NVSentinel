@@ -19,7 +19,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -117,8 +116,6 @@ func setupCSPHealthMonitorTest(
 
 	err = RestartDeployment(ctx, t, client, cspHealthMonitorDeploymentName, NVSentinelNamespace)
 	require.NoError(t, err, "failed to restart deployment")
-
-	time.Sleep(10 * time.Second)
 
 	testCtx.NodeName = SelectTestNodeWithEmptyProviderID(ctx, t, client)
 	testCtx.CSPClient, err = NewCSPAPIMockClient(client)

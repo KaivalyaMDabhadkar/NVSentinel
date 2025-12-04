@@ -33,19 +33,10 @@ const (
 	processingBuffer   = 5 * time.Second
 )
 
-// TestCSPHealthMonitorGCPMaintenanceEvent verifies the complete GCP maintenance event lifecycle.
-//
-// Test Steps:
-// 1. Setup: Configure csp-health-monitor for GCP, select clean test node, add GCP instance annotation
-// 2. Inject PENDING maintenance event into mock API (scheduled 15 min ahead)
-// 3. Verify quarantine: Wait for GCP monitor to poll (≤30s) + trigger engine (≤10s) → node cordoned with CSPMaintenance condition
-// 4. Update to ONGOING status and verify node remains cordoned during active maintenance
-// 5. Update to COMPLETE status and verify recovery: node uncordoned after 1-min healthy delay
-// 6. Teardown: Restore original config, cleanup node
-//
-// Validates: Event detection, quarantine workflow, status transitions, and recovery behavior for GCP.
+// TestCSPHealthMonitorGCPMaintenanceEvent verifies the complete GCP maintenance event lifecycle:
+// event detection, quarantine workflow, status transitions, and recovery behavior.
 func TestCSPHealthMonitorGCPMaintenanceEvent(t *testing.T) {
-	feature := features.New("TestCSPHealthMonitorGCPMaintenanceEvent").
+	feature := features.New("GCP Maintenance Event Lifecycle").
 		WithLabel("suite", "csp-health-monitor")
 
 	var testCtx *helpers.CSPHealthMonitorTestContext
@@ -53,22 +44,30 @@ func TestCSPHealthMonitorGCPMaintenanceEvent(t *testing.T) {
 	var testInstanceID string
 
 	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Setting up GCP health monitor test environment")
+
 		var newCtx context.Context
 		newCtx, testCtx = helpers.SetupCSPHealthMonitorTest(ctx, t, c, helpers.CSPGCP)
 
+		t.Log("Clearing any existing GCP events from mock API")
 		require.NoError(t, testCtx.CSPClient.ClearEvents(helpers.CSPGCP), "failed to clear GCP events")
 
 		testInstanceID = fmt.Sprintf("%d", time.Now().UnixNano())
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
+		t.Logf("Adding GCP instance annotation to node %s (instance_id=%s, zone=us-central1-a)", testCtx.NodeName, testInstanceID)
 		require.NoError(t, helpers.AddGCPInstanceIDAnnotation(ctx, client, testCtx.NodeName, testInstanceID, "us-central1-a"))
-		t.Logf("Added GCP instance ID annotation: %s to node %s", testInstanceID, testCtx.NodeName)
+
+		t.Log("Restarting csp-health-monitor to reset poll checkpoint")
+		require.NoError(t, helpers.RestartDeployment(ctx, t, client, "csp-health-monitor", helpers.NVSentinelNamespace))
 
 		return newCtx
 	})
 
-	feature.Assess("Inject GCP PENDING maintenance event", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Step 1: Inject PENDING maintenance event scheduled 15 min ahead", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Injecting GCP maintenance event with PENDING status into mock Cloud Logging API")
+
 		scheduledStart := time.Now().Add(15 * time.Minute)
 		scheduledEnd := time.Now().Add(75 * time.Minute)
 		event := helpers.CSPMaintenanceEvent{
@@ -88,25 +87,28 @@ func TestCSPHealthMonitorGCPMaintenanceEvent(t *testing.T) {
 		var err error
 		injectedEventID, _, err = testCtx.CSPClient.InjectEvent(event)
 		require.NoError(t, err)
-		t.Logf("Injected GCP PENDING maintenance event: ID=%s", injectedEventID)
+		t.Logf("Event injected: ID=%s, scheduledStart=%s", injectedEventID, scheduledStart.Format(time.RFC3339))
 
 		return ctx
 	})
 
-	feature.Assess("Verify node is quarantined after GCP maintenance event", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Step 2: Verify node is quarantined (cordoned + CSPMaintenance condition)", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Logf("Waiting for GCP monitor to poll (≤%v) and trigger engine to quarantine node", cspPollingInterval)
+
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		t.Logf("Waiting for CSP health monitor to process the event (polling interval: %v)...", cspPollingInterval)
 		helpers.WaitForCSPMaintenanceCondition(ctx, t, client, testCtx.NodeName, true, true)
+		t.Logf("Node %s is now quarantined with CSPMaintenance condition", testCtx.NodeName)
 
 		return ctx
 	})
 
-	feature.Assess("Update GCP event to ONGOING and verify node remains quarantined", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Step 3: Transition to ONGOING status - node should remain quarantined", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Updating event status to ONGOING (maintenance in progress)")
 		require.NoError(t, testCtx.CSPClient.UpdateEventStatus(helpers.CSPGCP, injectedEventID, "ONGOING"))
-		t.Logf("Updated GCP event to ONGOING status")
 
+		t.Logf("Waiting %v for status change to propagate", cspPollingInterval+processingBuffer)
 		time.Sleep(cspPollingInterval + processingBuffer)
 
 		client, err := c.NewClient()
@@ -115,42 +117,36 @@ func TestCSPHealthMonitorGCPMaintenanceEvent(t *testing.T) {
 		require.NoError(t, err)
 
 		assert.True(t, node.Spec.Unschedulable, "Node should remain cordoned during ONGOING maintenance")
-		t.Logf("Node %s remains cordoned during ONGOING maintenance", testCtx.NodeName)
+		t.Logf("Verified: Node %s remains cordoned during active maintenance", testCtx.NodeName)
 
 		return ctx
 	})
 
-	feature.Assess("Update GCP event to COMPLETE and verify node is uncordoned", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Step 4: Transition to COMPLETE status - node should recover (uncordon)", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Updating event status to COMPLETE (maintenance finished)")
 		require.NoError(t, testCtx.CSPClient.UpdateEventStatus(helpers.CSPGCP, injectedEventID, "COMPLETE"))
-		t.Logf("Updated GCP event to COMPLETE status")
 
+		t.Log("Waiting for trigger engine to detect healthy state and uncordon node (1-min delay)")
 		client, err := c.NewClient()
 		require.NoError(t, err)
 		helpers.WaitForCSPMaintenanceCondition(ctx, t, client, testCtx.NodeName, false, false)
+		t.Logf("Verified: Node %s has recovered (uncordoned, CSPMaintenance condition cleared)", testCtx.NodeName)
 
 		return ctx
 	})
 
 	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Tearing down: restoring original config and cleaning up test node")
 		return helpers.TeardownCSPHealthMonitorTest(ctx, t, c, testCtx)
 	})
 
 	testEnv.Test(t, feature.Feature())
 }
 
-// TestCSPHealthMonitorAWSMaintenanceEvent verifies the complete AWS maintenance event lifecycle.
-//
-// Test Steps:
-// 1. Setup: Configure csp-health-monitor for AWS, add AWS providerID to node, restart to sync informer
-// 2. Inject 'upcoming' maintenance event into mock API (scheduled 15 min ahead)
-// 3. Verify quarantine: Wait for AWS monitor to poll Health API (≤30s) + trigger engine (≤10s) → node cordoned
-// 4. Update to 'open' status (maintenance in progress) and verify node remains cordoned
-// 5. Update to 'closed' status, clear mock API to stop re-polling, verify recovery after 1-min healthy delay
-// 6. Teardown: Restore original config, cleanup node
-//
-// Validates: AWS Health API integration, node mapping via providerID, and AWS-specific status transitions.
+// TestCSPHealthMonitorAWSMaintenanceEvent verifies the complete AWS maintenance event lifecycle:
+// AWS Health API integration, node mapping via providerID, and AWS-specific status transitions.
 func TestCSPHealthMonitorAWSMaintenanceEvent(t *testing.T) {
-	feature := features.New("TestCSPHealthMonitorAWSMaintenanceEvent").
+	feature := features.New("AWS Maintenance Event Lifecycle").
 		WithLabel("suite", "csp-health-monitor")
 
 	var testCtx *helpers.CSPHealthMonitorTestContext
@@ -158,26 +154,30 @@ func TestCSPHealthMonitorAWSMaintenanceEvent(t *testing.T) {
 	var testInstanceID string
 
 	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Setting up AWS health monitor test environment")
+
 		var newCtx context.Context
 		newCtx, testCtx = helpers.SetupCSPHealthMonitorTest(ctx, t, c, helpers.CSPAWS)
 
+		t.Log("Clearing any existing AWS events from mock API")
 		require.NoError(t, testCtx.CSPClient.ClearEvents(helpers.CSPAWS), "failed to clear AWS events")
 
 		testInstanceID = fmt.Sprintf("i-%d", time.Now().UnixNano()%1000000000000)
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
+		t.Logf("Adding AWS providerID to node %s (instance=%s, zone=us-east-1a)", testCtx.NodeName, testInstanceID)
 		require.NoError(t, helpers.AddAWSProviderID(ctx, client, testCtx.NodeName, testInstanceID, "us-east-1a"))
-		t.Logf("Added AWS provider ID with instance: %s to node %s", testInstanceID, testCtx.NodeName)
 
-		// Restart so AWS node informer picks up the provider ID (uses AddFunc on initial sync)
-		t.Log("Restarting csp-health-monitor to sync AWS node informer with provider ID")
+		t.Log("Restarting csp-health-monitor to sync AWS node informer (uses AddFunc on initial cache sync)")
 		require.NoError(t, helpers.RestartDeployment(ctx, t, client, "csp-health-monitor", helpers.NVSentinelNamespace))
 
 		return newCtx
 	})
 
-	feature.Assess("Inject AWS upcoming maintenance event", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Step 1: Inject 'upcoming' maintenance event scheduled 15 min ahead", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Injecting AWS maintenance event with 'upcoming' status into mock Health API")
+
 		scheduledStart := time.Now().Add(15 * time.Minute)
 		scheduledEnd := time.Now().Add(75 * time.Minute)
 		event := helpers.CSPMaintenanceEvent{
@@ -198,25 +198,28 @@ func TestCSPHealthMonitorAWSMaintenanceEvent(t *testing.T) {
 		var eventARN string
 		injectedEventID, eventARN, err = testCtx.CSPClient.InjectEvent(event)
 		require.NoError(t, err)
-		t.Logf("Injected AWS upcoming maintenance event: ID=%s, ARN=%s", injectedEventID, eventARN)
+		t.Logf("Event injected: ID=%s, ARN=%s, scheduledStart=%s", injectedEventID, eventARN, scheduledStart.Format(time.RFC3339))
 
 		return ctx
 	})
 
-	feature.Assess("Verify node is quarantined after AWS maintenance event", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Step 2: Verify node is quarantined (cordoned + CSPMaintenance condition)", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Logf("Waiting for AWS monitor to poll Health API (≤%v) and trigger engine to quarantine node", cspPollingInterval)
+
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		t.Logf("Waiting for CSP health monitor to process the event (polling interval: %v)...", cspPollingInterval)
 		helpers.WaitForCSPMaintenanceCondition(ctx, t, client, testCtx.NodeName, true, true)
+		t.Logf("Node %s is now quarantined with CSPMaintenance condition", testCtx.NodeName)
 
 		return ctx
 	})
 
-	feature.Assess("Update AWS event to open and verify node remains quarantined", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Step 3: Transition to 'open' status - node should remain quarantined", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Updating event status to 'open' (maintenance in progress)")
 		require.NoError(t, testCtx.CSPClient.UpdateEventStatus(helpers.CSPAWS, injectedEventID, "open"))
-		t.Logf("Updated AWS event to open status")
 
+		t.Logf("Waiting %v for status change to propagate", cspPollingInterval+processingBuffer)
 		time.Sleep(cspPollingInterval + processingBuffer)
 
 		client, err := c.NewClient()
@@ -224,76 +227,78 @@ func TestCSPHealthMonitorAWSMaintenanceEvent(t *testing.T) {
 		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
 		require.NoError(t, err)
 
-		assert.True(t, node.Spec.Unschedulable, "Node should remain cordoned during open maintenance")
-		t.Logf("Node %s remains cordoned during open maintenance", testCtx.NodeName)
+		assert.True(t, node.Spec.Unschedulable, "Node should remain cordoned during 'open' maintenance")
+		t.Logf("Verified: Node %s remains cordoned during active maintenance", testCtx.NodeName)
 
 		return ctx
 	})
 
-	feature.Assess("Update AWS event to closed and verify node is uncordoned", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Step 4: Transition to 'closed' status - node should recover (uncordon)", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Updating event status to 'closed' (maintenance finished)")
 		require.NoError(t, testCtx.CSPClient.UpdateEventStatus(helpers.CSPAWS, injectedEventID, "closed"))
-		t.Logf("Updated AWS event to closed status")
 
+		t.Logf("Waiting %v for status change to propagate", cspPollingInterval+processingBuffer)
 		time.Sleep(cspPollingInterval + processingBuffer)
 
-		// Clear event to stop re-polling (re-polls reset actualEndTime, blocking healthy trigger)
+		t.Log("Clearing mock API events to stop re-polling (re-polls would reset actualEndTime, blocking recovery)")
 		require.NoError(t, testCtx.CSPClient.ClearEvents(helpers.CSPAWS))
-		t.Logf("Cleared AWS event - trigger engine will use MongoDB record")
 
+		t.Log("Waiting for trigger engine to detect healthy state and uncordon node (1-min delay)")
 		client, err := c.NewClient()
 		require.NoError(t, err)
 		helpers.WaitForCSPMaintenanceCondition(ctx, t, client, testCtx.NodeName, false, false)
+		t.Logf("Verified: Node %s has recovered (uncordoned, CSPMaintenance condition cleared)", testCtx.NodeName)
 
 		return ctx
 	})
 
 	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Tearing down: restoring original config and cleaning up test node")
 		return helpers.TeardownCSPHealthMonitorTest(ctx, t, c, testCtx)
 	})
 
 	testEnv.Test(t, feature.Feature())
 }
 
-// TestCSPHealthMonitorQuarantineThreshold verifies the triggerQuarantineWorkflowTimeLimitMinutes threshold logic.
-//
-// Test Steps:
-// 1. Setup: Configure csp-health-monitor with 1-minute quarantine threshold (minimum allowed)
-// 2. Inject event scheduled 3 minutes ahead (OUTSIDE threshold) and verify NO quarantine occurs
-// 3. Update same event to 50 seconds ahead (INSIDE threshold) and verify quarantine IS triggered
-// 4. Update to COMPLETE and verify recovery
-//
-// Validates: Trigger engine only quarantines nodes when scheduledStartTime <= now + threshold.
-// This ensures quarantine isn't triggered too early for distant maintenance windows.
+// TestCSPHealthMonitorQuarantineThreshold verifies the triggerQuarantineWorkflowTimeLimitMinutes threshold logic:
+// trigger engine only quarantines nodes when scheduledStartTime <= now + threshold.
 func TestCSPHealthMonitorQuarantineThreshold(t *testing.T) {
-	feature := features.New("TestCSPHealthMonitorQuarantineThreshold").
+	feature := features.New("Quarantine Threshold Logic").
 		WithLabel("suite", "csp-health-monitor")
 
 	var testCtx *helpers.CSPHealthMonitorTestContext
 	var injectedEventID string
 	var testInstanceID string
 
-	// Use 1 minute threshold (minimum allowed) for faster testing
-	const thresholdMinutes = 1
+	const thresholdMinutes = 1 // Use 1-minute threshold (minimum allowed) for faster testing
 
 	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Logf("Setting up GCP health monitor with %d-minute quarantine threshold", thresholdMinutes)
+
 		var newCtx context.Context
 		newCtx, testCtx = helpers.SetupCSPHealthMonitorTestWithThreshold(ctx, t, c, helpers.CSPGCP, thresholdMinutes)
 
+		t.Log("Clearing any existing GCP events from mock API")
 		require.NoError(t, testCtx.CSPClient.ClearEvents(helpers.CSPGCP), "failed to clear GCP events")
 
 		testInstanceID = fmt.Sprintf("%d", time.Now().UnixNano())
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
+		t.Logf("Adding GCP instance annotation to node %s (instance_id=%s)", testCtx.NodeName, testInstanceID)
 		require.NoError(t, helpers.AddGCPInstanceIDAnnotation(ctx, client, testCtx.NodeName, testInstanceID, "us-central1-a"))
-		t.Logf("Added GCP instance ID annotation: %s to node %s", testInstanceID, testCtx.NodeName)
+
+		t.Log("Restarting csp-health-monitor to reset poll checkpoint")
+		require.NoError(t, helpers.RestartDeployment(ctx, t, client, "csp-health-monitor", helpers.NVSentinelNamespace))
 
 		return newCtx
 	})
 
-	feature.Assess("Event outside threshold window does NOT trigger quarantine", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		scheduledStart := time.Now().Add(3 * time.Minute) // 3 min ahead, beyond 1 min threshold
+	feature.Assess("Step 1: Event OUTSIDE threshold (3 min ahead) should NOT trigger quarantine", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		scheduledStart := time.Now().Add(3 * time.Minute)
 		scheduledEnd := time.Now().Add(63 * time.Minute)
+
+		t.Logf("Injecting event scheduled 3 min ahead (outside %d-min threshold)", thresholdMinutes)
 		event := helpers.CSPMaintenanceEvent{
 			CSP:             helpers.CSPGCP,
 			InstanceID:      testInstanceID,
@@ -311,9 +316,9 @@ func TestCSPHealthMonitorQuarantineThreshold(t *testing.T) {
 		var err error
 		injectedEventID, _, err = testCtx.CSPClient.InjectEvent(event)
 		require.NoError(t, err)
-		t.Logf("Injected event with scheduledStart=%v (3 min ahead, outside %d min threshold)", scheduledStart.Format(time.RFC3339), thresholdMinutes)
+		t.Logf("Event injected: ID=%s, scheduledStart=%s", injectedEventID, scheduledStart.Format(time.RFC3339))
 
-		t.Logf("Waiting for poll cycles to verify NO quarantine occurs...")
+		t.Logf("Waiting %v to verify quarantine does NOT occur", cspPollingInterval+processingBuffer)
 		time.Sleep(cspPollingInterval + processingBuffer)
 
 		client, err := c.NewClient()
@@ -321,42 +326,44 @@ func TestCSPHealthMonitorQuarantineThreshold(t *testing.T) {
 		node, err := helpers.GetNodeByName(ctx, client, testCtx.NodeName)
 		require.NoError(t, err)
 
-		assert.False(t, node.Spec.Unschedulable, "Node should NOT be cordoned - event is scheduled beyond threshold window")
-		t.Logf("Verified: Node %s is NOT cordoned (event outside threshold)", testCtx.NodeName)
+		assert.False(t, node.Spec.Unschedulable, "Node should NOT be cordoned - event scheduled beyond threshold")
+		t.Logf("Verified: Node %s is NOT cordoned (scheduledStart > now + %d min threshold)", testCtx.NodeName, thresholdMinutes)
 
 		return ctx
 	})
 
-	feature.Assess("Event inside threshold window DOES trigger quarantine", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		// 50s ahead accounts for polling delays (GCP: 30s + trigger: 10s = ~40s worst case)
-		scheduledStart := time.Now().Add(50 * time.Second)
+	feature.Assess("Step 2: Update event to INSIDE threshold (50s ahead) should trigger quarantine", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		scheduledStart := time.Now().Add(50 * time.Second) // 50s accounts for polling delays
 
+		t.Logf("Updating event scheduledStart to 50s ahead (inside %d-min threshold)", thresholdMinutes)
 		require.NoError(t, testCtx.CSPClient.UpdateGCPEventScheduledTime(injectedEventID, scheduledStart))
-		t.Logf("Updated event scheduledStart to %v (50s ahead, inside %d min threshold)", scheduledStart.Format(time.RFC3339), thresholdMinutes)
+		t.Logf("Event updated: scheduledStart=%s", scheduledStart.Format(time.RFC3339))
 
+		t.Log("Waiting for trigger engine to detect event inside threshold and quarantine node")
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		t.Logf("Waiting for quarantine to trigger...")
 		helpers.WaitForCSPMaintenanceCondition(ctx, t, client, testCtx.NodeName, true, true)
-		t.Logf("Verified: Node %s is now cordoned (event entered threshold window)", testCtx.NodeName)
+		t.Logf("Verified: Node %s is now cordoned (scheduledStart <= now + %d min threshold)", testCtx.NodeName, thresholdMinutes)
 
 		return ctx
 	})
 
-	feature.Assess("Complete event and verify recovery", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Step 3: Complete event and verify recovery", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Updating event status to COMPLETE")
 		require.NoError(t, testCtx.CSPClient.UpdateEventStatus(helpers.CSPGCP, injectedEventID, "COMPLETE"))
-		t.Logf("Updated event to COMPLETE status")
 
+		t.Log("Waiting for trigger engine to detect healthy state and uncordon node")
 		client, err := c.NewClient()
 		require.NoError(t, err)
 		helpers.WaitForCSPMaintenanceCondition(ctx, t, client, testCtx.NodeName, false, false)
-		t.Logf("Verified: Node %s has recovered", testCtx.NodeName)
+		t.Logf("Verified: Node %s has recovered (uncordoned, CSPMaintenance condition cleared)", testCtx.NodeName)
 
 		return ctx
 	})
 
 	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		t.Log("Tearing down: restoring original config and cleaning up test node")
 		return helpers.TeardownCSPHealthMonitorTest(ctx, t, c, testCtx)
 	})
 

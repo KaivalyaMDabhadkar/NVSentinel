@@ -279,7 +279,7 @@ labeler:
 
 csp-health-monitor:
   logLevel: debug
-  cspName: "gcp"
+  cspName: "gcp" # this will be updated to aws as well dynamically during tests 
   quarantineTriggerEngine:
     logLevel: debug
   configToml:

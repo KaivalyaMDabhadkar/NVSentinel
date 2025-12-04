@@ -24,6 +24,11 @@ type CSPType string
 const (
 	CSPGCP CSPType = "gcp"
 	CSPAWS CSPType = "aws"
+
+	// timestampOffset ensures newly created events have timestamps slightly in the future.
+	// This prevents race conditions where GCP's timestamp filtering (using strict ">")
+	// might miss events created at nearly the same instant as a poll window boundary.
+	timestampOffset = 1 * time.Second
 )
 
 type MaintenanceEvent struct {
@@ -64,7 +69,7 @@ func (s *EventStore) Add(event *MaintenanceEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	event.CreatedAt = time.Now().UTC()
+	event.CreatedAt = time.Now().UTC().Add(timestampOffset)
 	event.UpdatedAt = event.CreatedAt
 	s.events[event.ID] = event
 }
@@ -77,7 +82,7 @@ func (s *EventStore) Update(event *MaintenanceEvent) bool {
 		return false
 	}
 
-	event.UpdatedAt = time.Now().UTC()
+	event.UpdatedAt = time.Now().UTC().Add(timestampOffset)
 	s.events[event.ID] = event
 	return true
 }
