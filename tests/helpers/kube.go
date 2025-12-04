@@ -1131,7 +1131,7 @@ func SetDeploymentEnvVars(
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		deployment := &appsv1.Deployment{}
 		if err := c.Resources().Get(ctx, deploymentName, namespace, deployment); err != nil {
-			return fmt.Errorf("failed to get deployment %s/%s: %w", namespace, deploymentName, err)
+			return err
 		}
 
 		if len(deployment.Spec.Template.Spec.Containers) == 0 {
@@ -1191,7 +1191,7 @@ func RemoveDeploymentEnvVars(
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		deployment := &appsv1.Deployment{}
 		if err := c.Resources().Get(ctx, deploymentName, namespace, deployment); err != nil {
-			return fmt.Errorf("failed to get deployment %s/%s: %w", namespace, deploymentName, err)
+			return err
 		}
 
 		if len(deployment.Spec.Template.Spec.Containers) == 0 {
@@ -1203,6 +1203,8 @@ func RemoveDeploymentEnvVars(
 			toRemove[name] = true
 		}
 
+		found := false
+
 		for i := range deployment.Spec.Template.Spec.Containers {
 			container := &deployment.Spec.Template.Spec.Containers[i]
 
@@ -1210,18 +1212,28 @@ func RemoveDeploymentEnvVars(
 				continue
 			}
 
-			newEnv := make([]v1.EnvVar, 0, len(container.Env))
-			for _, env := range container.Env {
-				if !toRemove[env.Name] {
-					newEnv = append(newEnv, env)
-				}
-			}
+			found = true
 
-			container.Env = newEnv
+			removeEnvVarsFromContainer(container, toRemove)
+		}
+
+		if containerName != "" && !found {
+			return fmt.Errorf("container %q not found in deployment %s/%s", containerName, namespace, deploymentName)
 		}
 
 		return c.Resources().Update(ctx, deployment)
 	})
+}
+
+func removeEnvVarsFromContainer(container *v1.Container, toRemove map[string]bool) {
+	newEnv := make([]v1.EnvVar, 0, len(container.Env))
+	for _, env := range container.Env {
+		if !toRemove[env.Name] {
+			newEnv = append(newEnv, env)
+		}
+	}
+
+	container.Env = newEnv
 }
 
 // CheckNodeConditionExists checks if a node has a specific condition type and reason.
