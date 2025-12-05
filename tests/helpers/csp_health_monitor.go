@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -114,12 +115,19 @@ func setupCSPHealthMonitorTest(
 		require.NoError(t, err, "failed to set AWS credentials")
 	}
 
-	err = RestartDeployment(ctx, t, client, cspHealthMonitorDeploymentName, NVSentinelNamespace)
-	require.NoError(t, err, "failed to restart deployment")
-
 	testCtx.NodeName = SelectTestNodeWithEmptyProviderID(ctx, t, client)
 	testCtx.CSPClient, err = NewCSPAPIMockClient(client)
 	require.NoError(t, err, "failed to create CSP API Mock client")
+
+	// Reset poll count before restart so we can detect the first poll from the new pod
+	require.NoError(t, testCtx.CSPClient.ResetPollCount(targetCSP), "failed to reset poll count")
+
+	err = RestartDeployment(ctx, t, client, cspHealthMonitorDeploymentName, NVSentinelNamespace)
+	require.NoError(t, err, "failed to restart deployment")
+
+	// Wait for the CSP health monitor to complete at least one poll cycle
+	t.Log("Waiting for CSP health monitor to complete first poll cycle...")
+	waitForFirstPoll(t, testCtx.CSPClient, targetCSP)
 
 	return ctx, testCtx
 }
@@ -357,4 +365,59 @@ func logConditionResult(t *testing.T, nodeName string, expectCondition bool) {
 	} else {
 		t.Logf("Node %s has been recovered (uncordoned, CSPMaintenance cleared)", nodeName)
 	}
+}
+
+func waitForFirstPoll(t *testing.T, cspClient *CSPAPIMockClient, targetCSP CSPType) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		pollCount, err := cspClient.GetPollCount(targetCSP)
+		if err != nil {
+			t.Logf("Error getting poll count: %v", err)
+			return false
+		}
+
+		if pollCount == 0 {
+			t.Logf("Waiting for first poll (current count: %d)", pollCount)
+			return false
+		}
+
+		t.Logf("CSP health monitor has completed %d poll(s)", pollCount)
+
+		return true
+	}, 2*time.Minute, 2*time.Second, "CSP health monitor did not poll within timeout")
+}
+
+// WaitForCSPHealthMonitorPoll resets the poll counter and waits for the CSP health monitor
+// to complete at least one poll cycle
+func WaitForCSPHealthMonitorPoll(t *testing.T, cspClient *CSPAPIMockClient, targetCSP CSPType) {
+	t.Helper()
+
+	require.NoError(t, cspClient.ResetPollCount(targetCSP), "failed to reset poll count")
+	t.Log("Waiting for CSP health monitor to complete first poll cycle...")
+	waitForFirstPoll(t, cspClient, targetCSP)
+}
+
+// WaitForNextPoll waits for the CSP health monitor to complete at least one more poll cycle
+// since the function was called
+func WaitForNextPoll(t *testing.T, cspClient *CSPAPIMockClient, targetCSP CSPType) {
+	t.Helper()
+
+	initialCount, err := cspClient.GetPollCount(targetCSP)
+	require.NoError(t, err, "failed to get initial poll count")
+
+	t.Logf("Waiting for next poll cycle (current count: %d)", initialCount)
+
+	require.Eventually(t, func() bool {
+		currentCount, err := cspClient.GetPollCount(targetCSP)
+		if err != nil {
+			t.Logf("Error getting poll count: %v", err)
+			return false
+		}
+		if currentCount <= initialCount {
+			return false
+		}
+		t.Logf("Poll cycle completed (count: %d → %d)", initialCount, currentCount)
+		return true
+	}, 2*time.Minute, 2*time.Second, "CSP health monitor did not poll within timeout")
 }

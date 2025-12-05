@@ -143,6 +143,67 @@ func (c *CSPAPIMockClient) ClearEvents(csp CSPType) error {
 	return c.postEmpty(fmt.Sprintf("/%s/events/clear", csp))
 }
 
+// GetEventCount returns the number of events in the mock store for the given CSP.
+func (c *CSPAPIMockClient) GetEventCount(csp CSPType) (int, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		c.baseURL+fmt.Sprintf("/%s/events", csp), nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("request failed: status=%d body=%s", resp.StatusCode, string(respBody))
+	}
+
+	var events []interface{}
+	if err := json.Unmarshal(respBody, &events); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return len(events), nil
+}
+
+// GetPollCount returns the number of times the CSP health monitor has polled the mock.
+func (c *CSPAPIMockClient) GetPollCount(csp CSPType) (int64, error) {
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet,
+		c.baseURL+fmt.Sprintf("/%s/stats", csp), nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("request failed: status=%d body=%s", resp.StatusCode, string(respBody))
+	}
+
+	var stats struct {
+		PollCount int64 `json:"pollCount"`
+	}
+	if err := json.Unmarshal(respBody, &stats); err != nil {
+		return 0, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	return stats.PollCount, nil
+}
+
+// ResetPollCount resets the poll counter for the given CSP.
+func (c *CSPAPIMockClient) ResetPollCount(csp CSPType) error {
+	return c.postEmpty(fmt.Sprintf("/%s/stats/reset", csp))
+}
+
 func (c *CSPAPIMockClient) post(endpoint string, payload interface{}) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
