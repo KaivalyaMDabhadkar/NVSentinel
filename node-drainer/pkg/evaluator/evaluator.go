@@ -25,6 +25,7 @@ import (
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/customdrain"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/queue"
 	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	"github.com/nvidia/nvsentinel/store-client/pkg/utils"
 )
 
 const (
@@ -358,12 +359,12 @@ func getEventID(ctx context.Context, database queue.DataStore, nodeName string) 
 		return "", fmt.Errorf("failed to decode health event for node %s: %w", nodeName, err)
 	}
 
-	eventID, ok := document["_id"]
-	if !ok {
-		return "", fmt.Errorf("no _id field in health event for node %s", nodeName)
+	eventID, err := utils.ExtractDocumentID(document)
+	if err != nil {
+		return "", fmt.Errorf("failed to extract document ID for node %s: %w", nodeName, err)
 	}
 
-	return fmt.Sprintf("%v", eventID), nil
+	return eventID, nil
 }
 
 // isNodeAlreadyDrained checks if a node has already been drained using the database-agnostic interface

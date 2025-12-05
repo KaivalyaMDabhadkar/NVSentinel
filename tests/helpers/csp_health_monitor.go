@@ -414,10 +414,13 @@ func WaitForNextPoll(t *testing.T, cspClient *CSPAPIMockClient, targetCSP CSPTyp
 			t.Logf("Error getting poll count: %v", err)
 			return false
 		}
+
 		if currentCount <= initialCount {
 			return false
 		}
+
 		t.Logf("Poll cycle completed (count: %d → %d)", initialCount, currentCount)
+
 		return true
 	}, 2*time.Minute, 2*time.Second, "CSP health monitor did not poll within timeout")
 }

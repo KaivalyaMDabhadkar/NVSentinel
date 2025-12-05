@@ -97,6 +97,10 @@ customDrain:
   # Kind of the custom drain CRD (e.g., "DrainRequest")
   kind: ""
 
+  # Plural resource name for the custom drain CRD (e.g., "drainrequests")
+  # Must match the CRD's spec.names.plural field exactly
+  resource: ""
+
   # Condition type to check in CR status.conditions for completion (e.g., "Complete")
   statusConditionType: ""
 

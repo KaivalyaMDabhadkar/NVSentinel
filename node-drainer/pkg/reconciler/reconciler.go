@@ -764,9 +764,9 @@ func (r *Reconciler) executeCustomDrain(ctx context.Context, action *evaluator.D
 	healthEvent model.HealthEventWithStatus, event datastore.Event, database queue.DataStore) error {
 	nodeName := healthEvent.HealthEvent.NodeName
 
-	eventID := ""
-	if id, exists := event["_id"]; exists {
-		eventID = fmt.Sprintf("%v", id)
+	eventID, err := utils.ExtractDocumentID(event)
+	if err != nil {
+		return fmt.Errorf("failed to extract document ID for custom drain: %w", err)
 	}
 
 	podsToDrain := make(map[string][]string)
