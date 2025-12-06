@@ -8,7 +8,7 @@ This test suite validates NVSentinel's performance and scalability under realist
 
 1. **Does NVSentinel affect the API server load and cause slowdown at scale of 1000+ nodes?**
 2. **Does MongoDB function at scale in our use case?**
-3. *(Additional test objectives will be added as testing continues)*
+3. **What is the end-to-end latency of cordoning nodes during mass failure events?**
 
 **Testing Version:** NVSentinel v0.4.0  
 **Cluster Scale:** 1500 nodes
@@ -55,10 +55,11 @@ docker build -t YOUR_REGISTRY/event-generator:v1 .
 docker push YOUR_REGISTRY/event-generator:v1
 
 # Update all manifests to use your registry (one command!)
-# Note: Replace ghcr.io/nvidia/nvsentinel with your actual container registry
 cd ../manifests
 sed -i 's|ghcr.io/nvidia/nvsentinel|YOUR_REGISTRY|g' event-generator-daemonset.yaml
 ```
+
+**⚠️ Important:** The placeholder URL `ghcr.io/nvidia/nvsentinel/event-generator` **does not exist** — this is test code only. You must build and push to your own registry.
 
 **Configure test scenarios by changing the ConfigMap:**
 - Light load: `kubectl apply -f event-generator-config-light.yaml`
@@ -66,23 +67,6 @@ sed -i 's|ghcr.io/nvidia/nvsentinel|YOUR_REGISTRY|g' event-generator-daemonset.y
 - Heavy load: `kubectl apply -f event-generator-config-heavy.yaml`
 
 See [event-generator/BUILD.md](event-generator/BUILD.md) for detailed instructions.
-
-## Test Architecture
-
-### Event Generation
-
-To simulate production-scale load, we deploy a DaemonSet of event generators (one pod per node) that inject synthetic health events directly into the platform connector via gRPC. This approach simulates production-style loads without requiring actual hardware failures or DCGM instrumentation.
-
-**Event Distribution (Random Selection):**
-- 64% - Healthy GPU events (IsFatal: false, IsHealthy: true)
-- 24% - System info events (IsFatal: false, IsHealthy: true)
-- 8% - Fatal GPU errors (IsFatal: true, IsHealthy: false)
-- 4% - NVSwitch warnings (IsFatal: false, IsHealthy: false)
-
-**Key capabilities:**
-- **Communication:** Direct gRPC via Unix socket to platform connector
-- **Deployment:** DaemonSet (one pod per worker node)
-- **Modes:** Continuous generation with configurable event rates
 
 ## Test Results Summary
 
@@ -108,6 +92,23 @@ See [results/](results/) for detailed test reports.
 - Additional burst testing validated system behavior under extreme loads to identify operational limits
 
 📊 **[Full Results](results/API_and_MongoDB_Results.md)**
+
+### 2. FQM Latency & Queue Depth
+
+**Objective:** Measure end-to-end latency from fatal event to node cordon at scale
+
+**Test Scenarios (1500-node cluster):**
+- 10% cluster failure (150 nodes)
+- 25% cluster failure (375 nodes)
+- 50% cluster failure (750 nodes)
+
+**Key Findings:**
+- 100% cordoning success rate at all scales
+- FQM processes ~2.5 nodes/sec consistently across all scales
+- Event handling latency consistent: P50 ~0.37s, P90 ~0.48s
+- FQM processes events sequentially (one at a time from change stream queue)
+
+📊 **[Full Results](results/FQM_Latency_and_Queue_Depth_Results.md)**
 
 ### Additional Tests
 
@@ -150,6 +151,7 @@ The test configuration enables MongoDB metrics for Prometheus. If using `kube-pr
 ## Detailed Results
 
 - 📊 [API Server Impact & MongoDB Performance](results/API_and_MongoDB_Results.md) - Light/Medium/Heavy load test results
+- 📊 [FQM Latency & Queue Depth](results/FQM_Latency_and_Queue_Depth_Results.md) - End-to-end cordoning latency at 10-50% cluster failure
 - 📊 [Production Baseline Analysis](results/PRODUCTION_BASELINE.md) - Real-world event rate analysis
 
 ## Directory Structure
@@ -164,6 +166,7 @@ tests/scale-tests/
 │   └── event-generator-config-heavy.yaml
 ├── results/                         # Test results
 │   ├── API_and_MongoDB_Results.md
+│   ├── FQM_Latency_and_Queue_Depth_Results.md
 │   └── PRODUCTION_BASELINE.md
 ├── event-generator/                 # Event generator source code
 │   ├── main.go
@@ -193,4 +196,4 @@ Additional testing in progress.
 
 ---
 
-**Last Updated:** December 1, 2025
+**Last Updated:** December 5, 2025

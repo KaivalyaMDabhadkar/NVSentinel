@@ -1401,7 +1401,8 @@ func TestReconciler_CustomDrainHappyPath(t *testing.T) {
 	setup.mockDB.storeEvent(nodeName, event)
 
 	err := setup.reconciler.ProcessEventGeneric(setup.ctx, event, setup.mockDB, nodeName)
-	require.NoError(t, err, "First call should succeed and create the CR")
+	require.Error(t, err, "First call should create CR and return error to trigger retry")
+	assert.Contains(t, err.Error(), "waiting for custom drain CR to complete")
 
 	eventID := nodeName + "-event"
 	crName := customdrain.GenerateCRName(nodeName, eventID)

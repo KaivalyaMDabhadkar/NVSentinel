@@ -808,7 +808,7 @@ func (r *Reconciler) executeCustomDrain(ctx context.Context, action *evaluator.D
 		"node", nodeName,
 		"crName", crName)
 
-	return nil
+	return fmt.Errorf("waiting for custom drain CR to complete: %s", crName)
 }
 
 func (r *Reconciler) deleteCustomDrainCRIfEnabled(ctx context.Context, nodeName, eventID string) {
