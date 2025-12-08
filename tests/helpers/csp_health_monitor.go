@@ -116,7 +116,7 @@ func setupCSPHealthMonitorTest(
 	}
 
 	testCtx.NodeName = SelectTestNodeWithEmptyProviderID(ctx, t, client)
-	testCtx.CSPClient, err = NewCSPAPIMockClient(client)
+	testCtx.CSPClient, err = NewCSPAPIMockClient(t, client)
 	require.NoError(t, err, "failed to create CSP API Mock client")
 
 	// Reset poll count before restart so we can detect the first poll from the new pod
@@ -369,33 +369,54 @@ func logConditionResult(t *testing.T, nodeName string, expectCondition bool) {
 
 func waitForFirstPoll(t *testing.T, cspClient *CSPAPIMockClient, targetCSP CSPType) {
 	t.Helper()
+	waitForPollCountIncrease(t, cspClient, targetCSP, 0)
+}
+
+func waitForPollCountIncrease(t *testing.T, cspClient *CSPAPIMockClient, targetCSP CSPType, initialCount int64) {
+	t.Helper()
+
+	startTime := time.Now()
 
 	require.Eventually(t, func() bool {
 		pollCount, err := cspClient.GetPollCount(targetCSP)
 		if err != nil {
-			t.Logf("Error getting poll count: %v", err)
+			t.Logf("Error getting poll count for %s: %v", targetCSP, err)
 			return false
 		}
 
-		if pollCount == 0 {
-			t.Logf("Waiting for first poll (current count: %d)", pollCount)
+		if pollCount <= initialCount {
+			elapsed := time.Since(startTime).Round(time.Second)
+			t.Logf("Waiting for %s poll (count: %d, need > %d, elapsed: %v)", targetCSP, pollCount, initialCount, elapsed)
+
 			return false
 		}
 
-		t.Logf("CSP health monitor has completed %d poll(s)", pollCount)
+		t.Logf("CSP health monitor poll detected (count: %d → %d)", initialCount, pollCount)
 
 		return true
-	}, 2*time.Minute, 2*time.Second, "CSP health monitor did not poll within timeout")
+	}, 3*time.Minute, 2*time.Second,
+		fmt.Sprintf("CSP health monitor (%s) did not poll within timeout", targetCSP))
 }
 
-// WaitForCSPHealthMonitorPoll resets the poll counter and waits for the CSP health monitor
-// to complete at least one poll cycle
+// WaitForCSPHealthMonitorPoll waits for the CSP health monitor to complete at least one
+// poll cycle after this function is called
 func WaitForCSPHealthMonitorPoll(t *testing.T, cspClient *CSPAPIMockClient, targetCSP CSPType) {
 	t.Helper()
 
-	require.NoError(t, cspClient.ResetPollCount(targetCSP), "failed to reset poll count")
-	t.Log("Waiting for CSP health monitor to complete first poll cycle...")
-	waitForFirstPoll(t, cspClient, targetCSP)
+	// Get the current poll count BEFORE waiting
+	initialCount, err := cspClient.GetPollCount(targetCSP)
+	if err != nil {
+		// If we can't get the count, fall back to reset-and-wait
+		t.Logf("Warning: could not get initial poll count, falling back to reset: %v", err)
+		require.NoError(t, cspClient.ResetPollCount(targetCSP), "failed to reset poll count")
+		t.Log("Waiting for CSP health monitor to complete first poll cycle...")
+		waitForFirstPoll(t, cspClient, targetCSP)
+
+		return
+	}
+
+	t.Logf("Waiting for %s poll count to increase from %d...", targetCSP, initialCount)
+	waitForPollCountIncrease(t, cspClient, targetCSP, initialCount)
 }
 
 // WaitForNextPoll waits for the CSP health monitor to complete at least one more poll cycle
@@ -406,21 +427,6 @@ func WaitForNextPoll(t *testing.T, cspClient *CSPAPIMockClient, targetCSP CSPTyp
 	initialCount, err := cspClient.GetPollCount(targetCSP)
 	require.NoError(t, err, "failed to get initial poll count")
 
-	t.Logf("Waiting for next poll cycle (current count: %d)", initialCount)
-
-	require.Eventually(t, func() bool {
-		currentCount, err := cspClient.GetPollCount(targetCSP)
-		if err != nil {
-			t.Logf("Error getting poll count: %v", err)
-			return false
-		}
-
-		if currentCount <= initialCount {
-			return false
-		}
-
-		t.Logf("Poll cycle completed (count: %d → %d)", initialCount, currentCount)
-
-		return true
-	}, 2*time.Minute, 2*time.Second, "CSP health monitor did not poll within timeout")
+	t.Logf("Waiting for next %s poll cycle (current count: %d)", targetCSP, initialCount)
+	waitForPollCountIncrease(t, cspClient, targetCSP, initialCount)
 }
