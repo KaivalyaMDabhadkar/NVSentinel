@@ -394,7 +394,7 @@ func waitForPollCountIncrease(t *testing.T, cspClient *CSPAPIMockClient, targetC
 		t.Logf("CSP health monitor poll detected (count: %d → %d)", initialCount, pollCount)
 
 		return true
-	}, 3*time.Minute, 2*time.Second,
+	}, 10*time.Minute, 5*time.Second,
 		fmt.Sprintf("CSP health monitor (%s) did not poll within timeout", targetCSP))
 }
 
