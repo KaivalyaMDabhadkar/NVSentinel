@@ -399,24 +399,14 @@ func waitForPollCountIncrease(t *testing.T, cspClient *CSPAPIMockClient, targetC
 }
 
 // WaitForCSPHealthMonitorPoll waits for the CSP health monitor to complete at least one
-// poll cycle after this function is called
+// poll cycle after this function is called. It resets the poll counter first to ensure
+// we detect the NEW pod's first poll after a restart.
 func WaitForCSPHealthMonitorPoll(t *testing.T, cspClient *CSPAPIMockClient, targetCSP CSPType) {
 	t.Helper()
 
-	// Get the current poll count BEFORE waiting
-	initialCount, err := cspClient.GetPollCount(targetCSP)
-	if err != nil {
-		// If we can't get the count, fall back to reset-and-wait
-		t.Logf("Warning: could not get initial poll count, falling back to reset: %v", err)
-		require.NoError(t, cspClient.ResetPollCount(targetCSP), "failed to reset poll count")
-		t.Log("Waiting for CSP health monitor to complete first poll cycle...")
-		waitForFirstPoll(t, cspClient, targetCSP)
-
-		return
-	}
-
-	t.Logf("Waiting for %s poll count to increase from %d...", targetCSP, initialCount)
-	waitForPollCountIncrease(t, cspClient, targetCSP, initialCount)
+	require.NoError(t, cspClient.ResetPollCount(targetCSP), "failed to reset poll count")
+	t.Logf("Waiting for %s health monitor to complete first poll cycle...", targetCSP)
+	waitForFirstPoll(t, cspClient, targetCSP)
 }
 
 // WaitForNextPoll waits for the CSP health monitor to complete at least one more poll cycle
