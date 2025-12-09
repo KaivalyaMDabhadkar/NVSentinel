@@ -107,6 +107,22 @@ spec:
             - name: metrics
               containerPort: {{ ((.Values.global).metricsPort) | default 2112 }}
               protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
           - name: config-volume
             mountPath: /etc/config/
@@ -148,6 +164,22 @@ spec:
             - name: metrics-sidecar
               containerPort: 2113
               protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics-sidecar
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics-sidecar
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           volumeMounts:
           - name: config-volume
             mountPath: /etc/config/
