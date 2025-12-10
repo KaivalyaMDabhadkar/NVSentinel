@@ -94,6 +94,11 @@ func (m *MockDatabaseClient) Close(ctx context.Context) error {
 	return args.Error(0)
 }
 
+func (m *MockDatabaseClient) DeleteResumeToken(ctx context.Context, tokenConfig client.TokenConfig) error {
+	args := m.Called(ctx, tokenConfig)
+	return args.Error(0)
+}
+
 type MockCursor struct {
 	mock.Mock
 }

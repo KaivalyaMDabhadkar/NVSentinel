@@ -113,6 +113,17 @@ func (c *PostgreSQLClient) Close(ctx context.Context) error {
 	return c.db.Close()
 }
 
+func (c *PostgreSQLClient) DeleteResumeToken(ctx context.Context, tokenConfig TokenConfig) error {
+	query := "DELETE FROM resume_tokens WHERE client_name = $1"
+
+	_, err := c.db.ExecContext(ctx, query, tokenConfig.ClientName)
+	if err != nil {
+		return fmt.Errorf("failed to delete resume token: %w", err)
+	}
+
+	return nil
+}
+
 // InsertMany inserts multiple documents
 func (c *PostgreSQLClient) InsertMany(ctx context.Context, documents []interface{}) (*InsertManyResult, error) {
 	if len(documents) == 0 {

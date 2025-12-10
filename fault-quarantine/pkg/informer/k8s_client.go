@@ -101,7 +101,10 @@ func (c *FaultQuarantineClient) EnsureCircuitBreakerConfigMap(ctx context.Contex
 
 	cm := &v1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Data:       map[string]string{"status": string(initialStatus)},
+		Data: map[string]string{
+			"status": string(initialStatus),
+			"cursor": string(breaker.CursorModeResume),
+		},
 	}
 
 	_, err = cmClient.Create(ctx, cm, metav1.CreateOptions{})
@@ -195,6 +198,53 @@ func (c *FaultQuarantineClient) WriteCircuitBreakerState(
 		_, err = cmClient.Update(ctx, cm, metav1.UpdateOptions{})
 		if err != nil {
 			slog.Error("Error updating circuit breaker config map", "name", name, "namespace", namespace, "error", err)
+		}
+
+		return err
+	})
+}
+
+func (c *FaultQuarantineClient) ReadCursorMode(
+	ctx context.Context, name, namespace string,
+) (breaker.CursorMode, error) {
+	cm, err := c.Clientset.CoreV1().ConfigMaps(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return breaker.CursorModeResume, fmt.Errorf("failed to get config map %s in namespace %s: %w", name, namespace, err)
+	}
+
+	if cm.Data == nil {
+		return breaker.CursorModeResume, nil
+	}
+
+	cursor := cm.Data["cursor"]
+	if cursor == "" {
+		return breaker.CursorModeResume, nil
+	}
+
+	return breaker.CursorMode(cursor), nil
+}
+
+func (c *FaultQuarantineClient) WriteCursorMode(
+	ctx context.Context, name, namespace string, mode breaker.CursorMode,
+) error {
+	cmClient := c.Clientset.CoreV1().ConfigMaps(namespace)
+
+	return retry.OnError(customBackoff, errors.IsConflict, func() error {
+		cm, err := cmClient.Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			slog.Error("Error getting circuit breaker config map", "name", name, "namespace", namespace, "error", err)
+			return err
+		}
+
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+
+		cm.Data["cursor"] = string(mode)
+
+		_, err = cmClient.Update(ctx, cm, metav1.UpdateOptions{})
+		if err != nil {
+			slog.Error("Error updating circuit breaker config map cursor", "name", name, "namespace", namespace, "error", err)
 		}
 
 		return err

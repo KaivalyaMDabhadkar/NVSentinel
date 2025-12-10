@@ -173,6 +173,10 @@ func (m *MockDatabaseClient) Close(ctx context.Context) error {
 	return nil
 }
 
+func (m *MockDatabaseClient) DeleteResumeToken(ctx context.Context, tokenConfig client.TokenConfig) error {
+	return nil
+}
+
 func (m *MockDatabaseClient) NewChangeStreamWatcher(ctx context.Context, tokenConfig client.TokenConfig, filter interface{}) (client.ChangeStreamWatcher, error) {
 	return nil, nil // Simple mock implementation
 }

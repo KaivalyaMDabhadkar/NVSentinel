@@ -38,6 +38,7 @@ import (
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/informer"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/metrics"
 	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	storeconfig "github.com/nvidia/nvsentinel/store-client/pkg/config"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 	corev1 "k8s.io/api/core/v1"
 )
@@ -202,6 +203,10 @@ func (r *Reconciler) Start(ctx context.Context) error {
 		return err
 	}
 
+	if err := r.handleCircuitBreakerCursorMode(ctx, databaseClient); err != nil {
+		return fmt.Errorf("failed to handle circuit breaker cursor mode: %w", err)
+	}
+
 	r.eventWatcher.SetProcessEventCallback(
 		func(ctx context.Context, event *model.HealthEventWithStatus) *model.Status {
 			return r.ProcessEvent(ctx, event, ruleSetEvals, rulesetsConfig)
@@ -335,6 +340,59 @@ func (r *Reconciler) checkCircuitBreakerAtStartup(ctx context.Context) error {
 	}
 
 	slog.Info("Listening for events on the channel...")
+
+	return nil
+}
+
+func (r *Reconciler) handleCircuitBreakerCursorMode(ctx context.Context, dbClient client.DatabaseClient) error {
+	if !r.config.CircuitBreakerEnabled {
+		return nil
+	}
+
+	cursorMode, err := r.cb.GetCursorMode(ctx)
+	if err != nil {
+		slog.Error("Failed to read cursor mode, defaulting to RESUME", "error", err)
+		return fmt.Errorf("failed to read cursor mode: %w", err)
+	}
+
+	if cursorMode == breaker.CursorModeCreate {
+		slog.Info("Circuit breaker cursor is CREATE, deleting resume token to skip accumulated events")
+
+		if err := r.deleteResumeToken(ctx, dbClient); err != nil {
+			slog.Error("Failed to delete resume token", "error", err)
+			return fmt.Errorf("failed to delete resume token: %w", err)
+		}
+
+		if err := r.cb.SetCursorMode(ctx, breaker.CursorModeResume); err != nil {
+			slog.Error("Failed to reset cursor to RESUME", "error", err)
+			return fmt.Errorf("failed to reset cursor to RESUME: %w", err)
+		}
+
+		slog.Info("Resume token deleted, will start from latest events")
+	} else {
+		slog.Info("Circuit breaker cursor is RESUME, will process accumulated events")
+	}
+
+	return nil
+}
+
+func (r *Reconciler) deleteResumeToken(ctx context.Context, dbClient client.DatabaseClient) error {
+	tokenConfig, err := storeconfig.TokenConfigFromEnv("fault-quarantine")
+	if err != nil {
+		return fmt.Errorf("failed to load token configuration: %w", err)
+	}
+
+	clientTokenConfig := client.TokenConfig{
+		ClientName:      tokenConfig.ClientName,
+		TokenDatabase:   tokenConfig.TokenDatabase,
+		TokenCollection: tokenConfig.TokenCollection,
+	}
+
+	if err := dbClient.DeleteResumeToken(ctx, clientTokenConfig); err != nil {
+		return fmt.Errorf("failed to delete resume token: %w", err)
+	}
+
+	slog.Info("Successfully deleted resume token", "clientName", tokenConfig.ClientName)
 
 	return nil
 }

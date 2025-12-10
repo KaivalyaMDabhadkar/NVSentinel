@@ -30,6 +30,7 @@ import (
 )
 
 type scaleTestContextKey int
+type cursorMode string
 
 const (
 	keyNodes scaleTestContextKey = iota
@@ -37,6 +38,9 @@ const (
 	keyOriginalCBState
 	keyOriginalDeployment
 	keyCircuitBreakerNodes
+
+	cursorModeCreate cursorMode = "CREATE"
+	cursorModeResume cursorMode = "RESUME"
 )
 
 func TestScaleHealthEvents(t *testing.T) {
@@ -226,19 +230,41 @@ func TestScaleHealthEvents(t *testing.T) {
 		return ctx
 	})
 
-	feature.Assess("Reset circuit breaker and send healthy events", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		healthCheckNodes := ctx.Value(keyHealthCheckNodes).([]string)
+	feature.Assess("Reset circuit breaker and validate blocked nodes are not cordoned", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 
-		helpers.SetCircuitBreakerState(ctx, t, c, "CLOSED")
+		helpers.SetCircuitBreakerState(ctx, t, c, "CLOSED", string(cursorModeCreate))
 
-		err := helpers.SendHealthEventsToNodes(healthCheckNodes, "data/healthy-event.json")
-		assert.NoError(t, err, "failed to send healthy events")
+		client, err := c.NewClient()
+		assert.NoError(t, err, "failed to create kubernetes client")
+
+		blockedNodes := ctx.Value(keyCircuitBreakerNodes).([]string)
+		require.True(t, len(blockedNodes) > 0, "Need at least one blocked node for force override test")
+
+		require.Never(
+			t,
+			func() bool {
+				for _, nodeName := range blockedNodes {
+					node, err := helpers.GetNodeByName(ctx, client, nodeName)
+					if err == nil && node.Spec.Unschedulable {
+						return true
+					}
+				}
+				return false
+			},
+			helpers.NeverWaitTimeout,
+			helpers.WaitInterval,
+			"blocked nodes should not be cordoned",
+			blockedNodes,
+		)
 
 		return ctx
 	})
 
-	feature.Assess("Validate cordoned nodes are uncordoned", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+	feature.Assess("Send healthy events and validate cordoned nodes are uncordoned", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		healthCheckNodes := ctx.Value(keyHealthCheckNodes).([]string)
+
+		err := helpers.SendHealthEventsToNodes(healthCheckNodes, "data/healthy-event.json")
+		assert.NoError(t, err, "failed to send healthy events")
 
 		client, err := c.NewClient()
 		assert.NoError(t, err, "failed to create kubernetes client")
@@ -285,7 +311,7 @@ func TestScaleHealthEvents(t *testing.T) {
 		namespaceName := ctx.Value(keyNamespace).(string)
 		healthCheckNodes := ctx.Value(keyHealthCheckNodes).([]string)
 
-		helpers.SetCircuitBreakerState(ctx, t, c, "CLOSED")
+		helpers.SetCircuitBreakerState(ctx, t, c, "CLOSED", string(cursorModeResume))
 
 		helpers.SendHealthyEventsAsync(ctx, t, client, healthCheckNodes)
 
@@ -302,9 +328,9 @@ func TestScaleHealthEvents(t *testing.T) {
 
 		originalCBState := ctx.Value(keyOriginalCBState).(string)
 		if originalCBState != "" {
-			helpers.SetCircuitBreakerState(ctx, t, c, originalCBState)
+			helpers.SetCircuitBreakerState(ctx, t, c, originalCBState, string(cursorModeResume))
 		} else {
-			helpers.SetCircuitBreakerState(ctx, t, c, "CLOSED")
+			helpers.SetCircuitBreakerState(ctx, t, c, "CLOSED", string(cursorModeResume))
 		}
 
 		return ctx

@@ -9,6 +9,7 @@ This test suite validates NVSentinel's performance and scalability under realist
 1. **Does NVSentinel affect the API server load and cause slowdown at scale of 1000+ nodes?**
 2. **Does MongoDB function at scale in our use case?**
 3. **What is the end-to-end latency of cordoning nodes during mass failure events?**
+4. **How does Node Drainer handle concurrent drain operations at scale?**
 
 **Testing Version:** NVSentinel v0.4.0  
 **Cluster Scale:** 1500 nodes
@@ -110,6 +111,25 @@ See [results/](results/) for detailed test reports.
 
 📊 **[Full Results](results/FQM_Latency_and_Queue_Depth_Results.md)**
 
+### 3. Concurrent Drain Operations
+
+**Objective:** Validate Node Drainer Manager's ability to handle concurrent drain operations at scale
+
+**Test Scenarios (1500-node cluster):**
+- **Training-sim:** Simulated training workload — 2 large pods/node (3,000 total), 60s terminationGracePeriodSeconds
+- **Inference-sim:** Simulated inference workload — 15 small pods/node (22,500 total), 30s terminationGracePeriodSeconds
+- Scale tests at 10%, 25%, and 50% cluster failure (150, 375, 750 nodes)
+
+*Note: These are not real ML workloads — they are simple containers configured to mimic typical pod density and resource characteristics.*
+
+**Key Findings:**
+- All tests completed with 0 processing errors
+- **Training workloads** draining completes quickly (~2-10 min) — not rate limited
+- **Inference workloads** hit Kubernetes client 5/sec rate limit (~8-44 min)
+- Drain time scales linearly with pod count when rate limited
+
+📊 **[Full Results](results/Concurrent_Drain_Results.md)**
+
 ### Additional Tests
 
 *(More test results will be added here as testing continues)*
@@ -152,6 +172,7 @@ The test configuration enables MongoDB metrics for Prometheus. If using `kube-pr
 
 - 📊 [API Server Impact & MongoDB Performance](results/API_and_MongoDB_Results.md) - Light/Medium/Heavy load test results
 - 📊 [FQM Latency & Queue Depth](results/FQM_Latency_and_Queue_Depth_Results.md) - End-to-end cordoning latency at 10-50% cluster failure
+- 📊 [Concurrent Drain Operations](results/Concurrent_Drain_Results.md) - Node Drainer scaling with 300 concurrent drains
 - 📊 [Production Baseline Analysis](results/PRODUCTION_BASELINE.md) - Real-world event rate analysis
 
 ## Directory Structure
@@ -167,7 +188,9 @@ tests/scale-tests/
 ├── results/                         # Test results
 │   ├── API_and_MongoDB_Results.md
 │   ├── FQM_Latency_and_Queue_Depth_Results.md
-│   └── PRODUCTION_BASELINE.md
+│   ├── Concurrent_Drain_Results.md
+│   ├── PRODUCTION_BASELINE.md
+│   └── graphs/                      # Generated graphs
 ├── event-generator/                 # Event generator source code
 │   ├── main.go
 │   ├── Dockerfile
@@ -187,13 +210,13 @@ tests/scale-tests/
 
 ## Summary
 
-Initial scale testing on a 1500-node cluster validates NVSentinel v0.4.0 performance:
+Scale testing on a 1500-node cluster validates NVSentinel v0.4.0 performance:
 
 - **API Server:** Minimal latency impact with P75 stable at ~20ms even at 500 events/sec sustained load
 - **MongoDB:** Successfully handles sustained loads from 30-500 events/sec with default configuration
-
-Additional testing in progress.
+- **FQM Cordoning:** 100% success rate at all scales, ~2.5 nodes/sec processing rate
+- **Node Drainer:** Successfully evicted 11,000+ pods at 50% cluster failure with 0 errors; bottleneck is Kubernetes client rate limit (5 evictions/sec)
 
 ---
 
-**Last Updated:** December 5, 2025
+**Last Updated:** December 8, 2025

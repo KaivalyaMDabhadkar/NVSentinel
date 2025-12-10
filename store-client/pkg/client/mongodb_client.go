@@ -761,6 +761,18 @@ func (c *MongoDBClient) Close(ctx context.Context) error {
 	return c.client.Disconnect(ctx)
 }
 
+func (c *MongoDBClient) DeleteResumeToken(ctx context.Context, tokenConfig TokenConfig) error {
+	collection := c.client.Database(tokenConfig.TokenDatabase).Collection(tokenConfig.TokenCollection)
+	filter := bson.M{"clientName": tokenConfig.ClientName}
+
+	_, err := collection.DeleteOne(ctx, filter)
+	if err != nil {
+		return fmt.Errorf("failed to delete resume token: %w", err)
+	}
+
+	return nil
+}
+
 // Collection-specific methods for MongoDBCollectionClient
 
 func (c *MongoDBCollectionClient) GetCollectionName() string {

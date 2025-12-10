@@ -938,6 +938,17 @@ func (c *PostgreSQLDatabaseClient) Close(ctx context.Context) error {
 	return c.db.Close()
 }
 
+func (c *PostgreSQLDatabaseClient) DeleteResumeToken(ctx context.Context, tokenConfig client.TokenConfig) error {
+	query := "DELETE FROM resume_tokens WHERE client_name = $1"
+
+	_, err := c.db.ExecContext(ctx, query, tokenConfig.ClientName)
+	if err != nil {
+		return fmt.Errorf("failed to delete resume token: %w", err)
+	}
+
+	return nil
+}
+
 // --- Helper types for results ---
 
 type postgresqlSingleResult struct {
