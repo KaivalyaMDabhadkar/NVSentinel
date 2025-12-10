@@ -98,7 +98,7 @@ func logStartupInfo(cfg *appConfig) {
 	slog.Debug("log verbosity level is set based on the -v flag for sidecar.")
 }
 
-func setupUDSConnection(udsPath string) (*grpc.ClientConn, pb.PlatformConnectorClient) {
+func setupUDSConnection(udsPath string) (*grpc.ClientConn, pb.PlatformConnectorClient, error) {
 	slog.Info("Sidecar attempting to connect to Platform Connector UDS", "unix", udsPath)
 	target := fmt.Sprintf("unix:%s", udsPath)
 
@@ -112,14 +112,16 @@ func setupUDSConnection(udsPath string) (*grpc.ClientConn, pb.PlatformConnectorC
 		slog.Error("Sidecar failed to dial Platform Connector UDS",
 			"target", target,
 			"error", err)
+
+		return nil, nil, fmt.Errorf("failed to connect to Platform Connector UDS: %w", err)
 	}
 
 	slog.Info("Sidecar successfully connected to Platform Connector UDS.")
 
-	return conn, pb.NewPlatformConnectorClient(conn)
+	return conn, pb.NewPlatformConnectorClient(conn), nil
 }
 
-func setupKubernetesClient() kubernetes.Interface {
+func setupKubernetesClient() (kubernetes.Interface, error) {
 	var restCfg *rest.Config
 
 	var err error
@@ -127,18 +129,18 @@ func setupKubernetesClient() kubernetes.Interface {
 	restCfg, err = rest.InClusterConfig()
 	if err != nil {
 		slog.Warn("trigger engine, failed to obtain in-cluster Kubernetes config", "error", err)
-		return nil
+		return nil, fmt.Errorf("failed to obtain in-cluster Kubernetes config: %w", err)
 	}
 
 	k8sClient, err := kubernetes.NewForConfig(restCfg)
 	if err != nil {
 		slog.Error("trigger engine, failed to create Kubernetes clientset", "error", err)
-		return nil
+		return nil, fmt.Errorf("failed to create Kubernetes clientset: %w", err)
 	}
 
 	slog.Info("Trigger Engine: Kubernetes clientset initialized successfully for node readiness checks.")
 
-	return k8sClient
+	return k8sClient, nil
 }
 
 func run() error {
@@ -193,7 +195,10 @@ func run() error {
 
 		slog.Info("Datastore initialized successfully for sidecar.")
 
-		conn, platformConnectorClient := setupUDSConnection(appCfg.udsPath)
+		conn, platformConnectorClient, err := setupUDSConnection(appCfg.udsPath)
+		if err != nil {
+			return fmt.Errorf("UDS connection setup failed: %w", err)
+		}
 
 		defer func() {
 			slog.Info("Closing UDS connection for sidecar.")
@@ -203,7 +208,10 @@ func run() error {
 			}
 		}()
 
-		k8sClient := setupKubernetesClient()
+		k8sClient, err := setupKubernetesClient()
+		if err != nil {
+			return fmt.Errorf("kubernetes client setup failed: %w", err)
+		}
 
 		engine := trigger.NewEngine(cfg, store, platformConnectorClient, k8sClient)
 
