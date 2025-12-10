@@ -68,7 +68,7 @@ func InitAuditLogger(comp string) error {
 		return fmt.Errorf("component name cannot be empty")
 	}
 
-	if !envutil.GetEnvBool(EnvAuditEnabled, true) {
+	if !envutil.GetEnvBool(EnvAuditEnabled, false) {
 		return nil
 	}
 

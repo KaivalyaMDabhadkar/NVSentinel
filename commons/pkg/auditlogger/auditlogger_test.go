@@ -36,11 +36,13 @@ func TestInitAuditLogger(t *testing.T) {
 			name:      "successful initialization with valid component",
 			component: "test-component",
 			setupEnv: func() {
+				os.Setenv(EnvAuditEnabled, "true")
 				os.Setenv(EnvPodName, "test-pod")
 				tmpDir := t.TempDir()
 				os.Setenv(EnvAuditLogBasePath, tmpDir)
 			},
 			cleanupEnv: func() {
+				os.Unsetenv(EnvAuditEnabled)
 				os.Unsetenv(EnvPodName)
 				os.Unsetenv(EnvAuditLogBasePath)
 				CloseAuditLogger()
@@ -74,11 +76,13 @@ func TestInitAuditLogger(t *testing.T) {
 			name:      "uses component name when POD_NAME not set",
 			component: "fallback-component",
 			setupEnv: func() {
+				os.Setenv(EnvAuditEnabled, "true")
 				tmpDir := t.TempDir()
 				os.Setenv(EnvAuditLogBasePath, tmpDir)
 				os.Unsetenv(EnvPodName)
 			},
 			cleanupEnv: func() {
+				os.Unsetenv(EnvAuditEnabled)
 				os.Unsetenv(EnvAuditLogBasePath)
 				CloseAuditLogger()
 			},
@@ -104,8 +108,10 @@ func TestInitAuditLogger(t *testing.T) {
 
 func TestLog(t *testing.T) {
 	tmpDir := t.TempDir()
+	os.Setenv(EnvAuditEnabled, "true")
 	os.Setenv(EnvAuditLogBasePath, tmpDir)
 	os.Setenv(EnvPodName, "test-pod")
+	defer os.Unsetenv(EnvAuditEnabled)
 	defer os.Unsetenv(EnvAuditLogBasePath)
 	defer os.Unsetenv(EnvPodName)
 
@@ -237,8 +243,10 @@ func TestLogWhenNotInitialized(t *testing.T) {
 
 func TestCloseAuditLogger(t *testing.T) {
 	tmpDir := t.TempDir()
+	os.Setenv(EnvAuditEnabled, "true")
 	os.Setenv(EnvAuditLogBasePath, tmpDir)
 	os.Setenv(EnvPodName, "test-pod")
+	defer os.Unsetenv(EnvAuditEnabled)
 	defer os.Unsetenv(EnvAuditLogBasePath)
 	defer os.Unsetenv(EnvPodName)
 

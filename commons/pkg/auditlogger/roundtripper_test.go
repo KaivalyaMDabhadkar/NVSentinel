@@ -75,8 +75,10 @@ func TestNewAuditingRoundTripper(t *testing.T) {
 
 func TestAuditingRoundTripper_WriteMethod(t *testing.T) {
 	tmpDir := t.TempDir()
+	os.Setenv(EnvAuditEnabled, "true")
 	os.Setenv(EnvAuditLogBasePath, tmpDir)
 	os.Setenv(EnvPodName, "test-pod")
+	defer os.Unsetenv(EnvAuditEnabled)
 	defer os.Unsetenv(EnvAuditLogBasePath)
 	defer os.Unsetenv(EnvPodName)
 
@@ -197,8 +199,10 @@ func TestAuditingRoundTripper_WriteMethod(t *testing.T) {
 
 func TestAuditingRoundTripper_ReadMethod(t *testing.T) {
 	tmpDir := t.TempDir()
+	os.Setenv(EnvAuditEnabled, "true")
 	os.Setenv(EnvAuditLogBasePath, tmpDir)
 	os.Setenv(EnvPodName, "test-pod-read")
+	defer os.Unsetenv(EnvAuditEnabled)
 	defer os.Unsetenv(EnvAuditLogBasePath)
 	defer os.Unsetenv(EnvPodName)
 
@@ -237,8 +241,10 @@ func TestAuditingRoundTripper_ReadMethod(t *testing.T) {
 
 func TestAuditingRoundTripper_ErrorResponse(t *testing.T) {
 	tmpDir := t.TempDir()
+	os.Setenv(EnvAuditEnabled, "true")
 	os.Setenv(EnvAuditLogBasePath, tmpDir)
 	os.Setenv(EnvPodName, "test-pod-error")
+	defer os.Unsetenv(EnvAuditEnabled)
 	defer os.Unsetenv(EnvAuditLogBasePath)
 	defer os.Unsetenv(EnvPodName)
 
@@ -280,9 +286,11 @@ func TestAuditingRoundTripper_ErrorResponse(t *testing.T) {
 
 func TestAuditingRoundTripper_NilRequestBody(t *testing.T) {
 	tmpDir := t.TempDir()
+	os.Setenv(EnvAuditEnabled, "true")
 	os.Setenv(EnvAuditLogBasePath, tmpDir)
 	os.Setenv(EnvPodName, "test-pod-nilbody")
 	os.Setenv(EnvAuditLogRequestBody, "true")
+	defer os.Unsetenv(EnvAuditEnabled)
 	defer os.Unsetenv(EnvAuditLogBasePath)
 	defer os.Unsetenv(EnvPodName)
 	defer os.Unsetenv(EnvAuditLogRequestBody)
@@ -330,9 +338,11 @@ func (e *errorReader) Read(p []byte) (n int, err error) {
 
 func TestAuditingRoundTripper_ReadAllError(t *testing.T) {
 	tmpDir := t.TempDir()
+	os.Setenv(EnvAuditEnabled, "true")
 	os.Setenv(EnvAuditLogBasePath, tmpDir)
 	os.Setenv(EnvPodName, "test-pod-readerror")
 	os.Setenv(EnvAuditLogRequestBody, "true")
+	defer os.Unsetenv(EnvAuditEnabled)
 	defer os.Unsetenv(EnvAuditLogBasePath)
 	defer os.Unsetenv(EnvPodName)
 	defer os.Unsetenv(EnvAuditLogRequestBody)
@@ -400,9 +410,11 @@ func (b *bodyCapturingRoundTripper) RoundTrip(req *http.Request) (*http.Response
 
 func TestAuditingRoundTripper_PreservesRequestBody(t *testing.T) {
 	tmpDir := t.TempDir()
+	os.Setenv(EnvAuditEnabled, "true")
 	os.Setenv(EnvAuditLogBasePath, tmpDir)
 	os.Setenv(EnvPodName, "test-pod-preserve")
 	os.Setenv(EnvAuditLogRequestBody, "true")
+	defer os.Unsetenv(EnvAuditEnabled)
 	defer os.Unsetenv(EnvAuditLogBasePath)
 	defer os.Unsetenv(EnvPodName)
 	defer os.Unsetenv(EnvAuditLogRequestBody)
