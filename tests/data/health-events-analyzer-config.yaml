@@ -9,6 +9,7 @@ data:
     name = "MultipleRemediations"
     description = "Detect if multiple remediations are performed within 1.5 minutes on a node"
     recommended_action = "CONTACT_SUPPORT"
+    evaluate_rule = true
     stage = [
       '''
       {
@@ -39,6 +40,7 @@ data:
     name = "RepeatedXIDErrorOnSameGPU"
     description = "Detect occurrence of fatal XIDs 2 times within 2 minutes where the burst window is 20 seconds and sticky XIDs window is 30 seconds"
     recommended_action = "CONTACT_SUPPORT"
+    evaluate_rule = true
     stage = [
       '''
       {
@@ -281,6 +283,7 @@ data:
     description = "Detect if XID 31 occurred 2 or more times on the same GPU within 3 minutes where the burst window is 20 seconds and sticky XIDs window is 30 seconds"
     recommended_action = "RUN_DCGMEUD"
     message = "if DCGM EUD tests pass, run field diagnostics"
+    evaluate_rule = true
     stage = [
       '''
       {
@@ -523,6 +526,7 @@ data:
     description = "Detect if XID 31 occurred 2 or more times on different GPUs within 1 minute"
     message = "App passing bad data or using incorrect GPU methods; check error PID to identify source of the problem, if application is known good and problem persists, then contact support"
     recommended_action = "NONE"
+    evaluate_rule = true
     stage = [
       '''
       {
@@ -611,6 +615,7 @@ data:
     description = "Detect if XID 13 occurred 2 or more times on the same GPC and TPC within 3 minutes"
     message = "if DCGM EUD tests pass, run field diagnostics" 
     recommended_action = "RUN_DCGMEUD"
+    evaluate_rule = true
     stage = [
       '''
       {
@@ -908,6 +913,7 @@ data:
     description = "Detect if XID 13 occurred 2 or more times on different GPC and TPC combinations within 1.5 minutes"
     message = "App passing bad data or using incorrect GPU methods; check error PID to identify source of the problem, if application is known good and problem persists, then contact support"
     recommended_action = "NONE"
+    evaluate_rule = true
     stage = [
       '''
       {
@@ -1047,6 +1053,7 @@ data:
     description = "Detect if XID error occurred only once in the last burst within 1 minute time window"
     message = "App passing bad data or using incorrect GPU methods; check error PID to identify source of the problem, if application is known good and problem persists, then contact support"
     recommended_action = "NONE"
+    evaluate_rule = true
     stage = [
       '''
       {

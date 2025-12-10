@@ -168,6 +168,7 @@ var (
 				`{"$match": {"count": {"$gte": 5}}}`,
 			},
 			RecommendedAction: "CONTACT_SUPPORT",
+			EvaluateRule:      true,
 		},
 		{
 			Name:        "rule2",
@@ -180,6 +181,7 @@ var (
 			},
 			RecommendedAction: "CONTACT_SUPPORT",
 			Message:           "XID error occurred",
+			EvaluateRule:      true,
 		},
 		{
 			Name:        "rule3",
@@ -191,6 +193,7 @@ var (
 				`{"$match": {"count": {"$gte": 1}}}`,
 			},
 			RecommendedAction: "CONTACT_SUPPORT",
+			EvaluateRule:      true,
 		},
 	}
 	healthEvent_13 = datamodels.HealthEventWithStatus{
@@ -404,6 +407,33 @@ func TestHandleEvent(t *testing.T) {
 		published, err := reconciler.handleEvent(ctx, &healthEvent_13)
 		assert.NoError(t, err)
 		assert.False(t, published)
+		mockClient.AssertNotCalled(t, "Aggregate")
+		mockPublisher.AssertNotCalled(t, "HealthEventOccurredV1")
+	})
+	t.Run("rule with EvaluateRule false is skipped", func(t *testing.T) {
+		mockClient := new(mockDatabaseClient)
+		mockPublisher := &mockPublisher{}
+
+		disabledRule := config.HealthEventsAnalyzerRule{
+			Name:              "disabled-rule",
+			Description:       "rule evaluation should be skipped",
+			Stage:             []string{`{"$match": {"healthevent.nodename": "this.healthevent.nodename"}}`},
+			RecommendedAction: "CONTACT_SUPPORT",
+			EvaluateRule:      false,
+		}
+
+		reconciler := &Reconciler{
+			config: HealthEventsAnalyzerReconcilerConfig{
+				HealthEventsAnalyzerRules: &config.TomlConfig{Rules: []config.HealthEventsAnalyzerRule{disabledRule}},
+				Publisher:                 publisher.NewPublisher(mockPublisher),
+			},
+			databaseClient: mockClient,
+		}
+
+		published, err := reconciler.handleEvent(ctx, &healthEvent_13)
+		assert.NoError(t, err)
+		assert.False(t, published)
+
 		mockClient.AssertNotCalled(t, "Aggregate")
 		mockPublisher.AssertNotCalled(t, "HealthEventOccurredV1")
 	})

@@ -201,6 +201,11 @@ func (r *Reconciler) handleEvent(ctx context.Context, event *datamodels.HealthEv
 
 	// Process regular rules
 	for _, rule := range r.config.HealthEventsAnalyzerRules.Rules {
+		if !rule.EvaluateRule {
+			slog.Info("Skipping rule evaluation", "rule_name", rule.Name)
+			continue
+		}
+
 		published, err := r.processRule(ctx, rule, event)
 		if err != nil {
 			multiErr = multierror.Append(multiErr, err)
