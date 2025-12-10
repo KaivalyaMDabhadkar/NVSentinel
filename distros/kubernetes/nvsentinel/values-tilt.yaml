@@ -303,6 +303,17 @@ csp-health-monitor:
       endpointOverride: "csp-api-mock.nvsentinel.svc.cluster.local:50051"
     aws:
       endpointOverride: "http://csp-api-mock.nvsentinel.svc.cluster.local:8080/aws/health"
+  
+  affinity:
+    podAntiAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: kwok
+        namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: kube-system
+        topologyKey: kubernetes.io/hostname
 
 # Enable node metadata enrichment for testing
 platformConnector:
