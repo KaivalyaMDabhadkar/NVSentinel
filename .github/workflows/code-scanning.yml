@@ -30,7 +30,7 @@ concurrency:
 
 jobs:
   codeql-pr-analysis:
-    if: startsWith(github.ref, 'refs/heads/pull-request/')
+    if: github.repository == 'nvidia/nvsentinel' && startsWith(github.ref, 'refs/heads/pull-request/')
     name: CodeQL PR Analysis
     runs-on: linux-amd64-cpu32
     timeout-minutes: 360
@@ -81,7 +81,7 @@ jobs:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   codeql-baseline-analysis:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.repository == 'nvidia/nvsentinel' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     name: CodeQL Baseline Analysis
     runs-on: linux-amd64-cpu4
     timeout-minutes: 360

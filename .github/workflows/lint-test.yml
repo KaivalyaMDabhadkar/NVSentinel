@@ -39,6 +39,7 @@ env:
 
 jobs:
   simple-lint:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: linux-amd64-cpu16
     timeout-minutes: 30
     strategy:
@@ -100,6 +101,7 @@ jobs:
         run: make helm-lint
 
   health-monitors-lint-test:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: linux-amd64-cpu16
     timeout-minutes: 30
     strategy:
@@ -132,6 +134,7 @@ jobs:
 
 
   modules-lint-test:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: linux-amd64-cpu16
     timeout-minutes: 30
     strategy:
@@ -169,6 +172,7 @@ jobs:
             ${{ matrix.component }}/report.xml
 
   tilt-modules-lint-test:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: linux-amd64-cpu16
     timeout-minutes: 30
     strategy:
@@ -194,7 +198,7 @@ jobs:
             ${{ matrix.component }}/report.xml
 
   consolidated-coverage-report:
-    if: github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/')
+    if: github.repository == 'nvidia/nvsentinel' && (github.event_name == 'pull_request' || startsWith(github.ref, 'refs/heads/pull-request/'))
     runs-on: linux-amd64-cpu16
     timeout-minutes: 15
     needs: [health-monitors-lint-test, modules-lint-test, tilt-modules-lint-test]
@@ -391,7 +395,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   consolidated-coverage-baseline:
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    if: github.repository == 'nvidia/nvsentinel' && github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: linux-amd64-cpu16
     timeout-minutes: 15
     needs: [health-monitors-lint-test, modules-lint-test, tilt-modules-lint-test]

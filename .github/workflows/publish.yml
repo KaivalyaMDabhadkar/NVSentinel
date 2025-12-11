@@ -41,6 +41,7 @@ permissions:
 
 jobs:
   build-image-list:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: linux-amd64-cpu32
     timeout-minutes: 60
     outputs:
@@ -85,6 +86,7 @@ jobs:
           retention-days: 90
 
   build-images-docker:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: linux-amd64-cpu32
     timeout-minutes: 60
     permissions:
@@ -150,6 +152,7 @@ jobs:
 
   # Build images using ko and attest provenance
   build-images-ko:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: linux-amd64-cpu32
     timeout-minutes: 60
     permissions:
@@ -199,6 +202,7 @@ jobs:
         run: scripts/buildko.sh
 
   attest-and-sbom-ko:
+    if: github.repository == 'nvidia/nvsentinel'
     needs: build-images-ko
     runs-on: linux-amd64-cpu32
     permissions:
@@ -223,6 +227,7 @@ jobs:
           registry_password: ${{ secrets.GITHUB_TOKEN }}
 
   e2e-test:
+    if: github.repository == 'nvidia/nvsentinel'
     name: "E2E Test Published Images"
     runs-on: linux-amd64-cpu32
     timeout-minutes: 60

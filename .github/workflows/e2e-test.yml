@@ -40,6 +40,7 @@ permissions:
 
 jobs:
   e2e-test:
+    if: github.repository == 'nvidia/nvsentinel'
     # Run E2E tests on both AMD64 and ARM64 architectures with both MongoDB and PostgreSQL
     strategy:
       fail-fast: false  # Allow all combinations to complete even if some fail

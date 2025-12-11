@@ -29,6 +29,7 @@ permissions:
 
 jobs:
   integration-test-gcp:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:

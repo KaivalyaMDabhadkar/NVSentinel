@@ -46,6 +46,7 @@ permissions:
 
 jobs:
   container-build-test:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: linux-amd64-cpu32
     timeout-minutes: 45
     strategy:
@@ -96,6 +97,7 @@ jobs:
 
   # Test ko-based builds (Go modules)
   ko-build-test:
+    if: github.repository == 'nvidia/nvsentinel'
     runs-on: linux-amd64-cpu32
     timeout-minutes: 30
     strategy:
@@ -140,7 +142,7 @@ jobs:
   container-build-summary:
     runs-on: linux-amd64-cpu32
     needs: [container-build-test, ko-build-test]
-    if: always()
+    if: always() && github.repository == 'nvidia/nvsentinel'
     steps:
       - name: Check build results
         run: |
