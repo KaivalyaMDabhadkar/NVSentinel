@@ -22,11 +22,12 @@ import (
 	"testing"
 	"time"
 
+	"tests/helpers"
+
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
-	"tests/helpers"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
 )
@@ -128,15 +129,27 @@ func TestNodeDrainerEvictionModes(t *testing.T) {
 			return false
 		}, helpers.NeverWaitTimeout, helpers.WaitInterval, "both mode pods should wait, not be deleted immediately")
 
-		t.Log("Phase 2: Manually completing allowCompletion pods to unblock drain")
+		t.Log("Phase 3: Waiting for deleteAfterTimeout to expire (~60s)")
+		// The deleteAfterTimeoutMinutes is set to 1 minute in nd-all-modes.yaml
+		// Adding 10s buffer to account for processing time
+		time.Sleep(70 * time.Second)
+
+		t.Log("Phase 4: DeleteAfterTimeout pods force-deleted after timeout")
+		// This verifies that DeleteAfterTimeout is processed before AllowCompletion (not blocked by it)
+		helpers.WaitForPodsDeleted(ctx, t, client, "delete-timeout-test", deleteTimeoutPods)
+
+		t.Log("Phase 5: Verify AllowCompletion pods are still waiting (priority verification)")
+		// AllowCompletion pods should still exist - they wait indefinitely for natural completion
+		for _, podName := range allowCompletionPods {
+			pod := &v1.Pod{}
+			err := client.Resources().Get(ctx, podName, "allowcompletion-test", pod)
+			require.NoError(t, err, "AllowCompletion pod %s should still exist after DeleteAfterTimeout completes", podName)
+			require.Nil(t, pod.DeletionTimestamp, "AllowCompletion pod %s should not be terminating", podName)
+		}
+
+		t.Log("Phase 6: Manually completing AllowCompletion pods to finish drain")
 		helpers.DeletePodsByNames(ctx, t, client, "allowcompletion-test", allowCompletionPods)
 		helpers.WaitForPodsDeleted(ctx, t, client, "allowcompletion-test", allowCompletionPods)
-
-		t.Log("Phase 3: Waiting for deleteAfterTimeout to expire (~40s remaining)")
-		time.Sleep(35 * time.Second)
-
-		t.Log("Phase 3: DeleteAfterTimeout pods force-deleted after timeout")
-		helpers.WaitForPodsDeleted(ctx, t, client, "delete-timeout-test", deleteTimeoutPods)
 
 		helpers.WaitForNodeLabel(ctx, t, client, testCtx.NodeName, statemanager.NVSentinelStateLabelKey, helpers.DrainSucceededLabelValue)
 

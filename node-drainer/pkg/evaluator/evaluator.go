@@ -154,15 +154,19 @@ func (e *NodeDrainEvaluator) getAction(ctx context.Context, ns namespaces, nodeN
 		}
 	}
 
-	if len(ns.allowCompletionNamespaces) > 0 {
-		action := e.handleAllowCompletionNamespaces(ns, nodeName)
+	// Priority 2: DeleteAfterTimeout - pods have a deadline and must be force-deleted after timeout
+	// Process BEFORE AllowCompletion to ensure timeout-based eviction is not blocked
+	if len(ns.deleteAfterTimeoutNamespaces) > 0 {
+		action := e.handleDeleteAfterTimeoutNamespaces(ns, nodeName)
 		if action != nil {
 			return action
 		}
 	}
 
-	if len(ns.deleteAfterTimeoutNamespaces) > 0 {
-		action := e.handleDeleteAfterTimeoutNamespaces(ns, nodeName)
+	// Priority 3: AllowCompletion - pods wait indefinitely for natural completion
+	// Checked last since they have no deadline (unlike DeleteAfterTimeout)
+	if len(ns.allowCompletionNamespaces) > 0 {
+		action := e.handleAllowCompletionNamespaces(ns, nodeName)
 		if action != nil {
 			return action
 		}
