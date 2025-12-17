@@ -30,9 +30,9 @@ on:
           - 'true'
           - 'false'
       cut_off:
-        description: 'Delete images older than this (e.g., 1m, 1h, 1d, 7d, 30d)'
+        description: 'Delete images older than this (e.g., 1h, 1d, 7d, 30d)'
         required: true
-        default: '1m'
+        default: '30d'
         type: string
 
 concurrency:
@@ -96,7 +96,7 @@ jobs:
           account: NVIDIA
           token: ${{ secrets.GITHUB_TOKEN }}
           image-names: ${{ matrix.package }}
-          cut-off: ${{ github.event.inputs.cut_off || '1m' }}
+          cut-off: ${{ github.event.inputs.cut_off || '30d' }}
           # Keep at least 5 most recent untagged versions as safety buffer
           keep-n-most-recent: 5
           dry-run: ${{ github.event.inputs.dry_run || 'true' }}
