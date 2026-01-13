@@ -57,6 +57,16 @@ maintenance:
       completeConditionType: "NodeReady"
       templateFileName: "nvidia-reboot.yaml"
       equivalenceGroup: "restart"
+
+    # RESTART_VM is used as a fallback when GPU UUID is not available from metadata-collector.
+    RESTART_VM:
+      apiGroup: "janitor.dgxc.nvidia.com"
+      version: "v1alpha1"
+      kind: "RebootNode"
+      scope: "Cluster"
+      completeConditionType: "NodeReady"
+      templateFileName: "nvidia-reboot.yaml"
+      equivalenceGroup: "restart"
     # Additional action examples:
     # RESTART_BM:
     #   apiGroup: "remediation.example.com"
