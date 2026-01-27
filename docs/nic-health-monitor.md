@@ -27,10 +27,10 @@ Modern GPU clusters require immediate detection of **hard failures** that will c
 
 The monitor implements a **two-pipeline engine** leveraging `gpud`'s core packages:
 
-| Pipeline | Function | Data Source | Persistence |
-|----------|----------|-------------|-------------|
+| Pipeline          | Function                                           | Data Source                   | Persistence              |
+|-------------------|----------------------------------------------------|-------------------------------|--------------------------|
 | **State Monitor** | Detect hard UP/DOWN transitions and fatal counters | `sysfs` state files, counters | SQLite3 (`ibPortsStore`) |
-| **Log Watcher** | Detect driver/firmware failures | `/dev/kmsg` | SQLite3 (`eventstore`) |
+| **Log Watcher**   | Detect driver/firmware failures                    | `/dev/kmsg`                   | SQLite3 (`eventstore`)   |
 
 ### 1.3 Key Capabilities
 
@@ -49,11 +49,11 @@ The monitor raises events **only for fatal conditions** that will cause workload
 
 **Fatal Event Sources:**
 
-| Source | Fatal Conditions | Recommended Action |
-|--------|------------------|--------------------|
-| **State Monitor** | `state=DOWN`, `phys_state=Disabled`, `rate < target_rate` (Speed Degradation), device disappeared, PCI config=0xFF | **RecommendedAction_REPLACE_VM** |
-| **Log Watcher** | `cmd_exec timeout` | **RecommendedAction_RESTART_BM** |
-| **Log Watcher** | `health poll failed`, `unrecoverable`, `PCIe fatal`, `module absent` | **RecommendedAction_REPLACE_VM** |
+| Source             | Fatal Conditions                                                                                                                                                                        | Recommended Action               |
+|--------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------|
+| **State Monitor**  | `state=DOWN`, `phys_state=Disabled`, `rate < target_rate` (Speed Degradation), device disappeared, PCI config=0xFF                                                                      | **RecommendedAction_REPLACE_VM** |
+| **Log Watcher**    | `cmd_exec timeout`                                                                                                                                                                      | **RecommendedAction_RESTART_BM** |
+| **Log Watcher**    | `health poll failed`, `unrecoverable`, `PCIe fatal`, `module absent`                                                                                                                    | **RecommendedAction_REPLACE_VM** |
 | **Fatal Counters** | `symbol_error` (Delta > 120/hr), `local_link_integrity_errors` (Delta > 0), `excessive_buffer_overrun_errors` (Delta > 2/hour), `req_transport_retries_exceeded` (Delta > 0, Native IB) | **RecommendedAction_REPLACE_VM** |
 
 ---
@@ -66,14 +66,14 @@ Modern interconnects (HDR/NDR InfiniBand, 100/200/400GbE) use **PAM4 modulation*
 
 #### 2.1.1 PAM4 vs NRZ: Why Velocity Monitoring is Required
 
-| Aspect | NRZ (EDR/100GbE) | PAM4 (NDR/400GbE) |
-|--------|------------------|-------------------|
-| **Bits per symbol** | 1 | 2 |
-| **Voltage levels** | 2 (0, 1) | 4 (00, 01, 10, 11) |
-| **Eye height** | Maximum | **1/3 of NRZ** |
-| **SNR** | High | **Drastically reduced** |
-| **Raw bit errors** | Rare anomaly | **Guaranteed and constant** |
-| **Monitoring approach** | "Any error is bad" | **Velocity-based only** |
+| Aspect                  | NRZ (EDR/100GbE)   | PAM4 (NDR/400GbE)           |
+|-------------------------|--------------------|-----------------------------|
+| **Bits per symbol**     | 1                  | 2                           |
+| **Voltage levels**      | 2 (0, 1)           | 4 (00, 01, 10, 11)          |
+| **Eye height**          | Maximum            | **1/3 of NRZ**              |
+| **SNR**                 | High               | **Drastically reduced**     |
+| **Raw bit errors**      | Rare anomaly       | **Guaranteed and constant** |
+| **Monitoring approach** | "Any error is bad" | **Velocity-based only**     |
 
 > **Critical**: In PAM4 systems, raw bit errors are a **physical certainty**. A monitor that alerts on "Any Error > 0" would be permanently alarming. The velocity-based approach is the **only valid monitoring strategy** for 400G+ networks. ([Reference: PAM4 Test Challenges](https://www.edn.com/pam4-error-correction-bring-400gbe-test-challenges/))
 
@@ -88,10 +88,10 @@ Physical Impairment --> Eye Diagram Closes --> Symbol Errors --> FEC Corrections
 
 Because errors are inevitable in PAM4, **Forward Error Correction (FEC) is mandatory** for 200G/400G/NDR links.
 
-| Link Health State | Bit Error Rate | Symbol Errors | Action |
-|-------------------|----------------|---------------|--------|
-| **Healthy** | < 10⁻¹⁵ | ~0 post-FEC | None |
-| **Failed (Fatal)** | > 10⁻¹² | FEC margin exhausted | **Fatal (REPLACE_VM)** |
+| Link Health State  | Bit Error Rate | Symbol Errors        | Action                 |
+|--------------------|----------------|----------------------|------------------------|
+| **Healthy**        | < 10⁻¹⁵        | ~0 post-FEC          | None                   |
+| **Failed (Fatal)** | > 10⁻¹²        | FEC margin exhausted | **Fatal (REPLACE_VM)** |
 
 #### 2.2.1 The FEC "Cliff Effect"
 
@@ -121,12 +121,12 @@ The `ibv_modify_qp` call transitions the QP between states. Failures during thes
 
 This monitor focuses on **local hardware failures** that can be detected through kernel logs, hardware counters, and state changes. The following table categorizes failure scenarios:
 
-| Failure Category | Description | Detection Method | Persistence |
-|------------------|-------------|------------------|-------------|
-| **Firmware/Driver Failure** | Local command interface stalled, driver crash | **Kernel Log** (`cmd_exec timeout`, `health poll failed`) | `eventstore` |
+| Failure Category              | Description                                         | Detection Method                                              | Persistence    |
+|-------------------------------|-----------------------------------------------------|---------------------------------------------------------------|----------------|
+| **Firmware/Driver Failure**   | Local command interface stalled, driver crash       | **Kernel Log** (`cmd_exec timeout`, `health poll failed`)     | `eventstore`   |
 | **Physical Link Degradation** | Signal integrity issues, cable/transceiver problems | **Hardware Counters** (`symbol_error`, `link_error_recovery`) | `ibPortsStore` |
-| **Link State Change** | Link down, port disabled, SM unreachable | **State Monitor** (`state`, `phys_state`, LID changes) | `ibPortsStore` |
-| **PCIe/Bus Errors** | Device disappearance, AER events | **Kernel Log + State** (device removal, PCIe AER) | `eventstore` |
+| **Link State Change**         | Link down, port disabled, SM unreachable            | **State Monitor** (`state`, `phys_state`, LID changes)        | `ibPortsStore` |
+| **PCIe/Bus Errors**           | Device disappearance, AER events                    | **Kernel Log + State** (device removal, PCIe AER)             | `eventstore`   |
 
 > **Scope Limitation**: Remote-caused failures (e.g., remote node crash, fabric black hole, switch issues) are **not detectable** from local monitoring alone and require cluster-level correlation.
 
@@ -171,10 +171,10 @@ Unlike general-purpose TCP/IP networks, which are architected to be resilient to
 
 The critical operational requirement is distinguishing between:
 
-| Error Type | Characteristics | Impact |
-|------------|-----------------|--------|
+| Error Type      | Characteristics                            | Impact                                      |
+|-----------------|--------------------------------------------|---------------------------------------------|
 | **Soft Errors** | Probabilistic, recoverable via FEC/retries | Performance degradation, workload continues |
-| **Hard Errors** | Deterministic, exceed recovery capacity | Application failure **guaranteed** |
+| **Hard Errors** | Deterministic, exceed recovery capacity    | Application failure **guaranteed**          |
 
 The boundary between soft and hard errors is defined by:
 1. **Counter thresholds** that indicate recovery mechanism exhaustion
@@ -196,12 +196,12 @@ The InfiniBand specification defines a compliant link as maintaining a Bit Error
 
 The following counters represent **absolute deterministic failure** when they increment:
 
-| Counter | Mechanism | Why Deterministic |
-|---------|-----------|-------------------|
-| **link_downed** | Port Training State Machine fails to maintain LinkUp | Standard HPC applications do not support transparent dynamic rerouting of active QPs |
-| **excessive_buffer_overrun_errors** | HCA internal ingress buffer overflows | Violates fundamental "lossless" contract; packet causing overrun is dropped immediately |
-| **RNR_nak_retry_err** | Receiver Not Ready NAK retry exhausted | Terminal state of error handling; connection is severed |
-| **local_link_integrity_errors** | Raw physical errors exceed LocalPhyErrors hardware limit | Link is operating outside design specifications |
+| Counter                             | Mechanism                                                | Why Deterministic                                                                       |
+|-------------------------------------|----------------------------------------------------------|-----------------------------------------------------------------------------------------|
+| **link_downed**                     | Port Training State Machine fails to maintain LinkUp     | Standard HPC applications do not support transparent dynamic rerouting of active QPs    |
+| **excessive_buffer_overrun_errors** | HCA internal ingress buffer overflows                    | Violates fundamental "lossless" contract; packet causing overrun is dropped immediately |
+| **RNR_nak_retry_err**               | Receiver Not Ready NAK retry exhausted                   | Terminal state of error handling; connection is severed                                 |
+| **local_link_integrity_errors**     | Raw physical errors exceed LocalPhyErrors hardware limit | Link is operating outside design specifications                                         |
 
 #### 2.5.4 The Transport Layer Retry Window
 
@@ -227,32 +227,32 @@ Result: QP transitions to ERROR state --> Application crashes
 
 The monitor is built upon the `gpud` architectural framework, which utilizes a **decentralized correlation model**. Instead of a monolithic "Correlation Engine," health signals are correlated directly within the monitoring component to minimize latency and complexity.
 
-| Correlation Strategy | mechanism | Purpose |
-|----------------------|-----------|---------|
-| **Temporal Correlation** | Sticky Window (10m) | Prevents "Alert Blinking" where transient recoveries hide critical issues. |
-| **Log-to-Counter Correlation** | MatchFunc + Metadata | Links `/dev/kmsg` error strings to specific physical hardware paths. |
-| **Velocity Correlation** | Derivative scanning | Detects flaps and drops by comparing current snapshots to historical SQLite state. |
-| **Deduplication** | `kmsg/deduper` | Filters redundant kernel messages to prevent alert storms during hardware failure. |
+| Correlation Strategy           | mechanism            | Purpose                                                                            |
+|--------------------------------|----------------------|------------------------------------------------------------------------------------|
+| **Temporal Correlation**       | Sticky Window (10m)  | Prevents "Alert Blinking" where transient recoveries hide critical issues.         |
+| **Log-to-Counter Correlation** | MatchFunc + Metadata | Links `/dev/kmsg` error strings to specific physical hardware paths.               |
+| **Velocity Correlation**       | Derivative scanning  | Detects flaps and drops by comparing current snapshots to historical SQLite state. |
+| **Deduplication**              | `kmsg/deduper`       | Filters redundant kernel messages to prevent alert storms during hardware failure. |
 
 #### 3.1.1 gpud-Inspired Data Pipeline
 
 The monitor reuses the following core `gpud` packages to implement this correlation logic:
 
-| Capability | gpud Package / Component | Function |
-|------------|--------------------------|----------|
-| **Kernel Monitoring** | `gpud/pkg/kmsg` | Real-time `/dev/kmsg` parsing and deduplication |
-| **Persistence** | `gpud/pkg/sqlite` | WAL-mode SQLite for port history and event storage |
-| **Event Storage** | `gpud/pkg/eventstore` | Indexed storage for correlated health events |
-| **IB Discovery** | `gpud/components/.../nvidia/infiniband/class` | Unified sysfs parsing for IB/RoCE devices |
+| Capability            | gpud Package / Component                      | Function                                           |
+|-----------------------|-----------------------------------------------|----------------------------------------------------|
+| **Kernel Monitoring** | `gpud/pkg/kmsg`                               | Real-time `/dev/kmsg` parsing and deduplication    |
+| **Persistence**       | `gpud/pkg/sqlite`                             | WAL-mode SQLite for port history and event storage |
+| **Event Storage**     | `gpud/pkg/eventstore`                         | Indexed storage for correlated health events       |
+| **IB Discovery**      | `gpud/components/.../nvidia/infiniband/class` | Unified sysfs parsing for IB/RoCE devices          |
 
 ---
 
 ### 3.2 Pipeline Timing and Synchronization
 
-| Pipeline | Mechanism | Interval | Data Target |
-|----------|-----------|----------|-------------|
-| **State Monitor** | Polling | 1000ms | `ibPortsStore` (SQLite) |
-| **Log Watcher** | Streaming | ~100ms async | `eventstore` (SQLite) |
+| Pipeline          | Mechanism | Interval     | Data Target             |
+|-------------------|-----------|--------------|-------------------------|
+| **State Monitor** | Polling   | 1000ms       | `ibPortsStore` (SQLite) |
+| **Log Watcher**   | Streaming | ~100ms async | `eventstore` (SQLite)   |
 
 ### 3.3 Persistence Model: The Sticky Window
 
@@ -552,20 +552,20 @@ func (e *NicHealthEvent) ToHealthEvent() *pb.HealthEvent {
 
 The key question: **"Will the workload fail because of this?"**
 
-| Condition | Recommended Action | Rationale |
-|-----------|--------------------|-----------|
-| **NIC state = DOWN** | **RecommendedAction_REPLACE_VM** | No network connectivity, workloads will timeout |
-| **Device disappeared** | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure |
-| **phys_state = Disabled** | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible |
-| **Excessive buffer overrun** | **RecommendedAction_REPLACE_VM** | Fatal configuration error |
-| **`mlx5_core unrecoverable`** | **RecommendedAction_REPLACE_VM** | Hardware in error state |
-| **`mlx5_core cmd_exec timeout`** | **RecommendedAction_RESTART_BM** | Firmware/driver interface broken |
-| **`health poll failed`** | **RecommendedAction_REPLACE_VM** | NIC health check failed |
-| **Symbol error rate > 120/hr** | **RecommendedAction_REPLACE_VM** | Exceeds IBTA BER spec; impending link failure |
-| **Local link integrity errors > 0** | **RecommendedAction_REPLACE_VM** | Physical error density exceeds hardware cap |
-| **Transport retries exceeded > 0** | **RecommendedAction_REPLACE_VM** | Reliable transport failed; connection severed |
-| **Link speed degradation** | **RecommendedAction_REPLACE_VM** | Negotiated rate < target; collective bottleneck |
-| **Port flapping (3+ cycles)** | **RecommendedAction_REPLACE_VM** | Intermittent hardware/cable instability |
+| Condition                           | Recommended Action               | Rationale                                       |
+|-------------------------------------|----------------------------------|-------------------------------------------------|
+| **NIC state = DOWN**                | **RecommendedAction_REPLACE_VM** | No network connectivity, workloads will timeout |
+| **Device disappeared**              | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure         |
+| **phys_state = Disabled**           | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible        |
+| **Excessive buffer overrun**        | **RecommendedAction_REPLACE_VM** | Fatal configuration error                       |
+| **`mlx5_core unrecoverable`**       | **RecommendedAction_REPLACE_VM** | Hardware in error state                         |
+| **`mlx5_core cmd_exec timeout`**    | **RecommendedAction_RESTART_BM** | Firmware/driver interface broken                |
+| **`health poll failed`**            | **RecommendedAction_REPLACE_VM** | NIC health check failed                         |
+| **Symbol error rate > 120/hr**      | **RecommendedAction_REPLACE_VM** | Exceeds IBTA BER spec; impending link failure   |
+| **Local link integrity errors > 0** | **RecommendedAction_REPLACE_VM** | Physical error density exceeds hardware cap     |
+| **Transport retries exceeded > 0**  | **RecommendedAction_REPLACE_VM** | Reliable transport failed; connection severed   |
+| **Link speed degradation**          | **RecommendedAction_REPLACE_VM** | Negotiated rate < target; collective bottleneck |
+| **Port flapping (3+ cycles)**       | **RecommendedAction_REPLACE_VM** | Intermittent hardware/cable instability         |
 
 > **Note**: This monitor detects hardware-level failures through kernel events and hardware counters. Application-level errors are outside the scope of this monitor.
 
@@ -660,12 +660,12 @@ type Config struct {
 
 This monitor tracks only counters that indicate **deterministic workload failure**. All counters below are from the standard counters path: `/sys/class/infiniband/<dev>/ports/<port>/counters/`
 
-| Counter | File Name | Failure Mechanism | Fatal Threshold | Recommended Action | Source |
-|---------|-----------|-------------------|-----------------|--------------------|--------|
-| **Symbol Error** | `symbol_error` | Raw bit errors at PHY layer. Exceeding IBTA BER spec (10⁻¹²) indicates link operating outside specification. | **Delta > 120/hour** | **RecommendedAction_REPLACE_VM** | [IBTA Spec](https://www.infinibandta.org/ibta-specification/) / [Oracle](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html) |
-| **Local Link Integrity** | `local_link_integrity_errors` | Raw physical errors exceeded LocalPhyErrors hardware cap. Link operating outside spec. | **Delta > 0** | **RecommendedAction_REPLACE_VM** | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US) |
-| **Buffer Overrun** | `excessive_buffer_overrun_errors` | HCA internal buffer overflow—**lossless contract violated**. Packet dropped immediately. | **Delta > 2/hour** | **RecommendedAction_REPLACE_VM** | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf) |
-| **Transport Retries Exceeded** | `req_transport_retries_exceeded` | Transport retry limit exhausted. QP enters ERROR state, connection severed. **(Native IB only)** | **Delta > 0** | **RecommendedAction_REPLACE_VM** | [IBTA Spec](https://www.infinibandta.org/ibta-specification/) |
+| Counter                        | File Name                         | Failure Mechanism                                                                                            | Fatal Threshold      | Recommended Action               | Source                                                                                                                                                       |
+|--------------------------------|-----------------------------------|--------------------------------------------------------------------------------------------------------------|----------------------|----------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **Symbol Error**               | `symbol_error`                    | Raw bit errors at PHY layer. Exceeding IBTA BER spec (10⁻¹²) indicates link operating outside specification. | **Delta > 120/hour** | **RecommendedAction_REPLACE_VM** | [IBTA Spec](https://www.infinibandta.org/ibta-specification/) / [Oracle](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html)              |
+| **Local Link Integrity**       | `local_link_integrity_errors`     | Raw physical errors exceeded LocalPhyErrors hardware cap. Link operating outside spec.                       | **Delta > 0**        | **RecommendedAction_REPLACE_VM** | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US) |
+| **Buffer Overrun**             | `excessive_buffer_overrun_errors` | HCA internal buffer overflow—**lossless contract violated**. Packet dropped immediately.                     | **Delta > 2/hour**   | **RecommendedAction_REPLACE_VM** | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)                                                                                      |
+| **Transport Retries Exceeded** | `req_transport_retries_exceeded`  | Transport retry limit exhausted. QP enters ERROR state, connection severed. **(Native IB only)**             | **Delta > 0**        | **RecommendedAction_REPLACE_VM** | [IBTA Spec](https://www.infinibandta.org/ibta-specification/)                                                                                                |
 
 > **Key Design Decisions:**
 > - **`symbol_error`** is **Fatal** at **Delta > 120/hour**. Per IBTA specification, this rate exceeds the maximum allowable BER of 10⁻¹² and indicates the link is operating outside spec.
@@ -755,17 +755,17 @@ The following tables synthesize research from IBTA specifications, cloud provide
 
 This section consolidates fatal thresholds from Section 5.1 with additional context. Breaching these thresholds **guarantees application failure** or mandatory node exclusion.
 
-| Counter Name | Type | Fatal Threshold | Recommended Action | Deterministic Mechanism | Source |
-|--------------|------|-----------------|--------------------|------------------------|--------|
-| `rate` (Link Speed) | State | **< target_rate** | **RecommendedAction_REPLACE_VM** | Link negotiated to lower speed due to cable/transceiver degradation. Bottlenecks collective operations. | Field experience (Section 5.2) |
-| `symbol_error` | PHY | **> 120/hour** | **RecommendedAction_REPLACE_VM** | Exceeds IBTA BER spec (10⁻¹²). Link operating outside specification. | [IBTA Spec](https://www.infinibandta.org/ibta-specification/) / [Oracle](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html) |
-| `local_link_integrity_errors` | Standard | **> 0 (Any)** | **RecommendedAction_REPLACE_VM** | Physical error density exceeds hardware-defined LocalPhyErrors cap. Link outside spec. | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US) |
-| `excessive_buffer_overrun_errors` | Standard | **> 2/hour** | **RecommendedAction_REPLACE_VM** | Lossless guarantee violation; packet dropped immediately. HCA ingress buffer overflow. | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf) |
+| Counter Name                      | Type     | Fatal Threshold   | Recommended Action               | Deterministic Mechanism                                                                                 | Source                                                                                                                                                       |
+|-----------------------------------|----------|-------------------|----------------------------------|---------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `rate` (Link Speed)               | State    | **< target_rate** | **RecommendedAction_REPLACE_VM** | Link negotiated to lower speed due to cable/transceiver degradation. Bottlenecks collective operations. | Field experience (Section 5.2)                                                                                                                               |
+| `symbol_error`                    | PHY      | **> 120/hour**    | **RecommendedAction_REPLACE_VM** | Exceeds IBTA BER spec (10⁻¹²). Link operating outside specification.                                    | [IBTA Spec](https://www.infinibandta.org/ibta-specification/) / [Oracle](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html)              |
+| `local_link_integrity_errors`     | Standard | **> 0 (Any)**     | **RecommendedAction_REPLACE_VM** | Physical error density exceeds hardware-defined LocalPhyErrors cap. Link outside spec.                  | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US) |
+| `excessive_buffer_overrun_errors` | Standard | **> 2/hour**      | **RecommendedAction_REPLACE_VM** | Lossless guarantee violation; packet dropped immediately. HCA ingress buffer overflow.                  | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)                                                                                      |
 
 **Link Flap Detection (Fatal)**
 
-| Condition | Action | Recommended Action | Rationale |
-|-----------|--------|--------------------|-----------|
+| Condition                                        | Action                   | Recommended Action               | Rationale                                                             |
+|--------------------------------------------------|--------------------------|----------------------------------|-----------------------------------------------------------------------|
 | Persistent DOWN (>25s) then ACTIVE ≥ **3 times** | **Fatal: Unstable Port** | **RecommendedAction_REPLACE_VM** | `gpud` heuristic: Filters transient noise, isolates real instability. |
 
 > **The `gpud` Flap Threshold**: A port is marked as "Flapping" (Fatal) if it exhibits **at least 3 cycles** of persistent DOWN state (> 25 seconds) followed by return to ACTIVE. Once detected, the component remains **Unhealthy (Sticky)** until administratively cleared.
@@ -959,10 +959,10 @@ The monitor identifies RoCE devices by checking if the `link_layer` file contain
 
 The monitor supports multiple NIC vendors. Vendor detection determines the monitoring approach:
 
-| Vendor | Detection | Counter Monitoring | Fatal Detection |
-|--------|-----------|-------------------|-----------------|
+| Vendor                 | Detection                              | Counter Monitoring   | Fatal Detection                |
+|------------------------|----------------------------------------|----------------------|--------------------------------|
 | **Mellanox (IB/RoCE)** | Device name `mlx5_*` or driver symlink | Yes - fatal counters | Counters + State + Kernel Logs |
-| **AWS EFA** | Device name `rdmap*s*` | **No** | State + Kernel Logs only |
+| **AWS EFA**            | Device name `rdmap*s*`                 | **No**               | State + Kernel Logs only       |
 
 The monitor determines the NIC vendor using the following logic:
 1.  Check `NICVendorMode` config.
@@ -991,12 +991,12 @@ For Mellanox devices (IB and RoCE), the monitor reads:
 
 For Mellanox devices (IB and RoCE), fatal counters are read from the standard counters directory:
 
-| Counter | Path | Fatal Threshold |
-|---------|------|-----------------|
-| `symbol_error` | `/sys/class/infiniband/<dev>/ports/<port>/counters/symbol_error` | Delta > 120/hour |
-| `local_link_integrity_errors` | `/sys/class/infiniband/<dev>/ports/<port>/counters/local_link_integrity_errors` | Delta > 0 |
-| `excessive_buffer_overrun_errors` | `/sys/class/infiniband/<dev>/ports/<port>/counters/excessive_buffer_overrun_errors` | Delta > 2/hour |
-| `req_transport_retries_exceeded` | `/sys/class/infiniband/<dev>/ports/<port>/hw_counters/req_transport_retries_exceeded` | Delta > 0 **(Native IB only)** |
+| Counter                           | Path                                                                                  | Fatal Threshold                |
+|-----------------------------------|---------------------------------------------------------------------------------------|--------------------------------|
+| `symbol_error`                    | `/sys/class/infiniband/<dev>/ports/<port>/counters/symbol_error`                      | Delta > 120/hour               |
+| `local_link_integrity_errors`     | `/sys/class/infiniband/<dev>/ports/<port>/counters/local_link_integrity_errors`       | Delta > 0                      |
+| `excessive_buffer_overrun_errors` | `/sys/class/infiniband/<dev>/ports/<port>/counters/excessive_buffer_overrun_errors`   | Delta > 2/hour                 |
+| `req_transport_retries_exceeded`  | `/sys/class/infiniband/<dev>/ports/<port>/hw_counters/req_transport_retries_exceeded` | Delta > 0 **(Native IB only)** |
 
 > **Note**: The `symbol_error > 120/hour` threshold is per [IBTA specification (10⁻¹² BER)](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html). `req_transport_retries_exceeded` is only available on Native InfiniBand (not RoCE). AWS EFA devices do not have the `counters/` directory and are not monitored for counter-based fatal conditions.
 
@@ -1068,10 +1068,10 @@ But... those 16 devices are supposed to be DOWN. False alarm storm!
 
 **Key Terminology:**
 
-| Term | Full Name | Description |
-|------|-----------|-------------|
-| **PF** | Physical Function | The "real" NIC. Host OS controls it. Should ALWAYS be ACTIVE. |
-| **VF** | Virtual Function | A "virtual clone" of the PF. Created for VMs/containers to use. |
+| Term   | Full Name         | Description                                                     |
+|--------|-------------------|-----------------------------------------------------------------|
+| **PF** | Physical Function | The "real" NIC. Host OS controls it. Should ALWAYS be ACTIVE.   |
+| **VF** | Virtual Function  | A "virtual clone" of the PF. Created for VMs/containers to use. |
 
 **VF Lifecycle - Why DOWN is Normal:**
 
@@ -1094,12 +1094,12 @@ STAGE 3: VM Shuts Down
 
 **The Alerting Decision:**
 
-| Device Type | State | Should Alert? | Reason |
-|-------------|-------|---------------|--------|
-| PF | ACTIVE | No | Normal operation |
-| PF | **DOWN** | **YES!** | Real problem - host lost connectivity |
-| VF | DOWN | **No** | Normal - VF not assigned to any VM |
-| VF | ACTIVE | No | Normal - VF assigned and in use |
+| Device Type | State    | Should Alert? | Reason                                |
+|-------------|----------|---------------|---------------------------------------|
+| PF          | ACTIVE   | No            | Normal operation                      |
+| PF          | **DOWN** | **YES!**      | Real problem - host lost connectivity |
+| VF          | DOWN     | **No**        | Normal - VF not assigned to any VM    |
+| VF          | ACTIVE   | No            | Normal - VF assigned and in use       |
 
 **Real Example from Field Validation (34-NIC System):**
 
@@ -1123,10 +1123,10 @@ STAGE 3: VM Shuts Down
 
 The Linux kernel provides clear indicators in sysfs:
 
-| Indicator | PF (Physical Function) | VF (Virtual Function) |
-|-----------|------------------------|----------------------|
-| `device/physfn` symlink | Does NOT exist | EXISTS (points to parent PF) |
-| `device/sriov_totalvfs` file | EXISTS (shows max VF count) | Does NOT exist |
+| Indicator                    | PF (Physical Function)      | VF (Virtual Function)        |
+|------------------------------|-----------------------------|------------------------------|
+| `device/physfn` symlink      | Does NOT exist              | EXISTS (points to parent PF) |
+| `device/sriov_totalvfs` file | EXISTS (shows max VF count) | Does NOT exist               |
 
 ```
 # PF Example (mlx5_0):
@@ -1170,11 +1170,11 @@ When a device disappears from `/sys/class/infiniband`, the monitor performs an i
 
 **Event Classification:**
 
-| PCI Check Result | Severity | Action Required |
-|------------------|----------|-----------------|
-| Device not in PCI bus | Warning | Reload driver (`modprobe mlx5_core`) |
-| Config space returns `0xFF` | Fatal | Re-seat card, check power, consider RMA |
-| PCI read error | Fatal | Inspect PCIe slot for physical damage |
+| PCI Check Result            | Severity | Action Required                         |
+|-----------------------------|----------|-----------------------------------------|
+| Device not in PCI bus       | Warning  | Reload driver (`modprobe mlx5_core`)    |
+| Config space returns `0xFF` | Fatal    | Re-seat card, check power, consider RMA |
+| PCI read error              | Fatal    | Inspect PCIe slot for physical damage   |
 
 ---
 
@@ -1186,8 +1186,8 @@ For Ethernet interfaces, **no error counters are monitored**. All Ethernet error
 
 **The only fatal condition for Ethernet is:**
 
-| Condition | Path | Detection |
-|-----------|------|-----------|
+| Condition          | Path                                   | Detection                  |
+|--------------------|----------------------------------------|----------------------------|
 | `operstate = down` | `/sys/class/net/<interface>/operstate` | State Monitor (1s polling) |
 
 When `operstate` transitions to `down`, the interface has no connectivity and workloads will fail. This is detected by the State Monitor and emits a `STATE_CHANGE` event with `Severity: FATAL`.
@@ -1240,17 +1240,17 @@ Correlation in `gpud` is **Decentralized**, **Bucket-Based**, and **Temporal**:
 
 The following patterns are synchronized from `gpud/components/accelerator/nvidia/infiniband/kmsg_matcher.go`:
 
-| Event Name | Regex Pattern | IsFatal | Recommended Action | Rationale |
-|------------|---------------|---------|--------------------|-----------|
-| `pci_power_insufficient` | `Detected insufficient power on the PCIe slot` | **YES** | **RecommendedAction_REPLACE_VM** | HW protection; NIC will throttle or shut down. |
-| `port_module_high_temp` | `Port module event.*High Temperature` | **YES** | **RecommendedAction_REPLACE_VM** | SFP/Transceiver thermal protection. |
-| `enable_hca_timeout` | `mlx5_core.*ENABLE_HCA.*timeout` | **YES** | **RecommendedAction_RESTART_BM** | NIC unusable; requires driver/node restart. |
-| `cmd_exec_timeout` | `mlx5_core.*cmd_exec timeout` | **YES** | **RecommendedAction_RESTART_BM** | Firmware hang; requires driver/node restart. |
-| `health_poll_failed` | `mlx5_core.*health poll failed` | **YES** | **RecommendedAction_REPLACE_VM** | NIC health check failed; hardware issue. |
-| `unrecoverable_err` | `mlx5_core.*unrecoverable` | **YES** | **RecommendedAction_REPLACE_VM** | Hardware failure; mandatory node drain. |
-| `module_absent` | `mlx5_core.*module.*absent` | **YES** | **RecommendedAction_REPLACE_VM** | No transceiver detected. |
-| `pcie_fatal_error` | `PCIe.*fatal error` | **YES** | **RecommendedAction_REPLACE_VM** | PCIe link broken. |
-| `netdev_watchdog_timeout` | `NETDEV WATCHDOG.*transmit queue.*timed out` | **YES** | **RecommendedAction_RESTART_BM** | TX stalled; requires driver/node restart. |
+| Event Name                | Regex Pattern                                  | IsFatal | Recommended Action               | Rationale                                      |
+|---------------------------|------------------------------------------------|---------|----------------------------------|------------------------------------------------|
+| `pci_power_insufficient`  | `Detected insufficient power on the PCIe slot` | **YES** | **RecommendedAction_REPLACE_VM** | HW protection; NIC will throttle or shut down. |
+| `port_module_high_temp`   | `Port module event.*High Temperature`          | **YES** | **RecommendedAction_REPLACE_VM** | SFP/Transceiver thermal protection.            |
+| `enable_hca_timeout`      | `mlx5_core.*ENABLE_HCA.*timeout`               | **YES** | **RecommendedAction_RESTART_BM** | NIC unusable; requires driver/node restart.    |
+| `cmd_exec_timeout`        | `mlx5_core.*cmd_exec timeout`                  | **YES** | **RecommendedAction_RESTART_BM** | Firmware hang; requires driver/node restart.   |
+| `health_poll_failed`      | `mlx5_core.*health poll failed`                | **YES** | **RecommendedAction_REPLACE_VM** | NIC health check failed; hardware issue.       |
+| `unrecoverable_err`       | `mlx5_core.*unrecoverable`                     | **YES** | **RecommendedAction_REPLACE_VM** | Hardware failure; mandatory node drain.        |
+| `module_absent`           | `mlx5_core.*module.*absent`                    | **YES** | **RecommendedAction_REPLACE_VM** | No transceiver detected.                       |
+| `pcie_fatal_error`        | `PCIe.*fatal error`                            | **YES** | **RecommendedAction_REPLACE_VM** | PCIe link broken.                              |
+| `netdev_watchdog_timeout` | `NETDEV WATCHDOG.*transmit queue.*timed out`   | **YES** | **RecommendedAction_RESTART_BM** | TX stalled; requires driver/node restart.      |
 
 ---
 
@@ -1260,36 +1260,36 @@ The following patterns are synchronized from `gpud/components/accelerator/nvidia
 
 This monitor operates at the **driver and kernel level only**, leveraging shared `gpud` infrastructure:
 
-| Data Source | Detection Capability | Persistence |
-|-------------|---------------------|-------------|
+| Data Source           | Detection Capability                                                   | Persistence             |
+|-----------------------|------------------------------------------------------------------------|-------------------------|
 | **sysfs state files** | Port UP/DOWN transitions, physical state changes, device disappearance | `ibPortsStore` (SQLite) |
-| **sysfs counters** | Error rate degradation (symbol errors, CRC errors, congestion) | `ibPortsStore` (SQLite) |
-| **sysfs hw_counters** | RDMA-layer issues (retries, timeouts, sequence errors) | `ibPortsStore` (SQLite) |
-| **/dev/kmsg** | Driver errors (`mlx5_core`), firmware failures, PCIe events | `eventstore` (SQLite) |
+| **sysfs counters**    | Error rate degradation (symbol errors, CRC errors, congestion)         | `ibPortsStore` (SQLite) |
+| **sysfs hw_counters** | RDMA-layer issues (retries, timeouts, sequence errors)                 | `ibPortsStore` (SQLite) |
+| **/dev/kmsg**         | Driver errors (`mlx5_core`), firmware failures, PCIe events            | `eventstore` (SQLite)   |
 
 ### 8.2 What This Monitor CANNOT Detect
 
 **Application-level logs and remote failures are out of scope:**
 
-| Category | Examples | Why Out of Scope |
-|----------|----------|------------------|
-| **Application logs** | RDMA library errors, framework failures | Not in kernel ring buffer |
-| **Remote node failures** | Peer node crash, peer NIC hang | No local kernel/hardware signature |
-| **Fabric issues** | Switch failures, routing black holes | Requires fabric-level monitoring |
+| Category                  | Examples                                              | Why Out of Scope                       |
+|---------------------------|-------------------------------------------------------|----------------------------------------|
+| **Application logs**      | RDMA library errors, framework failures               | Not in kernel ring buffer              |
+| **Remote node failures**  | Peer node crash, peer NIC hang                        | No local kernel/hardware signature     |
+| **Fabric issues**         | Switch failures, routing black holes                  | Requires fabric-level monitoring       |
 | **Subnet Manager issues** | SM unreachable (may partially detect via LID changes) | Fabric management layer, not local NIC |
 
 ### 8.3 Hardware Failures and Application Impact
 
 The following table shows which hardware failures this monitor detects and how they may impact applications:
 
-| Hardware Failure | Detection Method | Potential Application Impact |
-|------------------|------------------|------------------------------|
-| **Firmware freeze** | Kernel log: `cmd_exec timeout` | All NIC operations stall |
-| **Driver crash** | Kernel log: `health poll failed` | NIC becomes unusable |
-| **Physical link degradation** | Counter: `symbol_error` rising | Increased latency, packet retries |
-| **Link down** | State: `state=DOWN` | All communication fails |
-| **PCIe errors** | Kernel log: PCIe AER events | Device may become unavailable |
-| **Transport layer issues** | Counter: `local_ack_timeout_err` | RDMA operations may timeout |
+| Hardware Failure              | Detection Method                 | Potential Application Impact      |
+|-------------------------------|----------------------------------|-----------------------------------|
+| **Firmware freeze**           | Kernel log: `cmd_exec timeout`   | All NIC operations stall          |
+| **Driver crash**              | Kernel log: `health poll failed` | NIC becomes unusable              |
+| **Physical link degradation** | Counter: `symbol_error` rising   | Increased latency, packet retries |
+| **Link down**                 | State: `state=DOWN`              | All communication fails           |
+| **PCIe errors**               | Kernel log: PCIe AER events      | Device may become unavailable     |
+| **Transport layer issues**    | Counter: `local_ack_timeout_err` | RDMA operations may timeout       |
 
 > **Key Insight**: This monitor detects **local hardware failures** through kernel logs, hardware counters, and state changes. Remote-caused failures are not detectable from local monitoring alone.
 
@@ -1297,16 +1297,16 @@ The following table shows which hardware failures this monitor detects and how t
 
 The following events indicate hardware failures that require operator attention:
 
-| Hardware Event | Severity | Recommended Action |
-|----------------|----------|-------------------|
-| `mlx5_core cmd_exec timeout` | **FATAL** | **RecommendedAction_RESTART_BM** |
-| `mlx5_core health poll failed` | **FATAL** | **RecommendedAction_REPLACE_VM** |
-| Port state --> DOWN | **FATAL** | **RecommendedAction_REPLACE_VM** |
-| Symbol error rate > 120/hr | **FATAL** | **RecommendedAction_REPLACE_VM** |
+| Hardware Event                  | Severity  | Recommended Action               |
+|---------------------------------|-----------|----------------------------------|
+| `mlx5_core cmd_exec timeout`    | **FATAL** | **RecommendedAction_RESTART_BM** |
+| `mlx5_core health poll failed`  | **FATAL** | **RecommendedAction_REPLACE_VM** |
+| Port state --> DOWN             | **FATAL** | **RecommendedAction_REPLACE_VM** |
+| Symbol error rate > 120/hr      | **FATAL** | **RecommendedAction_REPLACE_VM** |
 | Local link integrity errors > 0 | **FATAL** | **RecommendedAction_REPLACE_VM** |
-| Transport retries exceeded > 0 | **FATAL** | **RecommendedAction_REPLACE_VM** |
-| Link speed degradation | **FATAL** | **RecommendedAction_REPLACE_VM** |
-| Port flapping (3+ cycles) | **FATAL** | **RecommendedAction_REPLACE_VM** |
+| Transport retries exceeded > 0  | **FATAL** | **RecommendedAction_REPLACE_VM** |
+| Link speed degradation          | **FATAL** | **RecommendedAction_REPLACE_VM** |
+| Port flapping (3+ cycles)       | **FATAL** | **RecommendedAction_REPLACE_VM** |
 
 
 ---
@@ -1499,8 +1499,8 @@ All events are fatal and dispatched immediately.
 
 **Routing Summary:**
 
-| Event Type | Action |
-|------------|--------|
+| Event Type         | Action                                        |
+|--------------------|-----------------------------------------------|
 | All events (FATAL) | Immediate gRPC dispatch to Platform Connector |
 
 ### 10.3 Event-to-HealthEvent Mapping (Protobuf)
@@ -1509,19 +1509,19 @@ The internal `NicHealthEvent` struct is designed to map directly to the platform
 
 **Field Mapping:**
 
-| pb.HealthEvent Field | NicHealthEvent Field | Logic |
-|----------------------|---------------------|-------|
-| `Version` | `Version` | Protocol version (currently `1`) |
-| `Agent` | `Agent` | Agent identifier (e.g., `"nic-health-monitor"`) |
-| `CheckName` | `CheckName` | `"InfiniBandErrorCheck"` or `"EthernetErrorCheck"` based on LinkLayer |
-| `ComponentClass` | `ComponentClass` | Always `"NIC"` |
-| `GeneratedTimestamp` | `GeneratedTimestamp` | Event generation time via `timestamppb.New()` |
-| `Message` | `Message` | Human-readable event description |
-| `IsFatal` | `IsFatal` | Direct mapping (`true` = workload failure) |
-| `IsHealthy` | `IsHealthy` | Direct mapping (`true` = healthy state) |
-| `NodeName` | `NodeName` | Kubernetes node name from environment |
-| `RecommendedAction` | `RecommendedAction` | `pb.RecommenedAction_NONE` (default) |
-| `EntitiesImpacted` | `EntitiesImpacted` | Array of `{EntityType: "NIC", EntityValue: "<device_name>"}` |
+| pb.HealthEvent Field | NicHealthEvent Field | Logic                                                                 |
+|----------------------|----------------------|-----------------------------------------------------------------------|
+| `Version`            | `Version`            | Protocol version (currently `1`)                                      |
+| `Agent`              | `Agent`              | Agent identifier (e.g., `"nic-health-monitor"`)                       |
+| `CheckName`          | `CheckName`          | `"InfiniBandErrorCheck"` or `"EthernetErrorCheck"` based on LinkLayer |
+| `ComponentClass`     | `ComponentClass`     | Always `"NIC"`                                                        |
+| `GeneratedTimestamp` | `GeneratedTimestamp` | Event generation time via `timestamppb.New()`                         |
+| `Message`            | `Message`            | Human-readable event description                                      |
+| `IsFatal`            | `IsFatal`            | Direct mapping (`true` = workload failure)                            |
+| `IsHealthy`          | `IsHealthy`          | Direct mapping (`true` = healthy state)                               |
+| `NodeName`           | `NodeName`           | Kubernetes node name from environment                                 |
+| `RecommendedAction`  | `RecommendedAction`  | `pb.RecommenedAction_NONE` (default)                                  |
+| `EntitiesImpacted`   | `EntitiesImpacted`   | Array of `{EntityType: "NIC", EntityValue: "<device_name>"}`          |
 
 **Example Event Construction:**
 
@@ -1550,37 +1550,37 @@ event := &NicHealthEvent{
 
 ### Fatal Counters
 
-| Counter | Path | Threshold | Recommended Action | Source |
-|---------|------|-----------|--------------------|--------|
-| `symbol_error` | `counters/` | Delta > 120/hour | **RecommendedAction_REPLACE_VM** | [IBTA Spec](https://www.infinibandta.org/ibta-specification/) / [Oracle](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html) |
-| `local_link_integrity_errors` | `counters/` | Delta > 0 | **RecommendedAction_REPLACE_VM** | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US) |
-| `excessive_buffer_overrun_errors` | `counters/` | Delta > 2/hour | **RecommendedAction_REPLACE_VM** | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf) |
-| `req_transport_retries_exceeded` | `hw_counters/` **(Native IB only)** | Delta > 0 | **RecommendedAction_REPLACE_VM** | [IBTA Spec](https://www.infinibandta.org/ibta-specification/) |
+| Counter                           | Path                                | Threshold        | Recommended Action               | Source                                                                                                                                                       |
+|-----------------------------------|-------------------------------------|------------------|----------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `symbol_error`                    | `counters/`                         | Delta > 120/hour | **RecommendedAction_REPLACE_VM** | [IBTA Spec](https://www.infinibandta.org/ibta-specification/) / [Oracle](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html)              |
+| `local_link_integrity_errors`     | `counters/`                         | Delta > 0        | **RecommendedAction_REPLACE_VM** | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US) |
+| `excessive_buffer_overrun_errors` | `counters/`                         | Delta > 2/hour   | **RecommendedAction_REPLACE_VM** | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)                                                                                      |
+| `req_transport_retries_exceeded`  | `hw_counters/` **(Native IB only)** | Delta > 0        | **RecommendedAction_REPLACE_VM** | [IBTA Spec](https://www.infinibandta.org/ibta-specification/)                                                                                                |
 
 ### Fatal States
 
-| Condition | Recommended Action | Path/Source |
-|-----------|--------------------|-------------|
-| `state = DOWN` | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/state` |
-| `phys_state = Disabled` | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` |
-| `rate < target_rate` | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/rate` (Link Speed Degradation) |
-| `operstate = down` | **RecommendedAction_REPLACE_VM** | `/sys/class/net/<dev>/operstate` |
-| Device disappeared | **RecommendedAction_REPLACE_VM** | Device enumeration |
-| PCI config = 0xFF | **RecommendedAction_REPLACE_VM** | PCI config space read |
+| Condition               | Recommended Action               | Path/Source                                                              |
+|-------------------------|----------------------------------|--------------------------------------------------------------------------|
+| `state = DOWN`          | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/state`                         |
+| `phys_state = Disabled` | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state`                    |
+| `rate < target_rate`    | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/rate` (Link Speed Degradation) |
+| `operstate = down`      | **RecommendedAction_REPLACE_VM** | `/sys/class/net/<dev>/operstate`                                         |
+| Device disappeared      | **RecommendedAction_REPLACE_VM** | Device enumeration                                                       |
+| PCI config = 0xFF       | **RecommendedAction_REPLACE_VM** | PCI config space read                                                    |
 
 ### Fatal Kernel Log Patterns
 
-| Pattern | Recommended Action | Meaning |
-|---------|--------------------|---------|
+| Pattern                                        | Recommended Action               | Meaning                 |
+|------------------------------------------------|----------------------------------|-------------------------|
 | `Detected insufficient power on the PCIe slot` | **RecommendedAction_REPLACE_VM** | Insufficient PCIe power |
-| `Port module event.*High Temperature` | **RecommendedAction_REPLACE_VM** | Transceiver overheating |
-| `mlx5_core.*ENABLE_HCA.*timeout` | **RecommendedAction_RESTART_BM** | NIC unusable |
-| `mlx5_core.*cmd_exec timeout` | **RecommendedAction_RESTART_BM** | Firmware hang |
-| `mlx5_core.*health poll failed` | **RecommendedAction_REPLACE_VM** | NIC unhealthy |
-| `mlx5_core.*unrecoverable` | **RecommendedAction_REPLACE_VM** | Hardware failure |
-| `mlx5_core.*module.*absent` | **RecommendedAction_REPLACE_VM** | No transceiver |
-| `PCIe.*fatal error` | **RecommendedAction_REPLACE_VM** | PCIe link broken |
-| `NETDEV WATCHDOG.*transmit queue.*timed out` | **RecommendedAction_RESTART_BM** | TX stalled |
+| `Port module event.*High Temperature`          | **RecommendedAction_REPLACE_VM** | Transceiver overheating |
+| `mlx5_core.*ENABLE_HCA.*timeout`               | **RecommendedAction_RESTART_BM** | NIC unusable            |
+| `mlx5_core.*cmd_exec timeout`                  | **RecommendedAction_RESTART_BM** | Firmware hang           |
+| `mlx5_core.*health poll failed`                | **RecommendedAction_REPLACE_VM** | NIC unhealthy           |
+| `mlx5_core.*unrecoverable`                     | **RecommendedAction_REPLACE_VM** | Hardware failure        |
+| `mlx5_core.*module.*absent`                    | **RecommendedAction_REPLACE_VM** | No transceiver          |
+| `PCIe.*fatal error`                            | **RecommendedAction_REPLACE_VM** | PCIe link broken        |
+| `NETDEV WATCHDOG.*transmit queue.*timed out`   | **RecommendedAction_RESTART_BM** | TX stalled              |
 
 ---
 
