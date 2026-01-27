@@ -36,7 +36,7 @@ The monitor implements a **two-pipeline engine** leveraging `gpud`'s core packag
 
 1. **Deterministic failure detection** based on IBTA specifications and vendor documentation
 2. **Real-time kernel log monitoring** using `gpud/pkg/kmsg` for sub-second driver/firmware failure detection
-3. **Fatal counter monitoring** for counters that guarantee workload failure (e.g., `symbol_error`, `link_downed`, `excessive_buffer_overrun_errors`)
+3. **Fatal counter monitoring** for counters that guarantee workload failure (e.g., `symbol_error`, `local_link_integrity_errors`, `excessive_buffer_overrun_errors`)
 4. **Link flap detection** using `gpud`'s historical scanning logic (3 cycles of persistent downtime)
 5. **Event deduplication** via `gpud/pkg/kmsg/deduper` to prevent alert storms
 6. **Persistent Event Storage** in SQLite to enable stabilization windows (Sticky Window logic)
@@ -130,7 +130,7 @@ This monitor focuses on **local hardware failures** that can be detected through
 
 > **Scope Limitation**: Remote-caused failures (e.g., remote node crash, fabric black hole, switch issues) are **not detectable** from local monitoring alone and require cluster-level correlation.
 
-#### 2.6.1 The `mlx5_core cmd_exec timeout`
+#### 2.4.1 The `mlx5_core cmd_exec timeout`
 
 This is a severe driver-level error indicating **Driver/Firmware Interface failure**. ([Reference: RHEL mlx5_core issues](https://access.redhat.com/solutions/6955682))
 
@@ -142,7 +142,7 @@ This is a severe driver-level error indicating **Driver/Firmware Interface failu
 
 **Consequence**: Usually requires driver reload (`systemctl restart openibd`) or full node reboot. This is **always Fatal**—workload cannot proceed if it cannot issue commands to the NIC.
 
-#### 2.6.2 Transport Retry Count Exceeded (Error 12)
+#### 2.4.2 Transport Retry Count Exceeded (Error 12)
 
 When the NIC sends a packet and the ACK never arrives:
 
@@ -388,7 +388,6 @@ Reads:
 ├── rate           --> Negotiated link speed (e.g., 100 Gb/sec, 200 Gb/sec)
 └── Fatal counters:
     ├── symbol_error                   --> Raw bit errors (IBTA BER spec)
-    ├── link_downed                    --> QP disconnect
     ├── excessive_buffer_overrun_errors --> Lossless contract violated
     ├── local_link_integrity_errors    --> Link outside hardware spec
     └── req_transport_retries_exceeded --> Transport retry exhausted (Native IB only)
@@ -534,7 +533,7 @@ func (e *NicHealthEvent) ToHealthEvent() *pb.HealthEvent {
         IsFatal:            e.IsFatal,
         IsHealthy:          e.IsHealthy,
         NodeName:           e.NodeName,
-        RecommendedAction:  pb.RecommenedAction(e.RecommendedAction),
+        RecommendedAction:  pb.RecommendedAction(e.RecommendedAction),
     }
 
     // Add impacted entities
@@ -760,7 +759,6 @@ This section consolidates fatal thresholds from Section 5.1 with additional cont
 |--------------|------|-----------------|--------------------|------------------------|--------|
 | `rate` (Link Speed) | State | **< target_rate** | **RecommendedAction_REPLACE_VM** | Link negotiated to lower speed due to cable/transceiver degradation. Bottlenecks collective operations. | Field experience (Section 5.2) |
 | `symbol_error` | PHY | **> 120/hour** | **RecommendedAction_REPLACE_VM** | Exceeds IBTA BER spec (10⁻¹²). Link operating outside specification. | [IBTA Spec](https://www.infinibandta.org/ibta-specification/) / [Oracle](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html) |
-| `link_downed` | Standard | **Delta > 0 (Runtime)** | **RecommendedAction_REPLACE_VM** | Logical path destruction; QP disconnect. Standard HPC apps don't support transparent QP rerouting. | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US) |
 | `local_link_integrity_errors` | Standard | **> 0 (Any)** | **RecommendedAction_REPLACE_VM** | Physical error density exceeds hardware-defined LocalPhyErrors cap. Link outside spec. | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US) |
 | `excessive_buffer_overrun_errors` | Standard | **> 2/hour** | **RecommendedAction_REPLACE_VM** | Lossless guarantee violation; packet dropped immediately. HCA ingress buffer overflow. | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf) |
 
@@ -948,9 +946,10 @@ An InfiniBand port is marked as "Flapping" (**Severity: FATAL**) if:
 
 ### 5.6 RoCE Handling
 
-RoCE (RDMA over Converged Ethernet) devices appear in **both** `/sys/class/net` and `/sys/class/infiniband`. The same fatal counters apply to RoCE as to native InfiniBand:
+RoCE (RDMA over Converged Ethernet) devices appear in **both** `/sys/class/net` and `/sys/class/infiniband`. The following monitoring applies to RoCE:
 
-- **Fatal counters**: `symbol_error`, `link_downed`, `local_link_integrity_errors`, `excessive_buffer_overrun_errors`, `req_transport_retries_exceeded` (Native IB only)
+- **Fatal counters**: `symbol_error`, `local_link_integrity_errors`, `excessive_buffer_overrun_errors`
+- **Native IB-only counters (not available on RoCE)**: `req_transport_retries_exceeded`
 - **State monitoring**: `state`, `phys_state`, `operstate`
 - **Kernel log patterns**: Same `mlx5_core` patterns
 
@@ -1245,8 +1244,13 @@ The following patterns are synchronized from `gpud/components/accelerator/nvidia
 |------------|---------------|---------|--------------------|-----------|
 | `pci_power_insufficient` | `Detected insufficient power on the PCIe slot` | **YES** | **RecommendedAction_REPLACE_VM** | HW protection; NIC will throttle or shut down. |
 | `port_module_high_temp` | `Port module event.*High Temperature` | **YES** | **RecommendedAction_REPLACE_VM** | SFP/Transceiver thermal protection. |
+| `enable_hca_timeout` | `mlx5_core.*ENABLE_HCA.*timeout` | **YES** | **RecommendedAction_RESTART_BM** | NIC unusable; requires driver/node restart. |
 | `cmd_exec_timeout` | `mlx5_core.*cmd_exec timeout` | **YES** | **RecommendedAction_RESTART_BM** | Firmware hang; requires driver/node restart. |
+| `health_poll_failed` | `mlx5_core.*health poll failed` | **YES** | **RecommendedAction_REPLACE_VM** | NIC health check failed; hardware issue. |
 | `unrecoverable_err` | `mlx5_core.*unrecoverable` | **YES** | **RecommendedAction_REPLACE_VM** | Hardware failure; mandatory node drain. |
+| `module_absent` | `mlx5_core.*module.*absent` | **YES** | **RecommendedAction_REPLACE_VM** | No transceiver detected. |
+| `pcie_fatal_error` | `PCIe.*fatal error` | **YES** | **RecommendedAction_REPLACE_VM** | PCIe link broken. |
+| `netdev_watchdog_timeout` | `NETDEV WATCHDOG.*transmit queue.*timed out` | **YES** | **RecommendedAction_RESTART_BM** | TX stalled; requires driver/node restart. |
 
 ---
 
@@ -1568,7 +1572,10 @@ event := &NicHealthEvent{
 
 | Pattern | Recommended Action | Meaning |
 |---------|--------------------|---------|
+| `Detected insufficient power on the PCIe slot` | **RecommendedAction_REPLACE_VM** | Insufficient PCIe power |
+| `Port module event.*High Temperature` | **RecommendedAction_REPLACE_VM** | Transceiver overheating |
 | `mlx5_core.*ENABLE_HCA.*timeout` | **RecommendedAction_RESTART_BM** | NIC unusable |
+| `mlx5_core.*cmd_exec timeout` | **RecommendedAction_RESTART_BM** | Firmware hang |
 | `mlx5_core.*health poll failed` | **RecommendedAction_REPLACE_VM** | NIC unhealthy |
 | `mlx5_core.*unrecoverable` | **RecommendedAction_REPLACE_VM** | Hardware failure |
 | `mlx5_core.*module.*absent` | **RecommendedAction_REPLACE_VM** | No transceiver |
