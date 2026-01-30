@@ -193,7 +193,7 @@ This monitor uses a binary severity model based on **workload impact**:
 
 | Source            | Fatal Conditions                                                                                                   | Recommended Action               |
 |-------------------|--------------------------------------------------------------------------------------------------------------------|----------------------------------|
-| **State Monitor** | `state=DOWN`, `phys_state=Disabled`, `rate < target_rate` (Speed Degradation), device disappeared, PCI config=0xFF | **RecommendedAction_REPLACE_VM** |
+| **State Monitor** | `state=DOWN`, `phys_state=Disabled`, `rate < target_rate` (Speed Degradation), device disappeared | **RecommendedAction_REPLACE_VM** |
 
 ### Counter Detection (Fatal - Defaults)
 

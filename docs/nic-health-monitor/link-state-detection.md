@@ -39,7 +39,7 @@ This document covers the **State Monitoring** component of the NIC Health Monito
 - **Device disappearance** - NIC no longer visible in sysfs (fell off PCIe bus)
 - **Physical state changes** - Port disabled, polling, or in error recovery
 - **Rate degradation** - Link renegotiated to lower speed (e.g., 400G → 200G)
-- **PCI configuration space failures** - Hardware crash detection
+- **Device disappearance** - Hardware failure detection
 
 ### 1.3 Binary Severity Model
 
@@ -70,8 +70,6 @@ This monitor uses a binary severity model based on **workload impact**:
 │  │  /sys/class/net/<interface>/                                         │   │
 │  │  └── operstate       →  Interface state (up, down, unknown)         │   │
 │  │                                                                      │   │
-│  │  /sys/bus/pci/devices/<addr>/                                        │   │
-│  │  └── config          →  PCI config space (0xFF = hardware crash)    │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                     │                                       │
 │                                     ▼                                       │
@@ -80,17 +78,12 @@ This monitor uses a binary severity model based on **workload impact**:
 │  ├─────────────────────────────────────────────────────────────────────┤   │
 │  │                                                                      │   │
 │  │  DETECTS:                                                            │   │
-│  │  ├── Hard DOWN         → Link completely lost (FATAL)               │   │
+│  │  ├── Hard DOWN          → Link completely lost (FATAL)              │   │
 │  │  ├── Device disappeared → NIC not in sysfs (FATAL)                  │   │
-│  │  ├── Rate degradation  → Speed < expected (FATAL)                   │   │
-│  │  ├── Physical disabled → Port disabled (FATAL)                      │   │
+│  │  ├── Rate degradation   → Speed < expected (FATAL)                  │   │
+│  │  ├── Physical disabled  → Port disabled (FATAL)                     │   │
 │  │  └── Link error recovery → Active link problems (FATAL)             │   │
 │  │                                                                      │   │
-│  │  ON DEVICE DISAPPEARANCE:                                            │   │
-│  │  └── Inline PCI health check:                                        │   │
-│  │      ├── Config = 0xFF      → Hardware crash (FATAL)                │   │
-│  │      ├── Not on PCI bus     → Clean removal (driver unload)         │   │
-│  │      └── PCI read error     → Bus error (FATAL)                     │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                     │                                       │
 │                                     ▼                                       │
@@ -152,10 +145,7 @@ Detects:
 └── Physical disabled → Port administratively or physically disabled
 
 On device disappearance:
-└── Inline PCI health check:
-    ├── Config space returns 0xFF → Hardware crash (FATAL)
-    ├── Device not on PCI bus → Clean removal (driver unload)
-    └── PCI read error → Bus error (FATAL)
+└── Device not in sysfs → Hardware failure (FATAL)
 
 Emits: Raw STATE_CHANGE events → Platform Connector → MongoDB
        (Link flap detection handled by Health Events Analyzer)
@@ -523,80 +513,23 @@ An InfiniBand port is marked as "Flapping" (**Severity: FATAL**) when the Analyz
 
 ---
 
-## 7. PCI Configuration Space Health Check
-
-> **Design Note**: This is NOT a separate monitoring pipeline. It is an **inline diagnostic** that runs only when the State Monitor detects a device has disappeared. This avoids redundant detection while providing root cause differentiation.
+## 7. Device Disappearance Handling
 
 ### 7.1 Purpose
 
-When the State Monitor detects a device has disappeared from `/sys/class/infiniband/`, we must distinguish between:
-- **Clean removal**: Driver unloaded, device administratively removed
-- **Dirty removal**: Hardware crash, device fell off PCIe bus
+When the State Monitor detects a device has disappeared from `/sys/class/infiniband/`, this is treated as a **FATAL** condition requiring VM replacement.
 
-### 7.2 PCI Configuration Space Validation
+### 7.2 Detection
 
-Reading the PCI configuration space is a standard hardware health check. If the first 64 bytes return all `0xFF`, the device has fallen off the PCIe bus.
+The monitor tracks devices across polling cycles. If a previously-seen device is no longer present in `/sys/class/infiniband/`, a FATAL event is generated immediately.
 
-### 7.3 Diagnostic Flow
+### 7.3 Event Classification
 
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                    PCI HEALTH CHECK (On Device Disappearance)                    │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                  │
-│  Device disappears from /sys/class/infiniband/                                   │
-│                │                                                                 │
-│                ▼                                                                 │
-│  ┌─────────────────────────────────────────┐                                    │
-│  │  1. Resolve PCI Address                  │                                    │
-│  │     (from cached uevent data)            │                                    │
-│  └─────────────────┬───────────────────────┘                                    │
-│                    │                                                             │
-│                    ▼                                                             │
-│  ┌─────────────────────────────────────────┐                                    │
-│  │  2. Check if /sys/bus/pci/devices/<addr>│                                    │
-│  │     exists                               │                                    │
-│  └─────────────────┬───────────────────────┘                                    │
-│                    │                                                             │
-│           ┌───────┴───────┐                                                     │
-│           │               │                                                      │
-│     NOT EXISTS      EXISTS                                                       │
-│           │               │                                                      │
-│           ▼               ▼                                                      │
-│  ┌─────────────┐  ┌─────────────────────────────────────────┐                   │
-│  │ Clean       │  │  3. Read first 64 bytes of config file  │                   │
-│  │ Removal     │  └─────────────────┬───────────────────────┘                   │
-│  │ (Warning)   │                    │                                            │
-│  └─────────────┘           ┌───────┴───────────┬────────────────┐               │
-│                            │                    │                │               │
-│                      All 0xFF             Read Error        Valid Data           │
-│                            │                    │                │               │
-│                            ▼                    ▼                ▼               │
-│                  ┌─────────────────┐  ┌─────────────┐  ┌─────────────────┐      │
-│                  │ Hardware Crash   │  │ Bus Error   │  │ Driver Unbound  │      │
-│                  │ (FATAL)          │  │ (FATAL)     │  │ (Clean Removal) │      │
-│                  │ Action: RMA      │  │ PCIe issue  │  │ (Warning)       │      │
-│                  └─────────────────┘  └─────────────┘  └─────────────────┘      │
-│                                                                                  │
-└─────────────────────────────────────────────────────────────────────────────────┘
-```
+| Condition | Severity | Recommended Action |
+|-----------|----------|-------------------|
+| Device disappeared from `/sys/class/infiniband/` | **FATAL** | **RecommendedAction_REPLACE_VM** |
 
-When a device disappears from `/sys/class/infiniband`, the monitor performs an inline diagnostic:
-
-1. **Resolve PCI Address**: Maps the device name to its PCI address using cached `uevent` data.
-2. **Check PCI Presence**: Verifies if `/sys/bus/pci/devices/<pci_addr>` exists. If not, it's likely a clean driver unload.
-3. **Read Config Space**: Attempts to read the first 64 bytes of the PCI `config` file.
-   - **Success**: Device is present but driver is unbound (Clean Removal).
-   - **All 0xFF**: Device has fallen off the bus (Hardware Crash/Fatal Error).
-   - **Read Error**: PCI transaction failure (Fatal Error).
-
-### 7.4 Event Classification
-
-| PCI Check Result            | Severity | Action Required                         |
-|-----------------------------|----------|-----------------------------------------|
-| Device not in PCI bus       | Warning  | Reload driver (`modprobe mlx5_core`)    |
-| Config space returns `0xFF` | Fatal    | Re-seat card, check power, consider RMA |
-| PCI read error              | Fatal    | Inspect PCIe slot for physical damage   |
+> **Design Note**: The current implementation does not differentiate between "clean" removals (driver unload) and "dirty" removals (hardware crash). All device disappearances are treated as FATAL because in production environments, unexpected device loss indicates a hardware issue requiring investigation and VM replacement.
 
 ---
 
@@ -887,7 +820,7 @@ Port state issues emit **Fatal** events with `RecommendedAction = REPLACE_VM`.
 | Agent             | `nic-health-monitor`                                                      |
 | CheckName         | `InfiniBandErrorCheck`                                                    |
 | ComponentClass    | `NIC`                                                                     |
-| Message           | "NIC mlx5_0 disappeared - PCI config space returns 0xFF (hardware crash)" |
+| Message           | "NIC mlx5_0 disappeared from /sys/class/infiniband/ - hardware failure" |
 | IsFatal           | `true`                                                                    |
 | IsHealthy         | `false`                                                                   |
 | RecommendedAction | `REPLACE_VM`                                                              |
@@ -952,8 +885,7 @@ The following logs are **Warning (non-fatal)** and provide diagnostic context:
 | `phys_state = Disabled`          | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` |
 | `phys_state = LinkErrorRecovery` | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` |
 | `rate < target_rate`             | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/rate`       |
-| Device disappeared               | **RecommendedAction_REPLACE_VM** | Device enumeration                                    |
-| PCI config = 0xFF                | **RecommendedAction_REPLACE_VM** | PCI config space read                                 |
+| Device disappeared               | **RecommendedAction_REPLACE_VM** | Device enumeration in `/sys/class/infiniband/`        |
 
 ---
 
