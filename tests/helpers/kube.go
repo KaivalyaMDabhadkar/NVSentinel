@@ -2477,44 +2477,86 @@ func setArgsOnContainer(t *testing.T, container *v1.Container, args map[string]s
 	}
 }
 
+// isPodRunningAndReady checks if a pod is running, ready, and not being deleted.
+func isPodRunningAndReady(pod *v1.Pod) bool {
+	if pod.DeletionTimestamp != nil {
+		return false
+	}
+
+	if pod.Status.Phase != v1.PodRunning {
+		return false
+	}
+
+	for _, cond := range pod.Status.Conditions {
+		if cond.Type == v1.PodReady {
+			return cond.Status == v1.ConditionTrue
+		}
+	}
+
+	return false
+}
+
+// buildNodePattern returns a regex pattern for node matching.
+// If nodeName is empty, matches any node containing "worker".
+// If nodeName is specified, matches exactly that node.
+func buildNodePattern(nodeName string) string {
+	if nodeName == "" {
+		return "^.*worker.*$"
+	}
+
+	return "^" + regexp.QuoteMeta(nodeName) + "$"
+}
+
+// GetDaemonSetPodOnWorkerNode returns the running and ready pod for a daemonset.
+// If nodeName is empty, it finds a pod on any worker node (node name containing "worker").
+// If nodeName is specified, it finds the pod on that exact node.
 func GetDaemonSetPodOnWorkerNode(ctx context.Context, t *testing.T, client klient.Client,
-	daemonsetName string, podNamePattern string) (*v1.Pod, error) {
+	daemonsetName string, podNamePattern string, nodeName ...string) (*v1.Pod, error) {
 	t.Helper()
+
+	specificNode := ""
+	if len(nodeName) > 0 {
+		specificNode = nodeName[0]
+	}
+
+	nodePattern := regexp.MustCompile(buildNodePattern(specificNode))
+	podPattern := regexp.MustCompile(podNamePattern)
 
 	var resultPod *v1.Pod
 
 	require.Eventually(t, func() bool {
-		// Get the pod
-		pod, err := GetPodOnWorkerNode(ctx, t, client, NVSentinelNamespace, podNamePattern)
+		pods := &v1.PodList{}
+
+		err := client.Resources().List(ctx, pods, func(opts *metav1.ListOptions) {
+			opts.FieldSelector = fmt.Sprintf("metadata.namespace=%s", NVSentinelNamespace)
+		})
 		if err != nil {
-			t.Logf("Failed to get pod: %v", err)
+			t.Logf("Failed to list pods: %v", err)
 			return false
 		}
 
-		// Verify pod is not being deleted
-		if pod.DeletionTimestamp != nil {
-			t.Logf("Pod %s is being deleted, waiting for replacement", pod.Name)
-			return false
-		}
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if !podPattern.MatchString(pod.Name) || !nodePattern.MatchString(pod.Spec.NodeName) {
+				continue
+			}
 
-		// Verify pod is running and ready
-		if pod.Status.Phase != v1.PodRunning {
-			t.Logf("Pod %s is not in Running phase: %s", pod.Name, pod.Status.Phase)
-			return false
-		}
+			if !isPodRunningAndReady(pod) {
+				t.Logf("Pod %s not ready yet (phase=%s)", pod.Name, pod.Status.Phase)
 
-		// Check all containers are ready
-		for _, cond := range pod.Status.Conditions {
-			if cond.Type == v1.PodReady && cond.Status != v1.ConditionTrue {
-				t.Logf("Pod %s is not ready yet", pod.Name)
 				return false
 			}
+
+			t.Logf("Found pod %s on node %s", pod.Name, pod.Spec.NodeName)
+			resultPod = pod
+
+			return true
 		}
 
-		resultPod = pod
+		t.Logf("No matching pod found for daemonset %s", daemonsetName)
 
-		return true
-	}, EventuallyWaitTimeout, WaitInterval, "daemonset pod from current rollout should be running and ready")
+		return false
+	}, EventuallyWaitTimeout, WaitInterval, "daemonset pod should be running and ready")
 
 	if resultPod == nil {
 		return nil, fmt.Errorf("failed to get ready pod for daemonset %s", daemonsetName)

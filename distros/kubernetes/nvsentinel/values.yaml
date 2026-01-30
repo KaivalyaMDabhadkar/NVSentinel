@@ -94,6 +94,8 @@ global:
     enabled: false
   eventExporter:
     enabled: false
+  preflight:
+    enabled: false
 
 platformConnector:
   image:
