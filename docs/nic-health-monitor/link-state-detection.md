@@ -7,7 +7,7 @@
 1. [Overview](#1-overview)
 2. [Architecture](#2-architecture)
 3. [State Monitoring Specification](#3-state-monitoring-specification)
-4. [Link Speed Degradation Detection](#4-link-speed-degradation-detection)
+4. [Management NIC Exclusion and Uncabled Port Detection](#4-management-nic-exclusion-and-uncabled-port-detection)
 5. [Device Discovery and Parsing](#5-device-discovery-and-parsing)
 6. [State Change and Flap Detection](#6-state-change-and-flap-detection)
 7. [PCI Configuration Space Health Check](#7-pci-configuration-space-health-check)
@@ -17,7 +17,7 @@
 11. [Data Structures](#11-data-structures)
 12. [Configuration](#12-configuration)
 13. [Event Management](#13-event-management)
-- [Appendix A: Quick Reference - Fatal State Conditions](#appendix-a-quick-reference---fatal-state-conditions)
+- [Appendix A: Quick Reference - Fatal Condition Classification](#appendix-a-quick-reference---fatal-condition-classification)
 
 **Related Documents:**
 - [Link Counter Detection](./link-counter-detection.md) - Counter-based degradation monitoring
@@ -38,8 +38,8 @@ This document covers the **State Monitoring** component of the NIC Health Monito
 - **Hard UP/DOWN transitions** - Link completely lost, no connectivity
 - **Device disappearance** - NIC no longer visible in sysfs (fell off PCIe bus)
 - **Physical state changes** - Port disabled, polling, or in error recovery
-- **Rate degradation** - Link renegotiated to lower speed (e.g., 400G → 200G)
-- **Device disappearance** - Hardware failure detection
+- **Uncabled port anomaly detection** - Card has fewer active ports than its peers (via homogeneity check)
+- **Management NIC auto-exclusion** - NICs on NUMA nodes with no compute GPU are automatically excluded
 
 ### 1.3 Binary Severity Model
 
@@ -78,11 +78,11 @@ This monitor uses a binary severity model based on **workload impact**:
 │  ├─────────────────────────────────────────────────────────────────────┤   │
 │  │                                                                      │   │
 │  │  DETECTS:                                                            │   │
-│  │  ├── Hard DOWN          → Link completely lost (FATAL)              │   │
-│  │  ├── Device disappeared → NIC not in sysfs (FATAL)                  │   │
-│  │  ├── Rate degradation   → Speed < expected (FATAL)                  │   │
-│  │  ├── Physical disabled  → Port disabled (FATAL)                     │   │
-│  │  └── Link error recovery → Active link problems (FATAL)             │   │
+│  │  ├── Hard DOWN            → Link completely lost (FATAL)            │   │
+│  │  ├── Device disappeared   → NIC not in sysfs (FATAL)               │   │
+│  │  ├── Uncabled port anomaly→ Card below peer mode (FATAL)            │   │
+│  │  ├── Physical disabled    → Port disabled (FATAL)                   │   │
+│  │  └── Link error recovery  → Active link problems (FATAL)           │   │
 │  │                                                                      │   │
 │  └─────────────────────────────────────────────────────────────────────┘   │
 │                                     │                                       │
@@ -135,14 +135,13 @@ The State Monitor follows NVSentinel's established architectural pattern where:
 Reads:
 ├── state          → Logical link state (DOWN, INIT, ARMED, ACTIVE)
 ├── phys_state     → Physical layer state (LinkUp, Disabled, Polling, LinkErrorRecovery)
-├── operstate      → Ethernet interface state (up, down, unknown)
-└── rate           → Negotiated link speed (e.g., 100 Gb/sec, 200 Gb/sec)
+└── operstate      → Ethernet interface state (up, down, unknown)
 
 Detects:
-├── Hard DOWN      → Link completely lost, no connectivity
+├── Hard DOWN            → Link completely lost, no connectivity
 ├── Device disappearance → NIC no longer visible in sysfs
-├── Rate degradation → Link renegotiated to lower speed (e.g., 200G → 100G)
-└── Physical disabled → Port administratively or physically disabled
+├── Uncabled port anomaly→ Card has fewer active ports than peers
+└── Physical disabled    → Port administratively or physically disabled
 
 On device disappearance:
 └── Device not in sysfs → Hardware failure (FATAL)
@@ -178,8 +177,7 @@ Emits: Raw STATE_CHANGE events → Platform Connector → MongoDB
 │  │  │                                    │                                  │  │
 │  │  │  BEHAVIOR:                         │                                  │  │
 │  │  │  • Reports RAW state events        │                                  │  │
-│  │  │  • NO aggregation                  │                                  │  │
-│  │  │  • NO local persistence            │                                  │  │
+│  │  │  • Stateless (correlation centralized) │                            │  │
 │  │  └──────────────┬─────────────────────┘                                  │  │
 │  │                 │                                                        │  │
 │  └─────────────────┼────────────────────────────────────────────────────────┘  │
@@ -213,6 +211,8 @@ Emits: Raw STATE_CHANGE events → Platform Connector → MongoDB
 
 ### 3.1 Port States (Full Enumeration)
 
+Port states are defined by the Linux kernel InfiniBand sysfs interface. **Reference**: [Linux Kernel sysfs-class-infiniband ABI](https://www.kernel.org/doc/Documentation/ABI/stable/sysfs-class-infiniband)
+
 ```go
 const (
     // Port logical states
@@ -237,12 +237,13 @@ const (
 **Logical State Flow**: `DOWN (1)` → `INIT (2)` → `ARMED (3)` → `ACTIVE (4)`
 
 - **DOWN**: No connectivity (FATAL)
-- **INIT**: Initializing (problematic if stuck > 30s)
-- **ARMED**: Waiting for Subnet Manager
+- **INIT**: Initializing — normal transient state during startup. Every port passes through INIT during boot and Subnet Manager configuration. Classified as **Non-Fatal** (`IsFatal=false`) because it is expected during these transitions. If a port remains stuck in INIT, it won't satisfy the `ACTIVE/LinkUp` condition, causing the card's active port count to fall below its peers, which is caught as a Fatal condition by the card homogeneity check (see Section 4.2).
+- **ARMED**: Waiting for Subnet Manager — same rationale as INIT. Normal transient state. Classified as **Non-Fatal** (`IsFatal=false`). Prolonged ARMED state is caught by the card homogeneity check.
 - **ACTIVE**: Normal operational state (HEALTHY)
 
 **Physical State Substates**: `Sleep (1)`, `Polling (2)`, `Disabled (3)`, `Training (4)`, `LinkUp (5)`, `LinkErrorRecovery (6)`
 
+- **Polling (2)**: Transient state during link training. Every port passes through Polling when establishing a connection. Classified as **Non-Fatal** (`IsFatal=false`). If a port remains in Polling, it won't count as active in the card homogeneity check, so the card's active port count will fall below the peer mode and be caught as a Fatal anomaly (see Section 4.2).
 - **LinkErrorRecovery (6)**: Active error recovery in progress (FATAL)
 
 ### 3.3 Diagnostic Commands
@@ -276,14 +277,14 @@ cat /sys/class/infiniband/mlx5_0/ports/1/rate
 1. **Read port state** from `/sys/class/infiniband/<dev>/ports/<port>/state`
 2. **Evaluate logical state:**
    - If `state = DOWN` → Mark as **FATAL**, message: "Port DOWN - no connectivity"
-   - If `state = INIT` → Warning, message: "Port stuck in INIT - check Subnet Manager"
-   - If `state = ARMED` → Warning, message: "Port ARMED but not ACTIVE - check fabric manager"
+   - If `state = INIT` → Non-Fatal, message: "Port stuck in INIT - check Subnet Manager"
+   - If `state = ARMED` → Non-Fatal, message: "Port ARMED but not ACTIVE - check fabric manager"
    - If `state = ACTIVE` → Healthy
 
 3. **Read physical state** from `/sys/class/infiniband/<dev>/ports/<port>/phys_state`
 4. **Evaluate physical state:**
    - If `phys_state = Disabled` → Mark as **FATAL**, message: "Physical state DISABLED"
-   - If `phys_state = Polling` → Warning, message: "Link training in progress"
+   - If `phys_state = Polling` → Non-Fatal, message: "Link training in progress"
    - If `phys_state = LinkErrorRecovery` → Mark as **FATAL**, message: "Active link problems"
    - If `phys_state = LinkUp` → Healthy
 
@@ -294,98 +295,111 @@ cat /sys/class/infiniband/mlx5_0/ports/1/rate
 
 ---
 
-## 4. Link Speed Degradation Detection
+## 4. Management NIC Exclusion and Uncabled Port Detection
 
-### 4.1 The Problem
+This section describes two zero-configuration mechanisms that replace the previous `gpu_port_config` / `AtLeastPorts` / `AtLeastRate` approach. These mechanisms require no per-GPU-type configuration and work automatically across DGX, HGX, OEM servers, and cloud VMs.
 
-A common failure mode in GPU clusters is **link speed degradation**: a bad cable or transceiver causes the link to negotiate down (e.g., a 400Gbps NDR link training down to 200Gbps or 100Gbps). The link reports `State=Active` and `PhysState=LinkUp`, so standard state-based monitoring **will not fire**.
+### 4.1 Management NIC Exclusion (NUMA-Based)
 
-However, the workload (e.g., NCCL ring) will operate at a fraction of expected bandwidth, causing severe performance degradation for the entire cluster due to the slowest link bottleneck.
+#### 4.1.1 The Problem
 
-**Why This Happens:**
-- PAM4 links (NDR/400G) have strict signal integrity requirements
-- Degraded cables or dirty fiber connectors cause eye diagram closure
-- Link Training State Machine (LTSM) automatically falls back to a lower speed to maintain connectivity
-- The link "works" but at dramatically reduced throughput
+DGX systems (e.g., DGX A100) have Mellanox ConnectX management NICs that appear in `/sys/class/infiniband/` alongside compute fabric NICs. If monitored, a management NIC going DOWN would trigger `IsFatal=true` with `RecommendedAction_REPLACE_VM` — an incorrect remediation for a NIC that doesn't affect GPU workloads. The design doc's severity model (Fatal = "workload WILL fail") is specifically designed for compute and storage NICs, not management NICs.
 
-### 4.2 Speed Degradation Detection Diagram
+#### 4.1.2 Detection Mechanism
+
+Management NICs on DGX systems are placed on CPU sockets that have **no compute GPUs**. The monitor exploits this by checking whether each NIC's NUMA node has a compute GPU on it:
+
+1. Read compute GPU PCI addresses from `/var/lib/nvsentinel/gpu_metadata.json` (provided by the metadata collector)
+2. For each GPU PCI address, read `/sys/bus/pci/devices/<pci>/numa_node` → build `gpu_numa_set`
+3. For each `mlx5_*` NIC, read `/sys/class/infiniband/<dev>/device/numa_node`
+4. If `nic_numa ∉ gpu_numa_set` → **exclude** (management NIC on separate socket)
+
+**Fallback**: If the metadata file is unavailable, the NUMA filter is skipped and all `mlx5_*` PF NICs are monitored. A warning is logged.
+
+**Edge case**: If `numa_node = -1` (unknown, common in VMs), the NIC is **included** (safe direction — over-monitor rather than miss a failure).
+
+#### 4.1.3 Field Validation
+
+| Cluster | Management NICs | NUMA Check Result | Correct? |
+|---------|----------------|-------------------|----------|
+| **A100 RoCE** (4-socket) | `mlx5_0` (NUMA 0), `mlx5_13` (NUMA 6) — no compute GPU on those NUMAs | Excluded | Yes |
+| **L40** (2-socket) | None visible (BMC is non-Mellanox, invisible in `/sys/class/infiniband/`) | Nothing excluded | Yes |
+| **H100 DGX** (2-socket) | Storage/mgmt NICs share NUMA with GPUs — correctly kept for monitoring | All monitored | Yes |
+
+> **Design Note**: Storage NICs (e.g., H100 Slot1/Slot2 ConnectX-7 cards) share a NUMA node with compute GPUs. They are intentionally **not excluded** because storage NIC failures also impact workloads (I/O hangs, checkpoint failures). The NUMA check only excludes NICs on NUMA nodes with **zero** compute GPUs.
+
+#### 4.1.4 Why Not Other Approaches?
+
+| Approach | Why Not General Enough |
+|----------|----------------------|
+| PCI domain root comparison | Fails on single-socket servers (all devices share one root) and for NODE connections (L40 `mlx5_2`) |
+| Full PCIe tree walk | Fails on single-socket servers where all devices connect to the CPU root |
+| NVML `nvidia-smi topo` | NVML cannot query non-GPU PCI devices; `nvidia-smi topo` internally reads sysfs |
+| `monitorNetworkType` config | Requires operator to know IB vs RoCE per cluster; doesn't address management NICs specifically |
+
+### 4.2 Uncabled Port Detection (Card Homogeneity)
+
+#### 4.2.1 The Problem
+
+Some NIC cards have multiple ports, but not all ports are cabled. For example, dual-port ConnectX cards may have only port 1 cabled and port 2 unused. The monitor must distinguish between a genuinely failed port and an intentionally uncabled one — without requiring static configuration like `gpu_port_config`.
+
+#### 4.2.2 Detection Mechanism
+
+Compute fabric NICs on a given node are **homogeneous** — all the same model with the same port configuration. The monitor uses this property to detect anomalies:
+
+1. Group remaining NICs (after NUMA + VF + exclusion filters) by **physical card** (PCI `bus:device` address — e.g., `0000:47:00` groups `0000:47:00.0` and `0000:47:00.1`)
+2. Count active (`ACTIVE` + `LinkUp`) ports per card
+3. Calculate the **mode** (most common active-port-count) across all cards
+4. Any card with fewer active ports than the mode → **FATAL event**
+
+#### 4.2.3 Algorithm
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                      LINK SPEED DEGRADATION DETECTION                           │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│                                                                                  │
-│  EXPECTED STATE (H100 Cluster):                                                  │
-│  ┌─────────────────────────────────────────────────────────────────────┐        │
-│  │  NIC: mlx5_0                                                         │        │
-│  │  State: ACTIVE ✓     PhysState: LinkUp ✓     Rate: 400 Gb/s ✓       │        │
-│  └─────────────────────────────────────────────────────────────────────┘        │
-│                                                                                  │
-│  DEGRADED STATE (Same H100 - Bad Cable):                                         │
-│  ┌─────────────────────────────────────────────────────────────────────┐        │
-│  │  NIC: mlx5_0                                                         │        │
-│  │  State: ACTIVE ✓     PhysState: LinkUp ✓     Rate: 200 Gb/s ✗       │        │
-│  │                                              └── 50% capacity loss!  │        │
-│  └─────────────────────────────────────────────────────────────────────┘        │
-│                                                                                  │
-│  ═══════════════════════════════════════════════════════════════════════════    │
-│                                                                                  │
-│  IMPACT ON NCCL AllReduce (Ring Topology):                                       │
-│                                                                                  │
-│  ┌──────┐   400G   ┌──────┐   400G   ┌──────┐   200G   ┌──────┐                │
-│  │ GPU0 │◄────────►│ GPU1 │◄────────►│ GPU2 │◄────────►│ GPU3 │                │
-│  └──────┘          └──────┘          └──────┘    ↑     └──────┘                │
-│                                                  │                              │
-│                                           BOTTLENECK!                           │
-│                                     Entire ring runs at 200G                    │
-│                                                                                  │
-└─────────────────────────────────────────────────────────────────────────────────┘
+For all monitored PF NICs:
+  Group by PCI bus:device (same physical card)
+  For each card, count ports with state=ACTIVE AND phys_state=LinkUp
+  mode_active = most common active-port-count across all cards
+
+  For each card:
+    If card_active_count < mode_active:
+      FATAL event: "Card <pci> has <n> active ports, expected <mode>"
 ```
 
-### 4.3 Detection Mechanism
+#### 4.2.4 Field Validation
 
-**Metric:** `/sys/class/infiniband/<dev>/ports/<port>/rate`
+**L40 (dual-port NICs, 1 port cabled per card):**
+```
+Card 0000:XX:00 → mlx5_0 (ACTIVE), mlx5_1 (DOWN) → 1 active
+Card 0000:YY:00 → mlx5_3 (ACTIVE), mlx5_4 (DOWN) → 1 active
+Mode = 1 active per card → consistent (uncabled ports NOT flagged)
 
-**Auto-Detection from GPU Product Name:**
-
-Rather than requiring per-cluster configuration, the monitor infers the expected link speed from the **GPU product name**. This works because GPU clusters have standardized InfiniBand configurations based on the GPU generation.
-
-**GPU-to-InfiniBand Mapping:**
-
-| GPU Product | Expected Ports | Expected Rate  | Reference                                                                                          |
-|-------------|----------------|----------------|----------------------------------------------------------------------------------------------------|
-| A100        | 1              | 200 Gb/s       | [DGX A100 User Guide](https://docs.nvidia.com/dgx/dgxa100-user-guide/introduction-to-dgxa100.html) |
-| H100        | 8              | 400 Gb/s (NDR) | [DGX H100 User Guide](https://docs.nvidia.com/dgx/dgxh100-user-guide/introduction-to-dgxh100.html) |
-| H200        | 8              | 400 Gb/s (NDR) | NVIDIA Documentation                                                                               |
-| B200        | 8              | 400 Gb/s       | [DGX B200 User Guide](https://docs.nvidia.com/dgx/dgxb200-user-guide/introduction-to-dgxb200.html) |
-| GB200       | 8              | 400 Gb/s       | [GB200 NVL2](https://www.nvidia.com/en-us/data-center/gb200-nvl2/)                                 |
-
-### 4.4 Speed Degradation Detection Algorithm
-
-**GPU-to-Rate Lookup Steps:**
-
-1. **Get GPU product name** via NVML or node labels (e.g., `nvidia.com/gpu.product`)
-2. **Normalize** the product name to lowercase
-3. **Match against `gpu_port_config`** entries using longest substring match
-   - Example: "NVIDIA H100 80GB HBM3" matches "h100" → expects 8 ports at 400 Gb/s
-4. **Return expected ports and rate** for the matched GPU type
-5. If no match found, skip speed validation (unknown GPU type)
-
-**Speed Validation Steps:**
-1. Query GPU product name via NVML or from node labels (e.g., `nvidia.com/gpu.product`)
-2. Look up expected port count and rate from `gpu_port_config` in the configuration file
-3. Compare actual `rate` from sysfs against expected rate
-4. If `actual_rate < expected_rate`, flag as degraded
-
-**Extensibility:** To support future GPU generations, simply add new entries to the `gpu_port_config` section—no code changes required:
-```yaml
-gpu_port_config:
-  x100:
-    ports: 16
-    rate_gbps: 800
+If mlx5_0 goes DOWN → Card 0000:XX:00 has 0 active < mode 1 → FATAL
 ```
 
-> **Field Experience**: Link speed degradation is one of the most common undetected failure modes in GPU clusters. A single 200Gbps link in a 400Gbps fabric can reduce collective operation throughput by 50% because NCCL AllReduce operations are bounded by the slowest link.
+**H100 DGX (single-port NICs, all cabled):**
+```
+8 compute NICs, each single-port, all ACTIVE → mode = 1
+If mlx5_5 goes DOWN → 0 active < mode 1 → FATAL
+```
+
+**A100 RoCE (single-port NICs, all cabled):**
+```
+16 compute NICs (after NUMA exclusion), all ACTIVE → mode = 1
+If mlx5_7 goes DOWN → 0 active < mode 1 → FATAL
+```
+
+> **Probability analysis**: For the mode to be incorrect (masking real failures), more than half of the cards would need to be independently failed at startup. With a ~1% per-NIC failure rate, the probability of 4+ out of 8 NICs failing simultaneously is ~0.00003% — effectively impossible. Such a catastrophic scenario would be caught by other monitoring (K8s node health, GPU health monitor).
+
+### 4.3 Design Decision: Why Speed Degradation Detection Was Removed
+
+The previous design included a speed degradation check that compared the sysfs `rate` against an expected rate from `gpu_port_config`. This was removed for the following reasons:
+
+1. **Required per-GPU-type static configuration** (`gpu_port_config`) that doesn't exist for non-DGX systems (L40, T4, cloud VMs, OEM servers)
+2. **Cannot distinguish compute from storage NICs**: On H100 DGX, compute NICs run at 400 Gb/s (InfiniBand) while storage NICs may run at different speeds (Ethernet). Applying the same rate threshold to both causes false positives
+3. **Counter checks already detect the underlying degradation**: When a cable degrades enough to cause speed fallback, the physical layer generates errors. The `symbol_error` and `link_error_recovery` counters (see [Link Counter Detection](./link-counter-detection.md)) detect this degradation before or during the retrain event
+4. **Sysfs does not expose the expected/supported speed**: The `rate` file only shows the current negotiated speed, not the maximum supported speed of the NIC or cable
+
+> **Note**: Speed degradation remains a real failure mode in GPU clusters. A 400G link dropping to 200G halves collective operation throughput. However, this is better addressed by counter-based degradation monitoring (Layer 2) which detects the physical signal degradation that causes the speed fallback, rather than by comparing the negotiated speed against a static configuration value.
 
 ---
 
@@ -521,15 +535,38 @@ When the State Monitor detects a device has disappeared from `/sys/class/infinib
 
 ### 7.2 Detection
 
-The monitor tracks devices across polling cycles. If a previously-seen device is no longer present in `/sys/class/infiniband/`, a FATAL event is generated immediately.
+Device disappearance is detected through two complementary mechanisms:
+
+**Case 1: Runtime disappearance (monitor has prior state)**
+
+The monitor tracks devices across polling cycles. If a previously-seen device is no longer present in `/sys/class/infiniband/`, a FATAL event is generated immediately with the exact device name.
+
+- Example: `mlx5_3` was seen on previous poll, now absent → `EntityType: "NIC", EntityValue: "mlx5_3"`
+
+**Case 2: Device missing on startup (no prior state — e.g., after pod restart)**
+
+On every poll cycle, including the very first one after startup, the monitor uses the **card homogeneity check** (see Section 4.2) to detect anomalies without requiring prior state or static configuration:
+
+1. Group all monitored PF NICs by physical card (PCI `bus:device`)
+2. Count active (`ACTIVE/LinkUp`) ports per card
+3. Calculate the mode (most common active-port-count) across all cards
+4. Any card with fewer active ports than the mode → FATAL event
+
+This approach requires no state persistence and works immediately after startup. It detects missing ports by comparing against **peer NICs on the same node** rather than against a static expected count.
+
+- Example: 8 single-port NIC cards, 7 are ACTIVE, 1 is DOWN → mode is 1, the DOWN card has 0 active → FATAL
+- Message: "Card 0000:XX:00 has 0 active ports, expected 1 (peer mode)"
+
+> **Why the homogeneity assumption is safe**: Compute fabric NICs are all the same model on GPU cluster nodes (DGX, HGX, or OEM). This approach works for both InfiniBand and Ethernet (RoCE) NICs. Management NICs on separate NUMA nodes are excluded before this check runs (see Section 4.1). For the mode to be incorrect, more than half of the NICs would need to be independently failed at startup — a probability of ~0.00003% for an 8-NIC system.
 
 ### 7.3 Event Classification
 
-| Condition | Severity | Recommended Action |
-|-----------|----------|-------------------|
-| Device disappeared from `/sys/class/infiniband/` | **FATAL** | **RecommendedAction_REPLACE_VM** |
+| Condition                                                  | Severity  | Recommended Action               |
+|------------------------------------------------------------|-----------|----------------------------------|
+| Device disappeared from `/sys/class/infiniband/` (runtime) | **FATAL** | **RecommendedAction_REPLACE_VM** |
+| Card active ports below peer mode (startup/runtime)        | **FATAL** | **RecommendedAction_REPLACE_VM** |
 
-> **Design Note**: The current implementation does not differentiate between "clean" removals (driver unload) and "dirty" removals (hardware crash). All device disappearances are treated as FATAL because in production environments, unexpected device loss indicates a hardware issue requiring investigation and VM replacement.
+> **Design Note**: All device disappearances are treated as FATAL because in production environments, unexpected device loss indicates a hardware issue requiring investigation and VM replacement. The monitor does not differentiate between "clean" removals (driver unload) and "dirty" removals (hardware crash).
 
 ---
 
@@ -539,7 +576,7 @@ The monitor tracks devices across polling cycles. If a previously-seen device is
 
 **SR-IOV (Single Root I/O Virtualization)** is a technology that allows a single physical NIC to appear as multiple virtual NICs. Understanding this is critical for correct alerting behavior.
 
-> **Note**: Clusters with the **NVIDIA Network Operator** installed will have SR-IOV enabled by default.
+> **Note**: Clusters with the **NVIDIA Network Operator** installed will have SR-IOV enabled by default. This applies to both **VM-based** and **baremetal container** environments. In baremetal Kubernetes with SR-IOV, unassigned VFs will still appear as DOWN — the filtering logic applies equally to both deployment types.
 
 **The Problem Without Understanding SR-IOV:**
 ```
@@ -547,20 +584,29 @@ Monitor starts → Sees 34 devices → 16 are DOWN → Generates 16 FATAL alerts
 But... those 16 devices are supposed to be DOWN. False alarm storm!
 ```
 
+**Why VFs are DOWN by default:**
+When SR-IOV is enabled, Virtual Functions are pre-created by the driver but remain in DOWN state until they are:
+1. Assigned to a VM or container via passthrough/device allocation
+2. Administratively enabled (for InfiniBand, also requires Subnet Manager configuration)
+
+Unassigned VFs are essentially "empty slots" waiting for workloads. A DOWN VF is not a hardware failure—it's normal SR-IOV behavior.
+
 ### 8.2 Key Terminology
 
-| Term   | Full Name         | Description                                                     |
-|--------|-------------------|-----------------------------------------------------------------|
-| **PF** | Physical Function | The "real" NIC. Host OS controls it. Should ALWAYS be ACTIVE.   |
-| **VF** | Virtual Function  | A "virtual clone" of the PF. Created for VMs/containers to use. |
+| Term   | Full Name         | Description                                                           |
+|--------|-------------------|-----------------------------------------------------------------------|
+| **PF** | Physical Function | The "real" NIC controlled by the host OS. It should ALWAYS be ACTIVE. |
+| **VF** | Virtual Function  | A "virtual clone" of the PF. Created for VMs/containers to use.       |
 
 ### 8.3 VF Lifecycle
 
 ```
-STAGE 1: System Boot
+STAGE 1: System Boot (SR-IOV Enabled)
 ├── PF created: mlx5_0 → ACTIVE (host uses it)
 ├── VFs created: mlx5_18, mlx5_19, ... → DOWN (waiting for assignment)
-└── This is NORMAL - VFs are like empty parking spots
+└── This is NORMAL - VFs are pre-provisioned resources. Their ports remain DOWN 
+    until assigned to a workload (VM or container) and configured by the Subnet 
+    Manager. This is standard SR-IOV behavior, not a hardware failure.
 
 STAGE 2: VM Starts
 ├── Orchestrator assigns VF to VM: mlx5_18 → VM1
@@ -645,9 +691,14 @@ The GID (Global Identifier) table is critical for RoCE routing. Each device expo
 - `/sys/class/infiniband/<dev>/ports/<port>/gids/<index>`
 - `/sys/class/infiniband/<dev>/ports/<port>/gid_attrs/types/<index>`
 
-**GID Types discovered in production:**
-- `v1` = RoCE v1 (GRH-based, layer 2)
-- `v2` = RoCE v2 (UDP-encapsulated, layer 3, firewall-friendly)
+**GID Types** ([Linux Kernel sysfs ABI](https://www.kernel.org/doc/Documentation/ABI/stable/sysfs-class-infiniband)):
+- `IB/RoCE v1` = InfiniBand and RoCE v1 (GRH-based, layer 2)
+- `RoCE v2` = RoCE v2 (UDP-encapsulated, layer 3, firewall-friendly)
+
+At the API level (`ibv_gid_type`), there are three distinct types:
+- `IBV_GID_TYPE_IB` (InfiniBand)
+- `IBV_GID_TYPE_ROCE_V1` (RoCE v1)
+- `IBV_GID_TYPE_ROCE_V2` (RoCE v2)
 
 **Example GID table from 34-NIC system:**
 ```
@@ -716,12 +767,13 @@ type Device struct {
 
 NICs and Ports are modeled as separate entity types to enable precise fault localization:
 
-| Entity Type | Entity Value Format | Example        | Use Case                                       |
-|-------------|---------------------|----------------|------------------------------------------------|
-| `NIC`       | `<device_name>`     | `mlx5_0`       | Device-level failures (disappeared, PCI error) |
-| `NICPort`   | `<device>_port<n>`  | `mlx5_0_port1` | Port-level failures (DOWN, speed degradation)  |
+| Entity Type | Entity Value Format | Example  | Use Case                                       |
+|-------------|---------------------|----------|------------------------------------------------|
+| `NIC`       | `<device_name>`     | `mlx5_0` | Device-level failures (disappeared, PCI error) |
+| `Port`      | `<port_number>`     | `1`      | Port-level failures (DOWN, uncabled anomaly)   |
 
-**Rationale**: A single NIC (e.g., `mlx5_0`) can have multiple ports. Port-level failures should identify the specific port, enabling:
+**Rationale**: A single NIC (e.g., `mlx5_0`) can have multiple ports. Port-level events include **both** the NIC and Port entities in `EntitiesImpacted`, enabling:
+- Precise fault localization (NIC + Port together identify the exact failing component)
 - Precise cable replacement (which port's cable is faulty)
 - Targeted firmware diagnostics
 - Accurate capacity planning (one failed port vs entire NIC)
@@ -744,9 +796,6 @@ PollingIntervalInMilliseconds = 1000
 MaxRetryDurationForDownDetectedNICInMilliseconds = 500
 RetryIntervalForDownDetectedNICInMilliseconds = 100
 
-# Network type to monitor: "all", "infiniband", "roce"
-MonitorNetworkType = all
-
 # Regex patterns for NICs to exclude (comma-separated)
 NicExclusionRegex = ^veth.*,^docker.*,^br-.*,^lo$
 
@@ -758,28 +807,13 @@ SysClassNetPath = /sys/class/net
 SysClassInfinibandPath = /sys/class/infiniband
 
 #------------------------------------------------------------------------------
-# GPU-to-InfiniBand Port Configuration (Extensible)
+# Management NIC Auto-Exclusion (NUMA-Based)
 #------------------------------------------------------------------------------
-gpu_port_config:
-  a100:
-    ports: 1
-    rate_gbps: 200
-
-  h100:
-    ports: 8
-    rate_gbps: 400
-
-  h200:
-    ports: 8
-    rate_gbps: 400
-
-  b200:
-    ports: 8
-    rate_gbps: 400
-
-  gb200:
-    ports: 8
-    rate_gbps: 400
+# GPU metadata path for NUMA-based management NIC exclusion.
+# The monitor reads compute GPU PCI addresses from this file to determine
+# which NUMA nodes have GPUs. NICs on NUMA nodes with no compute GPU are
+# automatically excluded. If unavailable, all mlx5_* PFs are monitored.
+GpuMetadataPath = /var/lib/nvsentinel/gpu_metadata.json
 
 #------------------------------------------------------------------------------
 # SR-IOV Virtual Function Auto-Detection
@@ -791,6 +825,8 @@ AutoDetectSRIOVVFs = true
 # ExpectedDownDevices = mlx5_disabled_port
 # ExpectedDownDevicesRegex = ^mlx5_maintenance_.*$
 ```
+
+> **Note**: The previous `gpu_port_config` and `MonitorNetworkType` configuration options have been removed. Management NIC exclusion is now automatic via NUMA detection (see Section 4.1). Uncabled port detection uses the card homogeneity check (see Section 4.2). Both InfiniBand and Ethernet (RoCE) NICs are monitored equally — no link layer filtering is required.
 
 ---
 
@@ -811,20 +847,20 @@ Port state issues emit **Fatal** events with `RecommendedAction = REPLACE_VM`.
 | IsFatal           | `true`                                                   |
 | IsHealthy         | `false`                                                  |
 | RecommendedAction | `REPLACE_VM`                                             |
-| EntitiesImpacted  | `[{EntityType: "NICPort", EntityValue: "mlx5_0_port1"}]` |
+| EntitiesImpacted  | `[{EntityType: "Port", EntityValue: "1"}, {EntityType: "NIC", EntityValue: "mlx5_0"}]` |
 
 **Example Event Fields (Fatal - Device Disappeared):**
 
-| Field             | Value                                                                     |
-|-------------------|---------------------------------------------------------------------------|
-| Agent             | `nic-health-monitor`                                                      |
-| CheckName         | `InfiniBandErrorCheck`                                                    |
-| ComponentClass    | `NIC`                                                                     |
+| Field             | Value                                                                   |
+|-------------------|-------------------------------------------------------------------------|
+| Agent             | `nic-health-monitor`                                                    |
+| CheckName         | `InfiniBandErrorCheck`                                                  |
+| ComponentClass    | `NIC`                                                                   |
 | Message           | "NIC mlx5_0 disappeared from /sys/class/infiniband/ - hardware failure" |
-| IsFatal           | `true`                                                                    |
-| IsHealthy         | `false`                                                                   |
-| RecommendedAction | `REPLACE_VM`                                                              |
-| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}]`                            |
+| IsFatal           | `true`                                                                  |
+| IsHealthy         | `false`                                                                 |
+| RecommendedAction | `REPLACE_VM`                                                            |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}]`                          |
 
 ---
 
@@ -840,7 +876,7 @@ The key question: **"Will the workload fail because of this?"**
 | **Device disappeared**             | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure         |
 | **phys_state = Disabled**          | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible        |
 | **phys_state = LinkErrorRecovery** | **RecommendedAction_REPLACE_VM** | Active link problems                            |
-| **rate < target_rate**             | **RecommendedAction_REPLACE_VM** | Link speed degradation, collective bottleneck   |
+| **Uncabled port anomaly**          | **RecommendedAction_REPLACE_VM** | Card has fewer active ports than peers (homogeneity check) |
 | **Port flapping (3+ cycles)**      | **RecommendedAction_REPLACE_VM** | Intermittent hardware/cable instability         |
 
 ### Fatal Counters (IsFatal = true)
@@ -852,30 +888,9 @@ The key question: **"Will the workload fail because of this?"**
 | `local_link_integrity_errors`     | > 0 (any)           | **RecommendedAction_REPLACE_VM** |
 | `rnr_nak_retry_err`               | > 0 (any)           | **RecommendedAction_REPLACE_VM** |
 
-### Fatal Driver/Firmware Logs (IsFatal = true)
+### Driver/Firmware Logs
 
-Certain kernel logs indicate a deterministic hardware/driver failure:
-
-| Pattern                | Recommended Action               | Rationale                                         |
-|------------------------|----------------------------------|---------------------------------------------------|
-| **cmd_exec timeout**   | **RecommendedAction_REPLACE_VM** | Control plane broken, driver cannot manage device |
-| **health poll failed** | **RecommendedAction_REPLACE_VM** | Firmware heartbeat lost, device non-functional    |
-| **unrecoverable**      | **RecommendedAction_REPLACE_VM** | Hardware admission of failure                     |
-| **PCIe Fatal Error**   | **RecommendedAction_REPLACE_VM** | PCIe link broken, triggers system crash/reboot    |
-| **NETDEV WATCHDOG**    | **RecommendedAction_REPLACE_VM** | Data path stalled, workload will fail             |
-
-### Diagnostic Logs (IsFatal = false)
-
-The following logs are **Warning (non-fatal)** and provide diagnostic context:
-
-| Pattern              | IsFatal | Purpose                  |
-|----------------------|---------|--------------------------|
-| `insufficient power` | `false` | Power delivery context   |
-| `High Temperature`   | `false` | Thermal warning          |
-| `module absent`      | `false` | SFP/transceiver status   |
-| `ACCESS_REG failed`  | `false` | Monitoring tool conflict |
-
-> **Design Note**: Deterministically fatal events in logs trigger `REPLACE_VM`. Diagnostic logs remain as `Warning` for diagnostic context.
+For kernel log pattern details (fatal and non-fatal classifications, regex patterns, log line examples, and kernel source references), see [Syslog Detection & Correlation](./syslog-detection-correlation.md). This document focuses on link state detection; syslog monitoring is covered in its own dedicated document to keep each document focused on a single problem.
 
 ### State Detection Paths
 
@@ -884,7 +899,7 @@ The following logs are **Warning (non-fatal)** and provide diagnostic context:
 | `state = DOWN`                   | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/state`      |
 | `phys_state = Disabled`          | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` |
 | `phys_state = LinkErrorRecovery` | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` |
-| `rate < target_rate`             | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/rate`       |
+| Uncabled port anomaly            | **RecommendedAction_REPLACE_VM** | Card homogeneity check (PCI card grouping + mode)     |
 | Device disappeared               | **RecommendedAction_REPLACE_VM** | Device enumeration in `/sys/class/infiniband/`        |
 
 ---

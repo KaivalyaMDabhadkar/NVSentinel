@@ -246,6 +246,8 @@ After `retry_cnt` attempts (default: 7), the NIC tears down the connection and t
 - Often indicates "Silent Drop" or **Black Hole** in the fabric
 - Local symptom of a **remote** problem
 
+> **Important: Application-Triggered Timeouts.** A rising `local_ack_timeout_err` counter does NOT necessarily indicate a local NIC fault. If a remote NCCL rank crashes or hangs, the remote NIC stops responding to RDMA requests. The local NIC retries and eventually exhausts `retry_cnt`, incrementing `local_ack_timeout_err` on the local side. This means the counter can be triggered by: (1) fabric black hole (network issue), (2) remote NIC failure, or (3) **remote application crash/hang** — which is not a NIC problem at all. This is why `local_ack_timeout_err` is classified as **Non-Fatal** (`IsFatal=false`) — it requires correlation with other signals (port state, remote node health) to determine the root cause.
+
 **What This Monitor CAN Detect**: The `local_ack_timeout_err` and `req_transport_retries_exceeded` (native IB) hardware counters track these retry events at the NIC level. Rising counter values indicate transport-layer problems even if we can't see the application error.
 
 **Diagnostic Commands:**
@@ -343,15 +345,15 @@ This monitor tracks both **fatal counters** (deterministic workload failure) and
 
 #### 4.1.1 Standard Counters (`/sys/class/infiniband/<dev>/ports/<port>/counters/`)
 
-| Counter                    | File Name                         | Degradation Meaning                                                                      | IsFatal | Alert Threshold                         | Source                                                                                                                                            |
-|----------------------------|-----------------------------------|------------------------------------------------------------------------------------------|---------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
-| **Symbol Error**           | `symbol_error`                    | Raw bit errors before FEC. Expected non-zero for PAM4 (HDR/NDR).                         | **No**  | Rate-based (e.g., > 10/sec for warning) | [Oracle/IBTA](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html)                                                              |
-| **Link Error Recovery**    | `link_error_recovery`             | PHY-initiated link retraining (micro-flapping). Causes millisecond-scale latency spikes. | **No**  | > 5/min (watchdog trigger)              | [Azure HPC](https://techcommunity.microsoft.com/blog/azurehighperformancecomputingblog/health-checks-for-hpc-workloads-on-microsoft-azure/837843) |
-| **Link Downed**            | `link_downed`                     | Port Training State Machine failed to maintain LinkUp.                                   | **YES** | **Delta > 0 (Runtime)**                 | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us)                                                          |
-| **Port Receive Errors**    | `port_rcv_errors`                 | Malformed packets (CRC, length errors). Saturates retry bandwidth at high rates.         | **No**  | > 10/sec (retry saturation)             | [NADDOD](https://www.naddod.com/blog/infiniband-symbol-error-counter)                                                                             |
-| **Local Link Integrity**   | `local_link_integrity_errors`     | Raw physical errors exceeded LocalPhyErrors hardware cap. Link operating outside spec.   | **YES** | **> 0 (any)**                           | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us)                                                          |
-| **Buffer Overrun**         | `excessive_buffer_overrun_errors` | HCA internal buffer overflow—**lossless contract violated**. Packet dropped immediately. | **YES** | **> 0 (any)**                           | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)                                                                           |
-| **Port Transmit Discards** | `port_xmit_discards`              | TX discards due to congestion.                                                           | **No**  | > 100/sec                               |                                                                                                                                                   |
+| Counter                    | File Name                         | Degradation Meaning                                                                      | IsFatal | Alert Threshold                         | Source                                                                                                              |
+|----------------------------|-----------------------------------|------------------------------------------------------------------------------------------|---------|-----------------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| **Symbol Error**           | `symbol_error`                    | Raw bit errors before FEC. Expected non-zero for PAM4 (HDR/NDR).                         | **No**  | Rate-based (e.g., > 10/sec for warning) | [Oracle/IBTA](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html)                                |
+| **Link Error Recovery**    | `link_error_recovery`             | PHY-initiated link retraining (micro-flapping). Causes millisecond-scale latency spikes. | **No**  | > 5/min (watchdog trigger)              | [NVIDIA UFM IB Port Counters](https://docs.nvidia.com/networking/display/ufmsdnappumv4184/InfiniBand+Port+Counters) |
+| **Link Downed**            | `link_downed`                     | Port Training State Machine failed to maintain LinkUp.                                   | **YES** | **Delta > 0 (Runtime)**                 | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us)                            |
+| **Port Receive Errors**    | `port_rcv_errors`                 | Malformed packets (CRC, length errors). Saturates retry bandwidth at high rates.         | **No**  | > 10/sec (retry saturation)             | [NVIDIA UFM IB Port Counters](https://docs.nvidia.com/networking/display/ufmsdnappumv4184/InfiniBand+Port+Counters) |
+| **Local Link Integrity**   | `local_link_integrity_errors`     | Raw physical errors exceeded LocalPhyErrors hardware cap. Link operating outside spec.   | **YES** | **> 0 (any)**                           | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us)                            |
+| **Buffer Overrun**         | `excessive_buffer_overrun_errors` | HCA internal buffer overflow—**lossless contract violated**. Packet dropped immediately. | **YES** | **> 0 (any)**                           | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)                                             |
+| **Port Transmit Discards** | `port_xmit_discards`              | TX discards due to congestion.                                                           | **No**  | > 100/sec                               |                                                                                                                     |
 
 #### 4.1.2 Extended Counters (`/sys/class/infiniband/<dev>/ports/<port>/hw_counters/`) — Non-Fatal
 
@@ -359,16 +361,16 @@ All extended counters are **non-fatal** by default. They indicate congestion, re
 
 **Key Non-Fatal Counters** (monitor for performance degradation):
 
-| Category       | Counters                | IsFatal | Alert Threshold | Justification                                               |
-|----------------|-------------------------|---------|-----------------|-------------------------------------------------------------|
-| **Physical**   | `symbol_error`          | **No**  | > 10/sec        | PHY signal degradation / Dirty fiber.                       |
-| **Link**       | `link_error_recovery`   | **No**  | > 5/min         | Link Flapping / PTSM Instability.                           |
-| **Integrity**  | `port_rcv_errors`       | **No**  | > 10/sec        | FCS/CRC Corruption (Bit Rot).                               |
-| **Congestion** | `port_xmit_discards`    | **No**  | > 100/sec       | Congestion Collapse / PFC breakdown.                        |
-| **Transport**  | `roce_slow_restart`     | **No**  | > 10/sec        | Victim Flow / Transport Oscillation (Straggler).            |
-| **Transport**  | `rnr_nak_retry_err`     | **YES** | **> 0 (any)**   | Receiver Not Ready NAK retry exhausted; connection severed. |
-| **Timeout**    | `local_ack_timeout_err` | **No**  | > 1/sec         | Broken Path / Fabric Black Hole.                            |
-| **Interface**  | `carrier_changes`       | **No**  | > 2/interval    | Physical instability visible to OS.                         |
+| Category       | Counters                | IsFatal | Alert Threshold | Justification                                                                                                                        |
+|----------------|-------------------------|---------|-----------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| **Physical**   | `symbol_error`          | **No**  | > 10/sec        | PHY signal degradation / Dirty fiber.                                                                                                |
+| **Link**       | `link_error_recovery`   | **No**  | > 5/min         | Link Flapping / PTSM Instability.                                                                                                    |
+| **Integrity**  | `port_rcv_errors`       | **No**  | > 10/sec        | FCS/CRC Corruption (Bit Rot).                                                                                                        |
+| **Congestion** | `port_xmit_discards`    | **No**  | > 100/sec       | Congestion Collapse / PFC breakdown.                                                                                                 |
+| **Transport**  | `roce_slow_restart`     | **No**  | > 10/sec        | Victim Flow / Transport Oscillation (Straggler).                                                                                     |
+| **Transport**  | `rnr_nak_retry_err`     | **YES** | **> 0 (any)**   | RNR NAK retry exhausted; QP enters error state ([ref](https://man7.org/linux/man-pages/man3/ibv_modify_qp.3.html)).                  |
+| **Timeout**    | `local_ack_timeout_err` | **No**  | > 1/sec         | Broken Path / Fabric Black Hole. Can be caused by remote app crash (see [Section 2.6](#26-transport-retry-count-exceeded-error-12)). |
+| **Interface**  | `carrier_changes`       | **No**  | > 2/interval    | Physical instability visible to OS.                                                                                                  |
 
 > **Key Insights:**
 > - **`rnr_nak_retry_err` > 0**: **FATAL** - Indicates RNR NAK retry exhausted; the connection has been severed.
@@ -416,26 +418,28 @@ ibdiagnet -o /tmp/ibdiag_output
 
 Breaching these thresholds **guarantees application failure** or mandatory node exclusion.
 
-| Counter Name                      | Type     | Fatal Threshold         | IsFatal | Deterministic Mechanism                                                                            | Source                                                                                   |
-|-----------------------------------|----------|-------------------------|---------|----------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------|
-| `link_downed`                     | Standard | **Delta > 0 (Runtime)** | **YES** | Logical path destruction; QP disconnect. Standard HPC apps don't support transparent QP rerouting. | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us) |
-| `excessive_buffer_overrun_errors` | Standard | **> 0 (Any)**           | **YES** | Lossless guarantee violation; packet dropped immediately. HCA ingress buffer overflow.             | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)                  |
-| `rnr_nak_retry_err`               | Extended | **> 0 (Any)**           | **YES** | Receiver Not Ready NAK retry exhausted; connection severed. Terminal state of error handling.      | [Datadog IB](https://docs.datadoghq.com/integrations/infiniband/)                        |
-| `local_link_integrity_errors`     | Standard | **> 0 (Any)**           | **YES** | Physical error density exceeds hardware-defined LocalPhyErrors cap. Link outside spec.             | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us) |
+| Counter Name                      | Type     | Fatal Threshold         | IsFatal | Deterministic Mechanism                                                                                                                                           | Source                                                                                                                                                                                                                               |
+|-----------------------------------|----------|-------------------------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `link_downed`                     | Standard | **Delta > 0 (Runtime)** | **YES** | Logical path destruction; QP disconnect. Standard HPC apps don't support transparent QP rerouting.                                                                | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us)                                                                                                                                             |
+| `excessive_buffer_overrun_errors` | Standard | **> 0 (Any)**           | **YES** | Lossless guarantee violation; packet dropped immediately. HCA ingress buffer overflow.                                                                            | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)                                                                                                                                                              |
+| `rnr_nak_retry_err`               | Extended | **> 0 (Any)**           | **YES** | Receiver Not Ready NAK retry exhausted; QP transitions to error state (`IBV_WC_RNR_RETRY_EXC_ERR`). Connection cannot recover without application-level teardown. | [ibv_modify_qp(3) - rnr_retry QP attr](https://man7.org/linux/man-pages/man3/ibv_modify_qp.3.html), [NVIDIA RDMA Programming](https://docs.nvidia.com/networking/display/rdmaawareprogrammingv17/queue+pair+bringup+(ibv_modify_qp)) |
+| `local_link_integrity_errors`     | Standard | **> 0 (Any)**           | **YES** | Physical error density exceeds hardware-defined LocalPhyErrors cap. Link outside spec.                                                                            | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us)                                                                                                                                             |
 
 **Table 2: Predictive Thresholds (Non-Fatal - IsFatal=false)**
 
 Breaching these rates indicates **degradation** requiring monitoring. Workloads continue but performance may be impacted.
 
-| Counter Name            | Type      | Alert Threshold  | IsFatal | Rationale                                                            | Source                                                                                                                                            |
-|-------------------------|-----------|------------------|---------|----------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------|
-| `symbol_error`          | PHY       | **> 10/sec**     | **No**  | Physical layer degradation (Dirty Fiber).                            | [Oracle/IBTA](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html)                                                              |
-| `link_error_recovery`   | Link      | **> 5/min**      | **No**  | PTSM Instability. Latency accumulation triggers watchdog timeouts.   | [Azure HPC](https://techcommunity.microsoft.com/blog/azurehighperformancecomputingblog/health-checks-for-hpc-workloads-on-microsoft-azure/837843) |
-| `port_rcv_errors`       | Standard  | **> 10/sec**     | **No**  | Bit Rot / CRC Corruption. Saturation of transport replay buffer.     | [NADDOD](https://www.naddod.com/blog/infiniband-symbol-error-counter)                                                                             |
-| `port_xmit_discards`    | Standard  | **> 100/sec**    | **No**  | Congestion Collapse / PFC breakdown.                                 |                                                                                                                                                   |
-| `roce_slow_restart`     | RoCE      | **> 10/sec**     | **No**  | "Victim Flow" oscillation. Jitter impacts AllReduce synchronization. | [NVIDIA DOCA](https://docs.nvidia.com/doca/archive/2-9-3/doca+telemetry+service+guide/index.html)                                                 |
-| `local_ack_timeout_err` | Transport | **> 1/sec**      | **No**  | ACK timeouts indicate path issues (Black Hole).                      |                                                                                                                                                   |
-| `carrier_changes`       | Interface | **> 2/interval** | **No**  | Link instability (catches UP/DOWN events between polls).             |                                                                                                                                                   |
+> **Threshold Source Note**: These thresholds are derived from a combination of IBTA BER specifications, cloud provider operational heuristics (Azure, AWS), vendor documentation, and field experience. Specific rate values are **configurable defaults**, not specification mandates. See [Section 10: Configuration](#10-configuration) for customization options.
+
+| Counter Name            | Type      | Alert Threshold  | IsFatal | Rationale                                                                                                                                                        | Source                                                                                                                                                                                                                  |
+|-------------------------|-----------|------------------|---------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `symbol_error`          | PHY       | **> 10/sec**     | **No**  | Physical layer degradation (Dirty Fiber). Derived from IBTA BER spec (10E-12); 10/sec implies BER degraded to ~1E-8.                                             | [Oracle/IBTA BER Threshold](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html), [NVIDIA UFM IB Port Counters](https://docs.nvidia.com/networking/display/ufmsdnappumv4184/InfiniBand+Port+Counters) |
+| `link_error_recovery`   | Link      | **> 5/min**      | **No**  | PTSM Instability. Each retrain causes 50ms-2s stall. 5/min = flapping link.                                                                                      | [NVIDIA UFM IB Port Counters](https://docs.nvidia.com/networking/display/ufmsdnappumv4184/InfiniBand+Port+Counters) (counter definition); threshold is operational heuristic                                            |
+| `port_rcv_errors`       | Standard  | **> 10/sec**     | **No**  | Bit Rot / CRC Corruption. Saturates transport replay buffer.                                                                                                     | [NVIDIA UFM IB Port Counters](https://docs.nvidia.com/networking/display/ufmsdnappumv4184/InfiniBand+Port+Counters)                                                                                                     |
+| `port_xmit_discards`    | Standard  | **> 100/sec**    | **No**  | Congestion Collapse / PFC breakdown.                                                                                                                             | [NVIDIA UFM IB Port Counters](https://docs.nvidia.com/networking/display/ufmsdnappumv4184/InfiniBand+Port+Counters) (counter definition); threshold is operational heuristic                                            |
+| `roce_slow_restart`     | RoCE      | **> 10/sec**     | **No**  | "Victim Flow" oscillation. Jitter impacts AllReduce synchronization.                                                                                             | [NVIDIA DOCA Telemetry](https://docs.nvidia.com/doca/archive/2-9-3/doca+telemetry+service+guide/index.html)                                                                                                             |
+| `local_ack_timeout_err` | Transport | **> 1/sec**      | **No**  | ACK timeouts indicate path issues (Black Hole). Can also be caused by remote application crash (see [Section 2.6](#26-transport-retry-count-exceeded-error-12)). | Operational heuristic                                                                                                                                                                                                   |
+| `carrier_changes`       | Interface | **> 2/interval** | **No**  | Link instability (catches UP/DOWN events between polls).                                                                                                         | Operational heuristic                                                                                                                                                                                                   |
 
 ### 4.6 Technical Justification for Non-Fatal Thresholds
 
@@ -651,8 +655,8 @@ NICs and Ports are modeled as separate entity types to enable precise fault loca
 
 | Entity Type | Entity Value Format | Example        | Use Case                      |
 |-------------|---------------------|----------------|-------------------------------|
-| `NIC`       | `<device_name>`     | `mlx5_0`       | Device-level failures         |
-| `NICPort`   | `<device>_port<n>`  | `mlx5_0_port1` | Port-level counter violations |
+| `NIC`       | `<device_name>`     | `mlx5_0` | Device-level failures         |
+| `Port`      | `<port_number>`     | `1`      | Port-level counter violations |
 
 ---
 
@@ -683,7 +687,7 @@ counterDetection:
   #   - isFatal:        Whether threshold breach triggers Fatal event (default: false)
   #   - thresholdType:  "delta" (absolute change) or "velocity" (rate per time unit)
   #   - threshold:      Numeric threshold value
-  #   - velocityUnit:   For velocity thresholds: "per_second", "per_minute", "per_hour"
+  #   - velocityUnit:   For velocity thresholds: "second", "minute", "hour"
   #   - description:    Human-readable description for event messages
   #   - recommendedAction: Action for fatal counters (REPLACE_VM, RESTART_BM, NONE)
   
@@ -753,7 +757,7 @@ counterDetection:
       isFatal: false
       thresholdType: velocity
       threshold: 10.0
-      velocityUnit: per_second
+      velocityUnit: second
       description: "PHY bit errors before FEC - physical layer degradation"
       recommendedAction: NONE
       
@@ -763,7 +767,7 @@ counterDetection:
       isFatal: false
       thresholdType: velocity
       threshold: 5.0
-      velocityUnit: per_minute
+      velocityUnit: minute
       description: "Link retraining events - micro-flapping"
       recommendedAction: NONE
     
@@ -774,7 +778,7 @@ counterDetection:
       isFatal: false
       thresholdType: velocity
       threshold: 10.0
-      velocityUnit: per_second
+      velocityUnit: second
       description: "Malformed packets received"
       recommendedAction: NONE
       
@@ -784,7 +788,7 @@ counterDetection:
       isFatal: false
       thresholdType: velocity
       threshold: 100.0
-      velocityUnit: per_second
+      velocityUnit: second
       description: "Fabric routing issues - out of sequence packets"
       recommendedAction: NONE
       
@@ -794,7 +798,7 @@ counterDetection:
       isFatal: false
       thresholdType: velocity
       threshold: 1.0
-      velocityUnit: per_second
+      velocityUnit: second
       description: "ACK timeout - potential fabric black hole"
       recommendedAction: NONE
     
@@ -805,7 +809,7 @@ counterDetection:
       isFatal: false
       thresholdType: velocity
       threshold: 100.0
-      velocityUnit: per_second
+      velocityUnit: second
       description: "TX discards due to congestion"
       recommendedAction: NONE
       
@@ -815,7 +819,7 @@ counterDetection:
       isFatal: false
       thresholdType: velocity
       threshold: 10000.0
-      velocityUnit: per_second
+      velocityUnit: second
       description: "TX wait ticks - congestion backpressure"
       recommendedAction: NONE
     
@@ -826,7 +830,7 @@ counterDetection:
       isFatal: false
       thresholdType: velocity
       threshold: 10.0
-      velocityUnit: per_second
+      velocityUnit: second
       description: "Victim flow oscillation"
       recommendedAction: NONE
     
@@ -855,7 +859,7 @@ counterDetection:
       isFatal: true                    # Override: make fatal
       thresholdType: velocity
       threshold: 120.0                 # IBTA spec: 120/hour
-      velocityUnit: per_hour           # Changed from per_second
+      velocityUnit: hour               # Changed from second
       description: "Symbol errors exceed IBTA BER threshold"
       recommendedAction: REPLACE_VM
     
@@ -889,9 +893,9 @@ For each configured counter:
      
      IF thresholdType == "velocity":
        Calculate rate based on velocityUnit:
-         - per_second: rate = delta / (pollIntervalMs / 1000)
-         - per_minute: rate = delta / (pollIntervalMs / 60000)
-         - per_hour:   rate = delta / (pollIntervalMs / 3600000)
+         - second: rate = delta / (pollIntervalMs / 1000)
+         - minute: rate = delta / (pollIntervalMs / 60000)
+         - hour:   rate = delta / (pollIntervalMs / 3600000)
        breach = (rate > threshold)
   
   5. If breach:
@@ -911,7 +915,7 @@ The monitor validates configuration at startup:
 |-----------------------|---------------------------------------------------|---------------------------|
 | Counter path exists   | Path must be readable in sysfs                    | Log warning, skip counter |
 | Threshold is positive | threshold >= 0                                    | Reject configuration      |
-| velocityUnit valid    | Must be `per_second`, `per_minute`, or `per_hour` | Reject configuration      |
+| velocityUnit valid    | Must be `second`, `minute`, or `hour`              | Reject configuration      |
 | thresholdType valid   | Must be `delta` or `velocity`                     | Reject configuration      |
 | Unique counter names  | No duplicate `name` fields                        | Reject configuration      |
 
@@ -932,9 +936,9 @@ The monitor validates configuration at startup:
 | IsFatal           | `true`                                                                          |
 | IsHealthy         | `false`                                                                         |
 | RecommendedAction | `REPLACE_VM`                                                                    |
-| EntitiesImpacted  | `[{EntityType: "NICPort", EntityValue: "mlx5_0_port1"}]`                        |
+| EntitiesImpacted  | `[{EntityType: "Port", EntityValue: "1"}, {EntityType: "NIC", EntityValue: "mlx5_0"}]` |
 
-**Example Event Fields (Non-Fatal - Degradation Warning):**
+**Example Event Fields (Non-Fatal - Degradation):**
 
 | Field             | Value                                                       |
 |-------------------|-------------------------------------------------------------|
@@ -945,7 +949,7 @@ The monitor validates configuration at startup:
 | IsFatal           | `false`                                                     |
 | IsHealthy         | `false`                                                     |
 | RecommendedAction | `NONE` (monitor for escalation)                             |
-| EntitiesImpacted  | `[{EntityType: "NICPort", EntityValue: "mlx5_0_port1"}]`    |
+| EntitiesImpacted  | `[{EntityType: "Port", EntityValue: "1"}, {EntityType: "NIC", EntityValue: "mlx5_0"}]` |
 
 ### 11.2 Event Routing
 
@@ -969,15 +973,9 @@ The monitor validates configuration at startup:
 | `local_link_integrity_errors`     | `counters/`    | Delta > 0         | **REPLACE_VM** | Yes          |
 | `rnr_nak_retry_err`               | `hw_counters/` | Delta > 0         | **REPLACE_VM** | Yes          |
 
-### Fatal Driver/Firmware Logs (IsFatal = true)
+### Driver/Firmware Logs
 
-Certain kernel logs indicate a deterministic hardware/driver failure (see [Syslog Detection & Correlation](./syslog-detection-correlation.md)):
-
-| Pattern                | Recommended Action               | Rationale                                         |
-|------------------------|----------------------------------|---------------------------------------------------|
-| **cmd_exec timeout**   | **RecommendedAction_REPLACE_VM** | Control plane broken, driver cannot manage device |
-| **health poll failed** | **RecommendedAction_REPLACE_VM** | Firmware heartbeat lost, device non-functional    |
-| **unrecoverable**      | **RecommendedAction_REPLACE_VM** | Hardware admission of failure                     |
+For kernel log pattern details (fatal and non-fatal classifications, regex patterns, and kernel source references), see [Syslog Detection & Correlation](./syslog-detection-correlation.md).
 
 ### Non-Fatal Counters (Default: IsFatal = false)
 
@@ -1002,7 +1000,7 @@ Certain kernel logs indicate a deterministic hardware/driver failure (see [Syslo
 | **Fatal Counters** (link-counter-detection)   | `true`  | `REPLACE_VM`       | Fatal NIC condition detected       |
 | **Diagnostic Logs**                           | `false` | `NONE`             | Evidence/context for investigation |
 
-> **Key Insight**: Deterministically fatal events in logs (cmd_exec timeout, etc.) are **Fatal (IsFatal=true)** with `RecommendedAction_REPLACE_VM`. Diagnostic logs (insufficient power, High Temperature, module absent) are **Warning (IsFatal=false)**. State and counter conditions are also **Fatal (IsFatal=true)** with `RecommendedAction_REPLACE_VM`.
+> **Key Insight**: Deterministically fatal events in logs (cmd_exec timeout, etc.) are **Fatal (`IsFatal=true`)** with `RecommendedAction_REPLACE_VM`. Diagnostic logs (insufficient power, High Temperature, module absent) are **Non-Fatal (`IsFatal=false`)**. State and counter conditions are also **Fatal (`IsFatal=true`)** with `RecommendedAction_REPLACE_VM`.
 
 ---
 
@@ -1023,8 +1021,12 @@ Certain kernel logs indicate a deterministic hardware/driver failure (see [Syslo
 ### Vendor Monitoring Guides
 7. [InfiniBand Errors Dashboard - HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US)
 8. [HPC Clusters Using InfiniBand on IBM Power Systems - IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)
-9. [Health Checks for HPC Workloads on Microsoft Azure](https://techcommunity.microsoft.com/blog/azurehighperformancecomputingblog/health-checks-for-hpc-workloads-on-microsoft-azure/837843)
+9. [NVIDIA UFM InfiniBand Port Counters](https://docs.nvidia.com/networking/display/ufmsdnappumv4184/InfiniBand+Port+Counters)
 10. [NVIDIA DOCA Telemetry Service Guide](https://docs.nvidia.com/doca/archive/2-9-3/doca+telemetry+service+guide/index.html)
-11. [Datadog InfiniBand Integration](https://docs.datadoghq.com/integrations/infiniband/)
+11. [NVIDIA UFM Telemetry - InfiniBand Cluster Bring-Up](https://docs.nvidia.com/networking/display/infinibandclusterbringupprocedure/UFM+Telemetry)
+
+### RDMA Programming References
+12. [ibv_modify_qp(3) — Linux Manual Page (rnr_retry, retry_cnt)](https://man7.org/linux/man-pages/man3/ibv_modify_qp.3.html)
+13. [NVIDIA RDMA-Aware Programming - Queue Pair Bringup](https://docs.nvidia.com/networking/display/rdmaawareprogrammingv17/queue+pair+bringup+(ibv_modify_qp))
 
 ---

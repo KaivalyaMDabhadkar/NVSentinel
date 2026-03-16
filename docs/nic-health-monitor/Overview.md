@@ -10,7 +10,7 @@ This documentation is organized into three focused areas:
 
 | Document                                                                | Focus                                       | Key Capabilities                                              |
 |-------------------------------------------------------------------------|---------------------------------------------|---------------------------------------------------------------|
-| [**Link State Detection**](./link-state-detection.md)                   | UP/DOWN monitoring, device disappearance    | Binary state changes, PCI health checks, speed degradation    |
+| [**Link State Detection**](./link-state-detection.md)                   | UP/DOWN monitoring, device disappearance    | Binary state changes, uncabled port anomalies, management NIC auto-exclusion |
 | [**Link Counter Detection**](./link-counter-detection.md)               | Error rate monitoring, threshold violations | BER tracking, FEC exhaustion prediction, congestion detection |
 | [**Syslog Detection & Correlation**](./syslog-detection-correlation.md) | Kernel log monitoring, repeat failures      | Driver/firmware errors, correlated failure patterns           |
 
@@ -18,7 +18,7 @@ This documentation is organized into three focused areas:
 
 ## Architecture Overview
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────────────┐
 │                    NVSentinel NIC MONITORING ARCHITECTURE                      │
 ├────────────────────────────────────────────────────────────────────────────────┤
@@ -42,9 +42,8 @@ This documentation is organized into three focused areas:
 │  │  │  • EthernetDegradationCheck │  │                                 │   │  │
 │  │  │                             │  │  BEHAVIOR:                      │   │  │
 │  │  │  BEHAVIOR:                  │  │  • Reports RAW events as-is     │   │  │
-│  │  │  • Reports RAW events as-is │  │  • NO aggregation               │   │  │
-│  │  │  • NO aggregation           │  │  • NO local persistence         │   │  │
-│  │  │  • NO local persistence     │  │                                 │   │  │
+│  │  │  • Reports RAW events as-is │  │  • Stateless (correlation centralized) │   │  │
+│  │  │  • Stateless (correlation centralized) │  │                        │   │  │
 │  │  └─────────────┬───────────────┘  └───────────────┬─────────────────┘   │  │
 │  │                │                                  │                     │  │
 │  └────────────────┼──────────────────────────────────┼─────────────────────┘  │
@@ -75,7 +74,7 @@ This documentation is organized into three focused areas:
 │  │  │  • Provide diagnostic context for operator investigation           │  │ │
 │  │  │                                                                    │  │ │
 │  │  │  NOTE: Deterministic kernel logs (cmd_exec timeout, etc.) = Fatal  │  │ │
-│  │  │        Diagnostic logs = Warning                                   │  │ │
+│  │  │        Diagnostic logs = Non-Fatal                                  │  │ │
 │  │  │                                                                    │  │ │
 │  │  │  OUTPUT:                                                           │  │ │
 │  │  │  • Deterministic failure detection and remediation triggering      │  │ │
@@ -120,7 +119,7 @@ This monitor uses a binary severity model based on **workload impact**:
 
 ### Three-Layer Detection Approach
 
-```
+```text
 ┌────────────────────────────────────────────────────────────────────────────┐
 │                        THREE-LAYER NIC MONITORING                          │
 ├────────────────────────────────────────────────────────────────────────────┤
@@ -129,7 +128,7 @@ This monitor uses a binary severity model based on **workload impact**:
 │  ═══════════════════════════════                                           │
 │  • Polling interval: 1 second                                              │
 │  • Data source: /sys/class/infiniband/<dev>/ports/<port>/state, phys_state │
-│  • Detects: Hard DOWN, device disappearance, speed degradation             │
+│  • Detects: Hard DOWN, device disappearance, uncabled port anomalies       │
 │  • Documentation: link-state-detection.md                                  │
 │                                                                            │
 │  ───────────────────────────────────────────────────────────────────────── │
@@ -155,7 +154,7 @@ This monitor uses a binary severity model based on **workload impact**:
 
 ### Coverage Map
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Coverage Map                                 │
 ├─────────────────────────────────────────────────────────────────┤
@@ -191,9 +190,9 @@ This monitor uses a binary severity model based on **workload impact**:
 
 ### State Detection (Fatal)
 
-| Source            | Fatal Conditions                                                                                                   | Recommended Action               |
-|-------------------|--------------------------------------------------------------------------------------------------------------------|----------------------------------|
-| **State Monitor** | `state=DOWN`, `phys_state=Disabled`, `rate < target_rate` (Speed Degradation), device disappeared | **RecommendedAction_REPLACE_VM** |
+| Source            | Fatal Conditions                                                                                  | Recommended Action               |
+|-------------------|---------------------------------------------------------------------------------------------------|----------------------------------|
+| **State Monitor** | `state=DOWN`, `phys_state=Disabled`, device disappeared, uncabled port anomaly | **RecommendedAction_REPLACE_VM** |
 
 ### Counter Detection (Fatal - Defaults)
 
@@ -203,14 +202,14 @@ This monitor uses a binary severity model based on **workload impact**:
 
 > **Note**: All counter thresholds and severity levels are configurable. See [Link Counter Detection](./link-counter-detection.md#10-configuration) for customization options.
 
-### Syslog Detection (Fatal & Warning)
+### Syslog Detection (Fatal & Non-Fatal)
 
-| Source          | Conditions                                                                         | Severity    | Purpose                               |
-|-----------------|------------------------------------------------------------------------------------|-------------|---------------------------------------|
-| **Log Watcher** | `mlx5_core.*cmd_exec timeout`, `health poll failed`, `unrecoverable`, `PCIe Fatal` | **Fatal**   | Deterministic hardware/driver failure |
-| **Log Watcher** | `insufficient power`, `module absent`, `ACCESS_REG failed`                         | **Warning** | Diagnostic context for correlation    |
+| Source          | Conditions                                                                         | Severity      | Purpose                               |
+|-----------------|------------------------------------------------------------------------------------|---------------|---------------------------------------|
+| **Log Watcher** | `mlx5_core.*cmd_exec timeout`, `health poll failed`, `unrecoverable`, `PCIe Fatal` | **Fatal**     | Deterministic hardware/driver failure |
+| **Log Watcher** | `insufficient power`, `module absent`, `ACCESS_REG failed`                         | **Non-Fatal** | Diagnostic context for correlation    |
 
-> **Design Note**: Deterministically fatal events in logs trigger `REPLACE_VM`. Diagnostic logs remain as `Warning` and do not directly trigger remediation.
+> **Design Note**: Deterministically fatal events in logs trigger `REPLACE_VM` (emitted as `IsFatal=true`). Diagnostic logs are published as non-fatal events (`IsFatal=false`) for correlation and do not directly trigger automated remediation.
 
 ### Non-Fatal Event Sources (Degradation Monitoring)
 
@@ -244,7 +243,7 @@ This monitor uses a binary severity model based on **workload impact**:
 |-----------------------------------|---------------------------------------------------------------------|------------|
 | UP/DOWN state monitoring          | [Link State Detection](./link-state-detection.md)                   | Section 3  |
 | Device disappearance / PCI checks | [Link State Detection](./link-state-detection.md)                   | Section 7  |
-| Link speed degradation            | [Link State Detection](./link-state-detection.md)                   | Section 4  |
+| Management NIC exclusion & uncabled port detection | [Link State Detection](./link-state-detection.md)              | Section 4  |
 | SR-IOV VF handling                | [Link State Detection](./link-state-detection.md)                   | Section 8  |
 | BER/FEC theory                    | [Link Counter Detection](./link-counter-detection.md)               | Section 2  |
 | Counter thresholds                | [Link Counter Detection](./link-counter-detection.md)               | Section 4  |
@@ -273,9 +272,9 @@ This monitor uses a binary severity model based on **workload impact**:
 ### Vendor Monitoring Guides
 8. [InfiniBand Errors Dashboard - HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us&page=GUID-35D4C04D-E65E-45A7-A870-72F9659DE565.html&docLocale=en_US)
 9. [HPC Clusters Using InfiniBand on IBM Power Systems - IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)
-10. [Health Checks for HPC Workloads on Microsoft Azure](https://techcommunity.microsoft.com/blog/azurehighperformancecomputingblog/health-checks-for-hpc-workloads-on-microsoft-azure/837843)
+10. [NVIDIA UFM InfiniBand Port Counters](https://docs.nvidia.com/networking/display/ufmsdnappumv4184/InfiniBand+Port+Counters)
 11. [NVIDIA DOCA Telemetry Service Guide](https://docs.nvidia.com/doca/archive/2-9-3/doca+telemetry+service+guide/index.html)
-12. [Datadog InfiniBand Integration](https://docs.datadoghq.com/integrations/infiniband/)
+12. [NVIDIA NCCL Environment Variables (NCCL_IB_RETRY_CNT)](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#nccl-ib-retry-cnt)
 
 ### GPU System References
 13. [DGX A100 User Guide](https://docs.nvidia.com/dgx/dgxa100-user-guide/introduction-to-dgxa100.html)
