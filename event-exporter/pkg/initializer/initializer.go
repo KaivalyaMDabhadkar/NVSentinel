@@ -37,6 +37,7 @@ import (
 type Params struct {
 	ConfigPath     string
 	OIDCSecretPath string
+	Workers        int
 }
 
 type Components struct {
@@ -51,6 +52,8 @@ func InitializeAll(ctx context.Context, params Params) (*Components, error) {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
+	slog.Info("Publish workers configured", "workers", params.Workers)
+
 	tokenProvider, err := initializeOIDC(cfg, params.OIDCSecretPath)
 	if err != nil {
 		slog.Error("Failed to initialize OIDC", "error", err)
@@ -62,6 +65,7 @@ func InitializeAll(ctx context.Context, params Params) (*Components, error) {
 		cfg.Exporter.Sink.GetTimeout(),
 		tokenProvider,
 		cfg.Exporter.Sink.InsecureSkipVerify,
+		params.Workers,
 	)
 
 	cloudEventsTransformer := transformer.NewCloudEventsTransformer(cfg.Exporter.Metadata)
@@ -79,6 +83,7 @@ func InitializeAll(ctx context.Context, params Params) (*Components, error) {
 		cloudEventsTransformer,
 		httpSink,
 		hasResumeToken,
+		params.Workers,
 	)
 
 	return &Components{

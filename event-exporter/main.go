@@ -54,6 +54,7 @@ func run() error {
 	configPath := flag.String("config", "/etc/config/config.toml", "Path to configuration file")
 	metricsPort := flag.String("metrics-port", "2112", "Port to expose Prometheus metrics and health endpoints")
 	oidcSecretPath := flag.String("oidc-secret-path", "/var/secrets/oidc-client-secret", "Path to OIDC client secret file")
+	workers := flag.Int("workers", 1, "Number of concurrent publish workers")
 
 	flag.Parse()
 
@@ -63,6 +64,7 @@ func run() error {
 	params := initializer.Params{
 		ConfigPath:     *configPath,
 		OIDCSecretPath: *oidcSecretPath,
+		Workers:        *workers,
 	}
 
 	components, err := initializer.InitializeAll(ctx, params)

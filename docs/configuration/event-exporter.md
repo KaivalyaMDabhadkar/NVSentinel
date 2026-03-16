@@ -204,6 +204,37 @@ backfill:
   enabled: false
 ```
 
+## Workers
+
+Number of concurrent goroutines that process and publish events to the sink in parallel.
+
+```yaml
+event-exporter:
+  exporter:
+    workers: 10
+```
+
+Each worker independently picks events from the dispatch queue, processes them (unmarshal, transform, publish), and reports the result. A sequence tracker ensures resume tokens advance in strict order regardless of which worker finishes first, so increasing workers scales throughput while preserving at-least-once delivery guarantees. Note that concurrent publishing means events may arrive at the sink out of order.
+
+The default of `10` handles clusters up to ~3,300 nodes at typical event rates.
+
+### Scale-Up Guide
+
+**Event production rate**: ~10 events/sec per 1,000 nodes (~36,000 events/hour)
+**Per-worker throughput**: ~3.3 events/sec (at 300ms publish latency)
+
+| Workers | Throughput (events/sec) | Max Nodes Supported |
+|---------|-------------------------|---------------------|
+| 1       | 3.3                     | ~330                |
+| 2       | 6.6                     | ~660                |
+| 3       | 9.9                     | ~990                |
+| 5       | 16.5                    | ~1,650              |
+| 10      | 33                      | ~3,300              |
+| 15      | 49.5                    | ~5,000              |
+| 20      | 66                      | ~6,600              |
+
+If your publish latency is lower (e.g., 100ms for a co-located endpoint), each worker handles proportionally more events — divide the latency ratio to estimate your actual throughput.
+
 ## Failure Handling
 
 Configures retry behavior for failed export attempts.

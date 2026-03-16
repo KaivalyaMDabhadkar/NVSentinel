@@ -67,6 +67,15 @@ var (
 		},
 	)
 
+	// CR Generation Duration Metrics
+	CRGenerationDuration = promauto.With(crmetrics.Registry).NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "fault_remediation_cr_generate_duration_seconds",
+			Help:    "Time from drain completion to maintenance CR creation.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
 	// Log Collection Job Metrics
 	LogCollectorJobs = promauto.With(crmetrics.Registry).NewCounterVec(
 		prometheus.CounterOpts{

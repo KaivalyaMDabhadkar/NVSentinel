@@ -64,6 +64,11 @@ func (m *mockDatabaseClient) UpdateDocumentStatus(ctx context.Context, documentI
 	return args.Error(0)
 }
 
+func (m *mockDatabaseClient) UpdateDocumentStatusFields(ctx context.Context, documentID string, fields map[string]interface{}) error {
+	args := m.Called(ctx, documentID, fields)
+	return args.Error(0)
+}
+
 func (m *mockDatabaseClient) CountDocuments(ctx context.Context, filter interface{}, options *client.CountOptions) (int64, error) {
 	args := m.Called(ctx, filter, options)
 	return args.Get(0).(int64), args.Error(1)

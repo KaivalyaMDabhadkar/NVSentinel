@@ -24,6 +24,7 @@ type DatabaseClient interface {
 	// Document operations
 	InsertMany(ctx context.Context, documents []interface{}) (*InsertManyResult, error)
 	UpdateDocumentStatus(ctx context.Context, documentID string, statusPath string, status interface{}) error
+	UpdateDocumentStatusFields(ctx context.Context, documentID string, fields map[string]interface{}) error
 	UpdateDocument(ctx context.Context, filter interface{}, update interface{}) (*UpdateResult, error)
 	UpdateManyDocuments(ctx context.Context, filter interface{}, update interface{}) (*UpdateResult, error)
 	UpsertDocument(ctx context.Context, filter interface{}, document interface{}) (*UpdateResult, error)

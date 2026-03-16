@@ -39,6 +39,11 @@ func (m *MockDatabaseClient) UpdateDocumentStatus(ctx context.Context, documentI
 	return args.Error(0)
 }
 
+func (m *MockDatabaseClient) UpdateDocumentStatusFields(ctx context.Context, documentID string, fields map[string]interface{}) error {
+	args := m.Called(ctx, documentID, fields)
+	return args.Error(0)
+}
+
 func (m *MockDatabaseClient) UpdateDocument(ctx context.Context, filter interface{}, update interface{}) (*client.UpdateResult, error) {
 	args := m.Called(ctx, filter, update)
 	return args.Get(0).(*client.UpdateResult), args.Error(1)

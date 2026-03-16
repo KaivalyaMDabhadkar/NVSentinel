@@ -50,6 +50,7 @@ declare -a dynamic_images=(
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/file-server-cleanup:${SAFE_REF_NAME}"
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/gpu-health-monitor:${SAFE_REF_NAME}-dcgm-3.x"
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/gpu-health-monitor:${SAFE_REF_NAME}-dcgm-4.x"
+  "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/gpu-reset:${SAFE_REF_NAME}"
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/health-events-analyzer:${SAFE_REF_NAME}"
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/janitor:${SAFE_REF_NAME}"
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/janitor-provider:${SAFE_REF_NAME}"
@@ -59,6 +60,7 @@ declare -a dynamic_images=(
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/metadata-collector:${SAFE_REF_NAME}"
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/node-drainer:${SAFE_REF_NAME}"
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/platform-connectors:${SAFE_REF_NAME}"
+  "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/plugins-slinky-drainer:${SAFE_REF_NAME}"
   "${CONTAINER_REGISTRY}/${CONTAINER_ORG}/nvsentinel/syslog-health-monitor:${SAFE_REF_NAME}"
 )
 

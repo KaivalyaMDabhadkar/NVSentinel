@@ -65,14 +65,22 @@ var (
 	TotalNodesManuallyUncordoned = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "fault_quarantine_nodes_manually_uncordoned_total",
-			Help: "Total number of manually uncordons for nodes.",
+			Help: "Total number of nodes manually uncordoned.",
+		},
+		[]string{"node"},
+	)
+
+	TotalNodesManuallyUntainted = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "fault_quarantine_nodes_manually_untainted_total",
+			Help: "Total number of nodes manually untainted",
 		},
 		[]string{"node"},
 	)
 	CurrentQuarantinedNodes = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "fault_quarantine_current_quarantined_nodes",
-			Help: "Current number of quarantined nodes.",
+			Help: "Nodes which are currently quarantined and undergoing breakfix",
 		},
 		[]string{"node"},
 	)
@@ -120,6 +128,33 @@ var (
 			Name:    "fault_quarantine_event_handling_duration_seconds",
 			Help:    "Histogram of event handling durations.",
 			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	// Node Quarantine Duration Metrics
+	NodeQuarantineDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "fault_quarantine_node_quarantine_duration_seconds",
+			Help:    "Time from health event generation to node quarantine completion.",
+			Buckets: prometheus.DefBuckets,
+		},
+	)
+
+	// Node Remediation Duration (end-to-end) Metrics
+	NodeRemediationDurationSeconds = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "fault_quarantine_node_remediation_duration_seconds",
+			Help:    "Node remediation time from health event generation to node unquarantine.",
+			Buckets: prometheus.ExponentialBuckets(10, 1.5, 27),
+		},
+	)
+
+	// Node Remediation Duration (excluding node-drainer time) Metrics
+	NodeRemediationDurationExcludingDrainSeconds = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "fault_quarantine_node_remediation_duration_excluding_drain_seconds",
+			Help:    "Node Remediation time excluding node-drainer duration.",
+			Buckets: prometheus.ExponentialBuckets(10, 1.5, 19),
 		},
 	)
 

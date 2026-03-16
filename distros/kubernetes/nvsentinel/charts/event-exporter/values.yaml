@@ -72,6 +72,12 @@ exporter:
     database: "nvsentinel"
     collection: "resumetokens"
 
+  # Number of concurrent publish workers.
+  # Each worker publishes events to the sink in parallel.
+  # Higher values increase throughput for high-event-rate clusters.
+  # At 300ms per publish, 10 workers ≈ 33 events/sec throughput.
+  workers: 10
+
   # Failure handling and retry configuration
   failureHandling:
     maxRetries: 17           # ~30 minutes of retries

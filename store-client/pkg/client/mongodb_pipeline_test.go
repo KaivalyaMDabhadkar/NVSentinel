@@ -104,14 +104,17 @@ func TestConvertAgnosticPipelineToMongo_QuarantineUpdate(t *testing.T) {
 			firstCond, ok := orArray[0].(bson.D)
 			require.True(t, ok, "First $or condition should be bson.D")
 			require.Len(t, firstCond, 1, "First condition should have 1 element")
-			require.Equal(t, "updateDescription.updatedFields", firstCond[0].Key)
+			require.Equal(t, "$expr", firstCond[0].Key)
 
-			// Verify nested structure
-			nestedDoc, ok := firstCond[0].Value.(bson.D)
-			require.True(t, ok, "Nested value should be bson.D")
-			require.Len(t, nestedDoc, 1)
-			require.Equal(t, "healtheventstatus.nodequarantined", nestedDoc[0].Key)
-			require.Equal(t, "Quarantined", nestedDoc[0].Value)
+			// $expr value is { $eq: [ <$getField(...)>, "Quarantined" ] }
+			exprDoc, ok := firstCond[0].Value.(bson.D)
+			require.True(t, ok, "$expr value should be bson.D")
+			require.Len(t, exprDoc, 1)
+			require.Equal(t, "$eq", exprDoc[0].Key)
+			eqArray, ok := exprDoc[0].Value.(bson.A)
+			require.True(t, ok, "$eq value should be bson.A")
+			require.Len(t, eqArray, 2, "$eq should have [getFieldExpr, status]")
+			require.Equal(t, "Quarantined", eqArray[1], "Second element of $eq should be status string")
 		}
 	}
 
@@ -122,37 +125,80 @@ func TestConvertAgnosticPipelineToMongo_QuarantineUpdate(t *testing.T) {
 func TestQuarantinedAndDrainedPipelineMatchesMainBranch(t *testing.T) {
 	// This test ensures our agnostic pipeline produces the expected structure for cross-database compatibility
 	// Updated to accept both INSERT and UPDATE operations for PostgreSQL compatibility
+	exprUserPodsKeyPresent := bson.D{
+		bson.E{Key: "$gt", Value: bson.A{
+			bson.D{
+				bson.E{Key: "$size", Value: bson.D{
+					bson.E{Key: "$filter", Value: bson.D{
+						bson.E{Key: "input", Value: bson.D{
+							bson.E{Key: "$objectToArray", Value: "$updateDescription.updatedFields"},
+						}},
+						bson.E{Key: "as", Value: "field"},
+						bson.E{Key: "cond", Value: bson.D{
+							bson.E{Key: "$eq", Value: bson.A{"$$field.k", "healtheventstatus.userpodsevictionstatus"}},
+						}},
+					}},
+				}},
+			},
+			0,
+		}},
+	}
 	expectedPipeline := mongo.Pipeline{
 		bson.D{
 			bson.E{Key: "$match", Value: bson.D{
-				bson.E{Key: "operationType", Value: bson.D{
-					bson.E{Key: "$in", Value: bson.A{"insert", "update"}},
-				}},
 				bson.E{Key: "$or", Value: bson.A{
-					// Watch for quarantine events (for remediation)
+					// UPDATE branch
 					bson.D{
-						bson.E{Key: "fullDocument.healtheventstatus.userpodsevictionstatus.status", Value: bson.D{
-							bson.E{Key: "$in", Value: bson.A{model.StatusSucceeded, model.AlreadyDrained}},
-						}},
-						bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: bson.D{
-							bson.E{Key: "$in", Value: bson.A{model.Quarantined, model.AlreadyQuarantined}},
+						bson.E{Key: "operationType", Value: "update"},
+						bson.E{Key: "$or", Value: bson.A{
+							bson.D{
+								bson.E{Key: "$expr", Value: exprUserPodsKeyPresent},
+								bson.E{Key: "fullDocument.healtheventstatus.userpodsevictionstatus.status", Value: bson.D{
+									bson.E{Key: "$in", Value: bson.A{string(model.StatusSucceeded), string(model.AlreadyDrained)}},
+								}},
+								bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: bson.D{
+									bson.E{Key: "$in", Value: bson.A{string(model.Quarantined), string(model.AlreadyQuarantined)}},
+								}},
+							},
+							bson.D{
+								bson.E{Key: "$expr", Value: exprUserPodsKeyPresent},
+								bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: string(model.UnQuarantined)},
+								bson.E{Key: "fullDocument.healtheventstatus.userpodsevictionstatus.status", Value: string(model.StatusSucceeded)},
+							},
+							bson.D{
+								bson.E{Key: "updateDescription.updatedFields", Value: bson.D{
+									bson.E{Key: "healtheventstatus.nodequarantined", Value: string(model.Cancelled)},
+								}},
+							},
 						}},
 					},
-					// Watch for unquarantine events (for annotation cleanup)
+					// INSERT branch
 					bson.D{
-						bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: model.UnQuarantined},
-						bson.E{Key: "fullDocument.healtheventstatus.userpodsevictionstatus.status", Value: model.StatusSucceeded},
-					},
-					// Watch for cancelled quarantine events (for annotation cleanup)
-					bson.D{
-						bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: model.Cancelled},
+						bson.E{Key: "operationType", Value: "insert"},
+						bson.E{Key: "$or", Value: bson.A{
+							bson.D{
+								bson.E{Key: "fullDocument.healtheventstatus.userpodsevictionstatus.status", Value: bson.D{
+									bson.E{Key: "$in", Value: bson.A{string(model.StatusSucceeded), string(model.AlreadyDrained)}},
+								}},
+								bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: bson.D{
+									bson.E{Key: "$in", Value: bson.A{string(model.Quarantined), string(model.AlreadyQuarantined)}},
+								}},
+							},
+							bson.D{
+								bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: string(model.UnQuarantined)},
+								bson.E{Key: "fullDocument.healtheventstatus.userpodsevictionstatus.status", Value: string(model.StatusSucceeded)},
+							},
+							bson.D{
+								bson.E{Key: "fullDocument.healtheventstatus.nodequarantined", Value: string(model.Cancelled)},
+							},
+						}},
 					},
 				}},
 			}},
 		},
 	}
 
-	// Our branch agnostic pipeline (converted to mongo)
+	// Build pipeline and convert to mongo
 	agnosticPipeline := BuildQuarantinedAndDrainedNodesPipeline()
 	convertedInterface, err := ConvertAgnosticPipelineToMongo(agnosticPipeline)
 	require.NoError(t, err)
@@ -382,64 +428,55 @@ func TestBuildQuarantinedAndDrainedNodesPipeline(t *testing.T) {
 	matchDoc, ok := stage[0].Value.(bson.D)
 	require.True(t, ok, "Match value should be bson.D")
 
-	// Verify it has operationType and $or
-	var foundOpType, foundOr bool
+	// Pipeline has top-level $or with 2 branches: UPDATE and INSERT; each branch has nested $or with 3 conditions
+	var foundOr bool
 	for _, elem := range matchDoc {
-		if elem.Key == "operationType" {
-			foundOpType = true
-			// Should be a document with $in operator containing both "insert" and "update"
-			opTypeDoc, ok := elem.Value.(bson.D)
-			require.True(t, ok, "operationType should be a document with $in operator")
-			require.Len(t, opTypeDoc, 1, "operationType document should have 1 element")
-			require.Equal(t, "$in", opTypeDoc[0].Key)
-
-			// Verify $in contains both "insert" and "update"
-			inArray, ok := opTypeDoc[0].Value.(bson.A)
-			require.True(t, ok, "$in value should be an array")
-			require.Len(t, inArray, 2, "$in should contain 2 operation types")
-			require.Contains(t, inArray, "insert", "Should include 'insert' operation type")
-			require.Contains(t, inArray, "update", "Should include 'update' operation type")
-		}
 		if elem.Key == "$or" {
 			foundOr = true
-			// Verify $or is a bson.A (array)
 			orArray, ok := elem.Value.(bson.A)
 			require.True(t, ok, "$or value should be bson.A")
-			require.Len(t, orArray, 3, "$or should have 3 conditions (quarantine, unquarantine, and cancelled)")
+			require.Len(t, orArray, 2, "Top-level $or should have 2 branches (update, insert)")
 
-			// Check first condition (quarantine with both status checks)
-			firstCond, ok := orArray[0].(bson.D)
-			require.True(t, ok, "First $or condition should be bson.D")
-			require.Len(t, firstCond, 2, "First condition should have 2 elements (eviction status and quarantine status)")
-
-			// Verify it has both fullDocument fields
-			var foundEvictionStatus, foundQuarantineStatus bool
-			for _, field := range firstCond {
-				if field.Key == "fullDocument.healtheventstatus.userpodsevictionstatus.status" {
-					foundEvictionStatus = true
-					// Should have $in operator
-					inDoc, ok := field.Value.(bson.D)
-					require.True(t, ok, "Eviction status should use $in operator")
-					require.Equal(t, "$in", inDoc[0].Key)
+			// First branch: UPDATE
+			updateBranch, ok := orArray[0].(bson.D)
+			require.True(t, ok, "First $or branch should be bson.D")
+			var opType, nestedOr bool
+			for _, e := range updateBranch {
+				if e.Key == "operationType" {
+					opType = true
+					require.Equal(t, "update", e.Value, "First branch should be update")
 				}
-				if field.Key == "fullDocument.healtheventstatus.nodequarantined" {
-					foundQuarantineStatus = true
-					// Should have $in operator
-					inDoc, ok := field.Value.(bson.D)
-					require.True(t, ok, "Quarantine status should use $in operator")
-					require.Equal(t, "$in", inDoc[0].Key)
+				if e.Key == "$or" {
+					nestedOr = true
+					nestedArr, ok := e.Value.(bson.A)
+					require.True(t, ok, "Nested $or should be bson.A")
+					require.Len(t, nestedArr, 3, "Update branch $or should have 3 conditions (quarantine, unquarantine, cancelled)")
 				}
 			}
-			require.True(t, foundEvictionStatus, "First condition should have eviction status field")
-			require.True(t, foundQuarantineStatus, "First condition should have quarantine status field")
+			require.True(t, opType, "Update branch should have operationType")
+			require.True(t, nestedOr, "Update branch should have nested $or")
 
-			// Check second condition (unquarantine)
-			secondCond, ok := orArray[1].(bson.D)
-			require.True(t, ok, "Second $or condition should be bson.D")
-			require.Len(t, secondCond, 2, "Second condition should have 2 elements")
+			// Second branch: INSERT
+			insertBranch, ok := orArray[1].(bson.D)
+			require.True(t, ok, "Second $or branch should be bson.D")
+			opType = false
+			nestedOr = false
+			for _, e := range insertBranch {
+				if e.Key == "operationType" {
+					opType = true
+					require.Equal(t, "insert", e.Value, "Second branch should be insert")
+				}
+				if e.Key == "$or" {
+					nestedOr = true
+					nestedArr, ok := e.Value.(bson.A)
+					require.True(t, ok, "Nested $or should be bson.A")
+					require.Len(t, nestedArr, 3, "Insert branch $or should have 3 conditions (quarantine, unquarantine, cancelled)")
+				}
+			}
+			require.True(t, opType, "Insert branch should have operationType")
+			require.True(t, nestedOr, "Insert branch should have nested $or")
 		}
 	}
 
-	require.True(t, foundOpType, "Should have operationType field")
-	require.True(t, foundOr, "Should have $or field")
+	require.True(t, foundOr, "Should have top-level $or field")
 }

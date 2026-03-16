@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-ARG DCGM_VERSION="4.2.0-1-ubuntu22.04"
+ARG DCGM_VERSION="4.4.2-1-ubuntu22.04"
 ARG VERSION="0.1.0"
 # GIT_COMMIT and BUILD_DATE are passed by CI (make/docker.mk) for OCI annotations
 ARG GIT_COMMIT="none"
@@ -23,7 +23,7 @@ FROM public.ecr.aws/docker/library/python:3.10-bookworm AS build
 ARG VERSION
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install poetry==1.8.2
+    pip install poetry==2.2.1 poetry-plugin-export==1.10.0
 
 ENV POETRY_NO_INTERACTION=1 \
     POETRY_VIRTUALENVS_IN_PROJECT=1 \

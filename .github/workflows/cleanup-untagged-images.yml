@@ -89,7 +89,8 @@ jobs:
           - nvsentinel-janitor
           - nvsentinel-fake-dcgm
           - nvsentinel/preflight
-          - nvsentinel/ping
+          - nvsentinel/preflight-dcgm-diag
+          - nvsentinel/preflight-nccl-allreduce
 
     steps:
       - name: Delete untagged images for ${{ matrix.package }}

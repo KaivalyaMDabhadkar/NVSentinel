@@ -42,6 +42,7 @@ import (
 	nvstoreclient "github.com/nvidia/nvsentinel/store-client/pkg/client"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 	"github.com/nvidia/nvsentinel/store-client/pkg/utils"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 type ReconcilerConfig struct {
@@ -117,10 +118,8 @@ func (r *FaultRemediationReconciler) Reconcile(
 	nodeName := healthEventWithStatus.HealthEvent.NodeName
 	nodeQuarantined := healthEventWithStatus.HealthEventStatus.NodeQuarantined
 
-	if nodeQuarantined != nil {
-		if *nodeQuarantined == model.UnQuarantined || *nodeQuarantined == model.Cancelled {
-			return r.handleCancellationEvent(ctx, nodeName, *nodeQuarantined, r.Watcher, event.ResumeToken)
-		}
+	if nodeQuarantined == string(model.UnQuarantined) || nodeQuarantined == string(model.Cancelled) {
+		return r.handleCancellationEvent(ctx, nodeName, model.Status(nodeQuarantined), r.Watcher, event.ResumeToken)
 	}
 
 	return r.handleRemediationEvent(ctx, &healthEventWithStatus, *event, r.Watcher, r.healthEventStore)
@@ -138,8 +137,8 @@ func (r *FaultRemediationReconciler) shouldSkipEvent(ctx context.Context,
 		return true
 	}
 
-	if healthEventWithStatus.HealthEventStatus.FaultRemediated != nil &&
-		*healthEventWithStatus.HealthEventStatus.FaultRemediated {
+	if healthEventWithStatus.HealthEventStatus != nil && healthEventWithStatus.HealthEventStatus.FaultRemediated != nil &&
+		healthEventWithStatus.HealthEventStatus.FaultRemediated.GetValue() {
 		return true
 	}
 
@@ -274,7 +273,6 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 }
 
 // handleRemediationEvent processes remediation for quarantined nodes
-// nolint: cyclop // todo
 func (r *FaultRemediationReconciler) handleRemediationEvent(
 	ctx context.Context,
 	healthEventWithStatus *events.HealthEventDoc,
@@ -294,16 +292,9 @@ func (r *FaultRemediationReconciler) handleRemediationEvent(
 			"error", err, "event", healthEventWithStatus.ID)
 	}
 
-	// Check if we should skip this event (NONE actions or unsupported actions)
-	if r.shouldSkipEvent(ctx, healthEventWithStatus.HealthEventWithStatus, groupConfig) {
-		if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
-			metrics.ProcessingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
-			slog.Error("Error updating resume token", "error", err)
-
-			return ctrl.Result{}, fmt.Errorf("error updating resume token: %w", err)
-		}
-
-		return ctrl.Result{}, nil
+	res, err, done := r.trySkipEvent(ctx, healthEventWithStatus, groupConfig, eventWithToken, watcherInstance, nodeName)
+	if done {
+		return res, err
 	}
 
 	shouldCreateCR, existingCR, err := r.checkExistingCRStatus(ctx, healthEvent, groupConfig)
@@ -315,24 +306,82 @@ func (r *FaultRemediationReconciler) handleRemediationEvent(
 	}
 
 	if !shouldCreateCR {
-		slog.Info("Skipping event for node due to existing CR",
-			"node", nodeName,
-			"existingCR", existingCR)
-
-		metrics.EventsProcessed.WithLabelValues(metrics.CRStatusSkipped, nodeName).Inc()
-
-		if err = watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
-			metrics.ProcessingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
-			slog.Error("Error updating resume token", "error", err)
-
-			return ctrl.Result{}, fmt.Errorf("error updating resume token: %w", err)
-		}
-
-		return ctrl.Result{}, nil
+		return r.handleExistingCRSkip(ctx, eventWithToken, watcherInstance, nodeName, existingCR)
 	}
 
-	// Run log collector only when we're about to create a new CR
-	// This prevents duplicate log-collector jobs when multiple events arrive for the same node
+	result, err := r.runLogCollectorAndRemediate(ctx, healthEvent, healthEventWithStatus, eventWithToken,
+		watcherInstance, healthEventStore, groupConfig, nodeName)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if !result.IsZero() {
+		return result, nil
+	}
+
+	metrics.EventsProcessed.WithLabelValues(metrics.CRStatusCreated, nodeName).Inc()
+
+	return r.markProcessedOrError(ctx, watcherInstance, eventWithToken, nodeName)
+}
+
+// trySkipEvent returns (result, err, true) when the event should be skipped; otherwise (zero, nil, false).
+func (r *FaultRemediationReconciler) trySkipEvent(
+	ctx context.Context,
+	healthEventWithStatus *events.HealthEventDoc,
+	groupConfig *common.EquivalenceGroupConfig,
+	eventWithToken datastore.EventWithToken,
+	watcherInstance datastore.ChangeStreamWatcher,
+	nodeName string,
+) (ctrl.Result, error, bool) {
+	if !r.shouldSkipEvent(ctx, healthEventWithStatus.HealthEventWithStatus, groupConfig) {
+		return ctrl.Result{}, nil, false
+	}
+
+	if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
+		metrics.ProcessingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
+		slog.Error("Error updating resume token", "error", err)
+
+		return ctrl.Result{}, fmt.Errorf("error updating resume token: %w", err), true
+	}
+
+	return ctrl.Result{}, nil, true
+}
+
+// handleExistingCRSkip logs, records metrics, marks the event processed, and returns.
+func (r *FaultRemediationReconciler) handleExistingCRSkip(
+	ctx context.Context,
+	eventWithToken datastore.EventWithToken,
+	watcherInstance datastore.ChangeStreamWatcher,
+	nodeName, existingCR string,
+) (ctrl.Result, error) {
+	slog.Info("Skipping event for node due to existing CR",
+		"node", nodeName,
+		"existingCR", existingCR)
+
+	metrics.EventsProcessed.WithLabelValues(metrics.CRStatusSkipped, nodeName).Inc()
+
+	if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
+		metrics.ProcessingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
+		slog.Error("Error updating resume token", "error", err)
+
+		return ctrl.Result{}, fmt.Errorf("error updating resume token: %w", err)
+	}
+
+	return ctrl.Result{}, nil
+}
+
+// runLogCollectorAndRemediate runs the log collector, then performs remediation and updates status.
+// Returns a non-zero ctrl.Result if the log collector requested a requeue; otherwise Result{}, and any error.
+func (r *FaultRemediationReconciler) runLogCollectorAndRemediate(
+	ctx context.Context,
+	healthEvent *protos.HealthEvent,
+	healthEventWithStatus *events.HealthEventDoc,
+	eventWithToken datastore.EventWithToken,
+	watcherInstance datastore.ChangeStreamWatcher,
+	healthEventStore datastore.HealthEventStore,
+	groupConfig *common.EquivalenceGroupConfig,
+	nodeName string,
+) (ctrl.Result, error) {
 	result, err := r.runLogCollector(ctx, healthEvent, healthEventWithStatus.ID)
 	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("error running log collector: %w", err)
@@ -343,9 +392,9 @@ func (r *FaultRemediationReconciler) handleRemediationEvent(
 	}
 
 	_, performRemediationErr := r.performRemediation(ctx, healthEventWithStatus, groupConfig)
+	nodeRemediatedStatus := performRemediationErr == nil
 
-	nodeRemediatedStatus := performRemediationErr == nil // success if no error thrown
-	if err = r.updateNodeRemediatedStatus(ctx, healthEventStore, eventWithToken, nodeRemediatedStatus); err != nil {
+	if err := r.updateNodeRemediatedStatus(ctx, healthEventStore, eventWithToken, nodeRemediatedStatus); err != nil {
 		metrics.ProcessingErrors.WithLabelValues("update_status_error", nodeName).Inc()
 		slog.Error("Error updating remediation status for node", "error", err)
 
@@ -356,9 +405,17 @@ func (r *FaultRemediationReconciler) handleRemediationEvent(
 		return ctrl.Result{}, performRemediationErr
 	}
 
-	metrics.EventsProcessed.WithLabelValues(metrics.CRStatusCreated, nodeName).Inc()
+	return ctrl.Result{}, nil
+}
 
-	if err = watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
+// markProcessedOrError marks the event processed and returns (Result{}, nil) or (zero, err).
+func (r *FaultRemediationReconciler) markProcessedOrError(
+	ctx context.Context,
+	watcherInstance datastore.ChangeStreamWatcher,
+	eventWithToken datastore.EventWithToken,
+	nodeName string,
+) (ctrl.Result, error) {
+	if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
 		metrics.ProcessingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
 		slog.Error("Error updating resume token", "error", err)
 
@@ -378,7 +435,6 @@ func (r *FaultRemediationReconciler) updateNodeRemediatedStatus(
 	if err != nil {
 		return err
 	}
-
 	// Create status object for the update
 	status := datastore.HealthEventStatus{}
 	faultRemediated := nodeRemediatedStatus
@@ -387,7 +443,7 @@ func (r *FaultRemediationReconciler) updateNodeRemediatedStatus(
 	// If remediation was successful, set the timestamp
 	if nodeRemediatedStatus {
 		now := time.Now().UTC()
-		status.LastRemediationTimestamp = &now
+		status.LastRemediationTimestamp = timestamppb.New(now)
 	}
 
 	// Use the healthEventStore to update the status with retries
@@ -434,6 +490,8 @@ func (r *FaultRemediationReconciler) checkExistingCRStatus(ctx context.Context, 
 
 	groupStates := common.FilterEquivalenceGroupStates(groupConfig, state)
 
+	var groupsToRemove []string
+
 	for groupName, groupState := range groupStates {
 		shouldSkip := statusChecker.ShouldSkipCRCreation(ctx, groupState.ActionName, groupState.MaintenanceCR)
 		if shouldSkip {
@@ -443,8 +501,12 @@ func (r *FaultRemediationReconciler) checkExistingCRStatus(ctx context.Context, 
 
 		slog.Info("CR completed or failed, allowing retry", "node", nodeName, "crName", groupState.MaintenanceCR)
 
-		if err := r.annotationManager.RemoveGroupFromState(ctx, nodeName, groupName); err != nil {
-			slog.Error("Failed to remove CR from annotation", "error", err)
+		groupsToRemove = append(groupsToRemove, groupName)
+	}
+
+	if len(groupsToRemove) > 0 {
+		if err := r.annotationManager.RemoveGroupsFromState(ctx, nodeName, groupsToRemove); err != nil {
+			return true, "", fmt.Errorf("failed to remove groups from annotation: %w", err)
 		}
 	}
 

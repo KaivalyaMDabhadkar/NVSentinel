@@ -32,8 +32,8 @@ import (
 )
 
 const (
-	cspPollingInterval        = 30 * time.Second
-	keyOriginalArgsContextKey = "originalArgs"
+	cspPollingInterval     = 30 * time.Second
+	originalArgsContextKey = "originalArgs"
 )
 
 // TestCSPHealthMonitorGCPMaintenanceEvent verifies the complete GCP maintenance event lifecycle:
@@ -433,7 +433,7 @@ func TestCSPHealthMonitorStoreOnlyProcessingStrategy(t *testing.T) {
 			"--processing-strategy": "STORE_ONLY",
 		})
 		require.NoError(t, err)
-		ctx = context.WithValue(ctx, keyOriginalArgsContextKey, originalArgs)
+		ctx = context.WithValue(ctx, originalArgsContextKey, originalArgs)
 
 		helpers.WaitForDeploymentRollout(ctx, t, client, "csp-health-monitor", helpers.NVSentinelNamespace)
 
@@ -496,15 +496,13 @@ func TestCSPHealthMonitorStoreOnlyProcessingStrategy(t *testing.T) {
 		helpers.EnsureNodeConditionNotPresent(ctx, t, client, testCtx.NodeName, "CSPMaintenance")
 		t.Log("Verifying node was not cordoned when processing STORE_ONLY strategy")
 		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
-			ExpectCordoned:   false,
-			ExpectAnnotation: false,
+			ExpectCordoned: false,
+			AnnotationChecks: []helpers.AnnotationCheck{
+				{Key: helpers.QuarantineHealthEventAnnotationKey, ShouldExist: false},
+			},
 		})
 
 		t.Logf("Verified: node %s was not cordoned when processing STORE_ONLY strategy", testCtx.NodeName)
-		helpers.AssertQuarantineState(ctx, t, client, testCtx.NodeName, helpers.QuarantineAssertion{
-			ExpectCordoned:   false,
-			ExpectAnnotation: false,
-		})
 
 		return ctx
 	})
@@ -513,7 +511,7 @@ func TestCSPHealthMonitorStoreOnlyProcessingStrategy(t *testing.T) {
 		client, err := c.NewClient()
 		require.NoError(t, err)
 
-		originalArgs := ctx.Value(keyOriginalArgsContextKey).([]string)
+		originalArgs := ctx.Value(originalArgsContextKey).([]string)
 
 		err = helpers.RestoreDeploymentArgs(t, ctx, client, "csp-health-monitor", helpers.NVSentinelNamespace, "maintenance-notifier", originalArgs)
 		require.NoError(t, err)

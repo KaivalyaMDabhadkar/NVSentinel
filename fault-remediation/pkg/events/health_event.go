@@ -14,7 +14,9 @@
 
 package events
 
-import "github.com/nvidia/nvsentinel/data-models/pkg/model"
+import (
+	"github.com/nvidia/nvsentinel/data-models/pkg/model"
+)
 
 // HealthEventDoc represents health event data with JSON "_id" tag for document-based storage.
 type HealthEventDoc struct {

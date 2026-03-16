@@ -101,6 +101,16 @@ var (
 		},
 	)
 
+	// PodEvictionDuration tracks time to successfully evict all pods from a node.
+	// Exponential buckets from 0.1s to ~3 days (0.1 * 2^22 = 259200s).
+	PodEvictionDuration = promauto.NewHistogram(
+		prometheus.HistogramOpts{
+			Name:    "node_drainer_pod_eviction_duration_seconds",
+			Help:    "Time from event receipt by node-drainer to successful pod eviction completion.",
+			Buckets: prometheus.ExponentialBuckets(0.1, 2, 23),
+		},
+	)
+
 	// QueueDepth tracks the total number of pending events in the queue
 	QueueDepth = promauto.NewGauge(
 		prometheus.GaugeOpts{

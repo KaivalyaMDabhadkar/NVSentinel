@@ -46,6 +46,9 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 | `fault_quarantine_taints_removed_total` | Counter | `taint_key`, `taint_effect` | Total number of taints removed from nodes |
 | `fault_quarantine_cordons_applied_total` | Counter | - | Total number of cordons applied to nodes |
 | `fault_quarantine_cordons_removed_total` | Counter | - | Total number of cordons removed from nodes |
+| `fault_quarantine_node_quarantine_duration_seconds` | Histogram | - | Time from health event generation to node quarantine completion. Buckets: Prometheus DefBuckets |
+| `fault_quarantine_node_remediation_duration_seconds` | Histogram | - | End-to-end node remediation time: `generatedTimestamp` (from original unhealthy event) to node unquarantine. Emitted on both auto unquarantine (via healthy event) and manual uncordon. Buckets: ExponentialBuckets(start=10s, factor=1.5, count=27), max ~4.4 days |
+| `fault_quarantine_node_remediation_duration_excluding_drain_seconds` | Histogram | - | Remediation time excluding node-drainer duration: `(unquarantineTime - generatedTimestamp) - (drainFinishTimestamp - quarantineFinishTimestamp)`. Emitted only when both `quarantineFinishTimestamp` and `drainFinishTimestamp` are present in the original event document. Buckets: ExponentialBuckets(start=10s, factor=1.5, count=19), max ~4.1 hours |
 
 ### Ruleset Evaluation Metrics
 
@@ -78,6 +81,7 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 | `node_drainer_processing_errors_total` | Counter | `error_type`, `node` | Total number of errors encountered during event processing and node draining |
 | `node_drainer_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
 | `node_drainer_queue_depth` | Gauge | - | Total number of pending events in the queue |
+| `node_drainer_pod_eviction_duration_seconds` | Histogram | - | Time from event receipt by node-drainer to successful pod eviction completion. Buckets: Exponential (0.1s, factor 2, 23 buckets, up to ~3 days) |
 
 ### Node Draining Metrics
 
@@ -99,6 +103,7 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 | `fault_remediation_processing_errors_total` | Counter | `error_type`, `node_name` | Total number of errors encountered during event processing |
 | `fault_remediation_unsupported_actions_total` | Counter | `action`, `node_name` | Total number of health events with currently unsupported remediation actions |
 | `fault_remediation_event_handling_duration_seconds` | Histogram | - | Histogram of event handling durations |
+| `fault_remediation_cr_generate_duration_seconds` | Histogram | - | Time from drain completion (or quarantine completion if drain timestamp unavailable) to maintenance CR creation. Buckets: Prometheus DefBuckets |
 
 ### Log Collector Metrics
 
@@ -146,7 +151,7 @@ This document outlines all Prometheus metrics exposed by NVSentinel components.
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
 | `janitor_actions_count` | Counter | `action_type`, `status`, `node` | Total number of janitor actions by type and status. Action types: `reboot`, `terminate`. Status values: `started`, `succeeded`, `failed` |
-| `janitor_action_mttr_seconds` | Histogram | `action_type` | Time taken to complete janitor actions (Mean Time To Repair). Uses exponential buckets (10, 2, 10) for log-scale MTTR measurement |
+| `janitor_action_mttr_seconds` | Histogram | `action_type` | Time from CR creation to action completion (Mean Time To Repair). Uses exponential buckets (10, 2, 10) for log-scale MTTR measurement |
 
 ---
 
@@ -185,12 +190,20 @@ These metrics track the internal ring buffer workqueue performance:
 
 These metrics track GPU health events detected via DCGM (Data Center GPU Manager):
 
-| Metric Name | Type | Labels | Description |
-|------------|------|--------|-------------|
-| `dcgm_health_events_publish_time_to_grpc_channel` | Histogram | `operation_name` | Amount of time spent in publishing DCGM health events on the gRPC channel |
-| `health_events_insertion_to_uds_succeed` | Counter | - | Total number of successful insertions of health events to UDS |
-| `health_events_insertion_to_uds_error` | Counter | - | Total number of failed insertions of health events to UDS |
-| `dcgm_health_active_events` | Gauge | `event_type`, `gpu_id`, `severity` | Total number of active health events at any given time by severity. Severity values: `fatal`, `non_fatal` |
+| Metric Name                                       | Type      | Labels                             | Description                                                                                               |
+|---------------------------------------------------|-----------|------------------------------------|-----------------------------------------------------------------------------------------------------------|
+| `dcgm_health_events_publish_time_to_grpc_channel` | Histogram | `operation_name`                   | Amount of time spent in publishing DCGM health events on the gRPC channel                                 |
+| `health_events_insertion_to_uds_succeed`          | Counter   | -                                  | Total number of successful insertions of health events to UDS                                             |
+| `health_events_insertion_to_uds_error`            | Counter   | -                                  | Total number of failed insertions of health events to UDS                                                 |
+| `dcgm_health_active_events`                       | Gauge     | `event_type`, `gpu_id`, `severity` | Total number of active health events at any given time by severity. Severity values: `fatal`, `non_fatal` |
+| `dcgm_api_latency`                                | Histogram | `operation_name`                   | Amount of time spent calling DCGM APIs                                                                    |
+| `dcgm_reconcile_time`                             | Histogram | -                                  | Amount of time spent running a single DCGM reconcile loop                                                 |
+| `number_of_health_watches`                        | Gauge     | -                                  | Number of DCGM health watches available                                                                   |
+| `number_of_fields`                                | Gauge     | -                                  | Number of available DCGM fields to monitor                                                                |
+| `callback_failures`                               | Counter   | `class_name`, `func_name`          | Number of times a callback function has thrown an exception                                               |
+| `callback_success`                                | Counter   | `class_name`, `func_name`          | Number of times a callback function has successfully completed                                            |
+| `dcgm_api_failures`                               | Counter   | `error_name`                       | Number of DCGM API errors                                                                                 |
+| `dcgm_health_check_unknown_system_skipped`        | Counter   | -                                  | Number of DCGM health check incidents skipped due to unrecognized system value                            |
 
 ---
 

@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -63,6 +64,19 @@ const (
 	NeverWaitTimeout      = 10 * time.Second
 	WaitInterval          = 5 * time.Second
 	NVSentinelNamespace   = "nvsentinel"
+)
+
+var (
+	RebootNodeGVK = schema.GroupVersionKind{
+		Group:   "janitor.dgxc.nvidia.com",
+		Version: "v1alpha1",
+		Kind:    "RebootNode",
+	}
+	GPUResetGVK = schema.GroupVersionKind{
+		Group:   "janitor.dgxc.nvidia.com",
+		Version: "v1alpha1",
+		Kind:    "GPUReset",
+	}
 )
 
 func WaitForNodesCordonState(
@@ -151,21 +165,68 @@ intended sequence rather than starting without the label value. This is required
 between the end of the TestScaleHealthEvents where a node may have the remediation-succeeded when the test completes.
 This workaround can be removed after KACE-1703 is completed.
 */
-//nolint:cyclop,gocognit // Test helper with complex state machine logic
 func StartNodeLabelWatcher(ctx context.Context, t *testing.T, c klient.Client, nodeName string,
 	labelValueSequence []string, waitForLabelRemoval bool, success chan bool) error {
-	currentLabelIndex := 0
-	prevLabelValue := ""
+	if len(labelValueSequence) == 0 {
+		return fmt.Errorf("labelValueSequence must not be empty")
+	}
+
+	state := newLabelWatcherState(ctx, t, c, nodeName, labelValueSequence, waitForLabelRemoval)
+
+	t.Logf("[LabelWatcher] Starting watcher for node %s, expecting sequence: %v (starting at index %d)",
+		nodeName, labelValueSequence, state.currentLabelIndex)
+
+	// Safe to send directly via sendNodeLabelResult (not s.sendResult) because the
+	// watch has not started yet, so there is no concurrent handleUpdate that could race.
+	if state.currentLabelIndex == len(labelValueSequence) && !waitForLabelRemoval {
+		t.Logf("[LabelWatcher] Node %s already at final label state, sending SUCCESS immediately", nodeName)
+
+		go sendNodeLabelResult(ctx, success, true)
+
+		return nil
+	}
+
+	return c.Resources().Watch(&v1.NodeList{}, resources.WithFieldSelector(
+		labels.FormatLabels(map[string]string{"metadata.name": nodeName}))).
+		WithUpdateFunc(func(updated interface{}) {
+			state.handleUpdate(t, ctx, updated, success)
+		}).Start(ctx)
+}
+
+type labelWatcherState struct {
+	// Lock to prevent concurrent access to currentLabelIndex/prevLabelValue.
+	// Sends to the success channel will be blocked on the test runner reading the result
+	// in TestFatalHealthEventEndToEnd. The UpdateFunc thread which has acquired the lock
+	// will be waiting for the main thread to read from the success channel. This is the
+	// desired behavior because we only want to have 1 UpdateFunc thread write true/false.
+	mu                  sync.Mutex
+	currentLabelIndex   int
+	prevLabelValue      string
+	labelValueSequence  []string
+	nodeName            string
+	waitForLabelRemoval bool
+	resultSent          bool
+}
+
+func newLabelWatcherState(ctx context.Context, t *testing.T, c klient.Client,
+	nodeName string, labelValueSequence []string, waitForLabelRemoval bool) *labelWatcherState {
+	state := &labelWatcherState{
+		labelValueSequence:  labelValueSequence,
+		nodeName:            nodeName,
+		waitForLabelRemoval: waitForLabelRemoval,
+	}
 
 	node, err := GetNodeByName(ctx, c, nodeName)
-	if err == nil {
+	if err != nil {
+		t.Logf("[LabelWatcher] Failed to get node %s for initial state: %v, starting from index 0", nodeName, err)
+	} else {
 		if currentValue, exists := node.Labels[statemanager.NVSentinelStateLabelKey]; exists {
 			for i, expected := range labelValueSequence {
 				if currentValue == expected {
 					t.Logf("[LabelWatcher] Node %s already has label=%s (index %d), adjusting start position",
 						nodeName, currentValue, i)
-					currentLabelIndex = i + 1 // Start watching for the NEXT label
-					prevLabelValue = currentValue
+					state.currentLabelIndex = i + 1
+					state.prevLabelValue = currentValue
 
 					break
 				}
@@ -173,116 +234,136 @@ func StartNodeLabelWatcher(ctx context.Context, t *testing.T, c klient.Client, n
 		}
 	}
 
-	// Lock to prevent concurrent access to currentLabelIndex/prevLabelValue/foundInvalidSequence.
-	// Note that sends to the success channel will be blocked on the test runner reading the result of this label sequence
-	// in TestFatalHealthEventEndToEnd. The UpdateFunc thread which has acquired the lock will be waiting for the main
-	// thead to read from the success channel. This is the desired behavior because we only want to have 1 UpdateFunc
-	// thread write true/false.
-	var lock sync.Mutex
+	return state
+}
 
-	t.Logf("[LabelWatcher] Starting watcher for node %s, expecting sequence: %v (starting at index %d)",
-		nodeName, labelValueSequence, currentLabelIndex)
+func (s *labelWatcherState) handleUpdate(t *testing.T, ctx context.Context, updated interface{}, success chan bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	return c.Resources().Watch(&v1.NodeList{}, resources.WithFieldSelector(
-		labels.FormatLabels(map[string]string{"metadata.name": nodeName}))).
-		WithUpdateFunc(func(updated interface{}) {
-			lock.Lock()
-			defer lock.Unlock()
+	node, ok := updated.(*v1.Node)
+	if !ok || node == nil {
+		t.Logf("[LabelWatcher] unexpected update type %T for node %s, skipping", updated, s.nodeName)
+		return
+	}
 
-			node := updated.(*v1.Node)
+	actualValue, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
 
-			actualValue, exists := node.Labels[statemanager.NVSentinelStateLabelKey]
-			if exists && currentLabelIndex < len(labelValueSequence) { //nolint:nestif // Complex label state tracking logic
-				expectedValue := labelValueSequence[currentLabelIndex]
-				t.Logf("[LabelWatcher] Node %s update: %s=%s (progress: %d/%d, expected: %s, prev: %s)",
-					nodeName, statemanager.NVSentinelStateLabelKey, actualValue,
-					currentLabelIndex, len(labelValueSequence), expectedValue, prevLabelValue)
-				//nolint:gocritic // Complex boolean logic appropriate for state transitions
-				if currentLabelIndex < len(labelValueSequence) && actualValue == labelValueSequence[currentLabelIndex] {
-					t.Logf("[LabelWatcher] ✓ MATCHED expected label [%d]: %s", currentLabelIndex, actualValue)
-					prevLabelValue = labelValueSequence[currentLabelIndex]
+	if exists && s.currentLabelIndex < len(s.labelValueSequence) {
+		s.handleLabelPresent(t, ctx, actualValue, success)
+	} else if !exists {
+		s.handleLabelAbsent(t, ctx, success)
+	}
+	// Label exists but sequence already complete: deliberate no-op.
+	// The watcher is either waiting for label removal (handled by
+	// handleLabelAbsent on a future update) or has already sent a result.
+}
 
-					currentLabelIndex++
-					if currentLabelIndex == len(labelValueSequence) {
-						if !waitForLabelRemoval {
-							t.Logf("[LabelWatcher] ✓ All labels observed, not waiting for removal. Sending SUCCESS to channel")
-							sendNodeLabelResult(ctx, success, true)
-						}
+func (s *labelWatcherState) handleLabelPresent(t *testing.T, ctx context.Context,
+	actualValue string, success chan bool) {
+	expectedValue := s.labelValueSequence[s.currentLabelIndex]
+	t.Logf("[LabelWatcher] Node %s update: %s=%s (progress: %d/%d, expected: %s, prev: %s)",
+		s.nodeName, statemanager.NVSentinelStateLabelKey, actualValue,
+		s.currentLabelIndex, len(s.labelValueSequence), expectedValue, s.prevLabelValue)
 
-						t.Logf("[LabelWatcher] ✓ All %d labels matched! Waiting for label removal...", len(labelValueSequence))
-					}
-				} else if actualValue != labelValueSequence[currentLabelIndex] && prevLabelValue != actualValue {
-					// Check if the actual label appears later in the sequence (skipped intermediate states)
-					// This can happen with fast state transitions, especially with PostgreSQL LISTEN/NOTIFY
-					foundLaterInSequence := false
-					skippedIndex := -1
+	switch {
+	case actualValue == expectedValue:
+		s.handleMatchedLabel(t, ctx, actualValue, success)
+	case actualValue != s.prevLabelValue:
+		s.handleOutOfSequenceLabel(t, ctx, actualValue, success)
+	default:
+		t.Logf("[LabelWatcher] Ignoring duplicate update for label: %s", actualValue)
+	}
+}
 
-					for i := currentLabelIndex + 1; i < len(labelValueSequence); i++ {
-						if actualValue == labelValueSequence[i] {
-							foundLaterInSequence = true
-							skippedIndex = i
+func (s *labelWatcherState) handleMatchedLabel(t *testing.T, ctx context.Context,
+	actualValue string, success chan bool) {
+	t.Logf("[LabelWatcher] ✓ MATCHED expected label [%d]: %s", s.currentLabelIndex, actualValue)
+	s.prevLabelValue = s.labelValueSequence[s.currentLabelIndex]
+	s.currentLabelIndex++
 
-							break
-						}
-					}
+	if s.currentLabelIndex == len(s.labelValueSequence) {
+		if !s.waitForLabelRemoval {
+			t.Logf("[LabelWatcher] ✓ All labels observed, not waiting for removal. Sending SUCCESS to channel")
+			s.sendResult(ctx, success, true)
+		} else {
+			t.Logf("[LabelWatcher] ✓ All %d labels matched! Waiting for label removal...", len(s.labelValueSequence))
+		}
+	}
+}
 
-					if foundLaterInSequence {
-						// We skipped intermediate states - log warning but continue
-						skippedLabels := labelValueSequence[currentLabelIndex:skippedIndex]
-						t.Logf(
-							"[LabelWatcher] ⚠ SKIPPED intermediate labels: %v (jumped from '%s' to '%s')",
-							skippedLabels, prevLabelValue, actualValue,
-						)
-						t.Logf("[LabelWatcher] ⚠ This is expected with fast state transitions (PostgreSQL LISTEN/NOTIFY)")
+func (s *labelWatcherState) handleOutOfSequenceLabel(t *testing.T, ctx context.Context,
+	actualValue string, success chan bool) {
+	// Check if the actual label appears later in the sequence (skipped intermediate states).
+	// This can happen with fast state transitions, especially with PostgreSQL LISTEN/NOTIFY.
+	skippedIndex := -1
 
-						// Update state to the current label
-						prevLabelValue = actualValue
-						currentLabelIndex = skippedIndex + 1
+	for i := s.currentLabelIndex + 1; i < len(s.labelValueSequence); i++ {
+		if actualValue == s.labelValueSequence[i] {
+			skippedIndex = i
 
-						if currentLabelIndex == len(labelValueSequence) {
-							t.Logf("[LabelWatcher] ✓ Reached final state despite skipped labels! Waiting for label removal...")
-						}
-					} else if currentLabelIndex == 0 {
-						// First label doesn't match and isn't in sequence - missed early labels
-						t.Logf(
-							"[LabelWatcher] ✗ MISSED early labels: First label received is '%s', "+
-								"but expected to start with '%s' (index 0)",
-							actualValue, labelValueSequence[0],
-						)
-						t.Logf("[LabelWatcher] Sending FAILURE to channel (missed early labels)")
-						sendNodeLabelResult(ctx, success, false)
-					} else {
-						// Completely unexpected transition (not in sequence at all)
-						t.Logf("[LabelWatcher] ✗ UNEXPECTED label transition: got '%s', expected '%s' (prev: '%s')",
-							actualValue, labelValueSequence[currentLabelIndex], prevLabelValue)
-						t.Logf("[LabelWatcher] ✗ Label '%s' is not in expected sequence", actualValue)
-						t.Logf("[LabelWatcher] Sending FAILURE to channel")
-						sendNodeLabelResult(ctx, success, false)
-					}
-				} else if actualValue == prevLabelValue {
-					t.Logf("[LabelWatcher] Ignoring duplicate update for label: %s", actualValue)
-				}
+			break
+		}
+	}
+
+	switch {
+	case skippedIndex >= 0:
+		skippedLabels := s.labelValueSequence[s.currentLabelIndex:skippedIndex]
+		t.Logf("[LabelWatcher] ⚠ SKIPPED intermediate labels: %v (jumped from '%s' to '%s')",
+			skippedLabels, s.prevLabelValue, actualValue)
+		t.Logf("[LabelWatcher] ⚠ This is expected with fast state transitions (PostgreSQL LISTEN/NOTIFY)")
+
+		s.prevLabelValue = actualValue
+		s.currentLabelIndex = skippedIndex + 1
+
+		if s.currentLabelIndex == len(s.labelValueSequence) {
+			if !s.waitForLabelRemoval {
+				t.Logf("[LabelWatcher] ✓ Reached final state despite skipped labels. Sending SUCCESS to channel")
+				s.sendResult(ctx, success, true)
 			} else {
-				t.Logf("[LabelWatcher] Node %s update: %s label doesn't exist (progress: %d/%d)",
-					nodeName, statemanager.NVSentinelStateLabelKey, currentLabelIndex, len(labelValueSequence))
-
-				switch {
-				case currentLabelIndex == len(labelValueSequence):
-					t.Logf("[LabelWatcher] ✓ All labels observed and now removed. Sending SUCCESS to channel")
-					sendNodeLabelResult(ctx, success, true)
-				case currentLabelIndex != 0:
-					t.Logf("[LabelWatcher] ✗ Label removed prematurely (only saw %d/%d labels). Sending FAILURE to channel",
-						currentLabelIndex, len(labelValueSequence))
-					sendNodeLabelResult(ctx, success, false)
-				default:
-					t.Logf("[LabelWatcher] Waiting for first label to appear...")
-				}
+				t.Logf("[LabelWatcher] ✓ Reached final state despite skipped labels! Waiting for label removal...")
 			}
-			// Do nothing if the label exists and the actualValue equals the previous label value, if the first label
-			// observed doesn't match yet, or if we already found all the expected labels and we're waiting for the
-			// label to be removed. Additionally, do nothing if the label doesn't exist and we still haven't seen the
-			// label added.
-		}).Start(ctx)
+		}
+	case s.currentLabelIndex == 0:
+		t.Logf("[LabelWatcher] ✗ MISSED early labels: First label received is '%s', "+
+			"but expected to start with '%s' (index 0)",
+			actualValue, s.labelValueSequence[0])
+		t.Logf("[LabelWatcher] Sending FAILURE to channel (missed early labels)")
+		s.sendResult(ctx, success, false)
+	default:
+		t.Logf("[LabelWatcher] ✗ UNEXPECTED label transition: got '%s', expected '%s' (prev: '%s')",
+			actualValue, s.labelValueSequence[s.currentLabelIndex], s.prevLabelValue)
+		t.Logf("[LabelWatcher] ✗ Label '%s' is not in expected sequence", actualValue)
+		t.Logf("[LabelWatcher] Sending FAILURE to channel")
+		s.sendResult(ctx, success, false)
+	}
+}
+
+func (s *labelWatcherState) handleLabelAbsent(t *testing.T, ctx context.Context, success chan bool) {
+	t.Logf("[LabelWatcher] Node %s update: %s label doesn't exist (progress: %d/%d)",
+		s.nodeName, statemanager.NVSentinelStateLabelKey, s.currentLabelIndex, len(s.labelValueSequence))
+
+	switch {
+	case s.currentLabelIndex == len(s.labelValueSequence):
+		t.Logf("[LabelWatcher] ✓ All labels observed and now removed. Sending SUCCESS to channel")
+		s.sendResult(ctx, success, true)
+	case s.currentLabelIndex != 0:
+		t.Logf("[LabelWatcher] ✗ Label removed prematurely (only saw %d/%d labels). Sending FAILURE to channel",
+			s.currentLabelIndex, len(s.labelValueSequence))
+		s.sendResult(ctx, success, false)
+	default:
+		t.Logf("[LabelWatcher] Waiting for first label to appear...")
+	}
+}
+
+func (s *labelWatcherState) sendResult(ctx context.Context, success chan bool, result bool) {
+	if s.resultSent {
+		return
+	}
+
+	s.resultSent = true
+
+	sendNodeLabelResult(ctx, success, result)
 }
 
 func sendNodeLabelResult(ctx context.Context, success chan bool, result bool) {
@@ -508,67 +589,64 @@ func DeletePod(ctx context.Context, t *testing.T, c klient.Client, namespace, po
 	return nil
 }
 
-func listAllRebootNodes(ctx context.Context, c klient.Client) (*unstructured.UnstructuredList, error) {
-	rebootNodeList := &unstructured.UnstructuredList{}
-	rebootNodeList.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "janitor.dgxc.nvidia.com",
-		Version: "v1alpha1",
-		Kind:    "RebootNodeList",
-	})
+func ListAllCRs(ctx context.Context, c klient.Client,
+	groupVersionKind schema.GroupVersionKind) (*unstructured.UnstructuredList, error) {
+	crList := &unstructured.UnstructuredList{}
+	crList.SetGroupVersionKind(groupVersionKind)
 
-	err := c.Resources().List(ctx, rebootNodeList)
+	err := c.Resources().List(ctx, crList)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list rebootnodes: %w", err)
+		return nil, fmt.Errorf("failed to list custom resources: %w", err)
 	}
 
-	return rebootNodeList, nil
+	return crList, nil
 }
 
-// WaitForNoRebootNodeCR asserts that no RebootNode CR is created for a node within a timeout period.
+// WaitForNoCR asserts that no CR is created for a node within a timeout period.
 // Uses require.Never to continuously check that CR never appears.
-func WaitForNoRebootNodeCR(ctx context.Context, t *testing.T, c klient.Client, nodeName string) {
+func WaitForNoCR(ctx context.Context, t *testing.T, c klient.Client, nodeName string,
+	groupVersionKind schema.GroupVersionKind) {
 	t.Helper()
-	t.Logf("Asserting no RebootNode CR is created for node %s", nodeName)
+	t.Logf("Asserting no CR is created for node %s", nodeName)
 	require.Never(t, func() bool {
-		rebootNodeList, err := listAllRebootNodes(ctx, c)
+		crList, err := ListAllCRs(ctx, c, groupVersionKind)
 		if err != nil {
-			t.Logf("Error listing RebootNode CRs: %v", err)
+			t.Logf("Error listing CRs: %v", err)
 			return false
 		}
 
-		for _, item := range rebootNodeList.Items {
+		for _, item := range crList.Items {
 			nodeNameInCR, found, err := unstructured.NestedString(item.Object, "spec", "nodeName")
 			if err != nil || !found {
 				continue
 			}
 
 			if nodeNameInCR == nodeName {
-				t.Logf("RebootNode CR created for node %s (should not exist)!", nodeName)
+				t.Logf("CR created for node %s (should not exist)!", nodeName)
 				return true
 			}
 		}
 
 		return false
 	}, NeverWaitTimeout, WaitInterval,
-		"RebootNode CR should not be created for node %s", nodeName)
+		"CR should not be created for node %s", nodeName)
 }
 
-func WaitForRebootNodeCR(
-	ctx context.Context, t *testing.T, c klient.Client, nodeName string,
-) *unstructured.Unstructured {
+func WaitForCR(ctx context.Context, t *testing.T, c klient.Client, nodeName string,
+	groupVersionKind schema.GroupVersionKind) *unstructured.Unstructured {
 	t.Helper()
 
 	var resultCR *unstructured.Unstructured
 
 	require.Eventually(t, func() bool {
-		rebootNodeList, err := listAllRebootNodes(ctx, c)
+		crList, err := ListAllCRs(ctx, c, groupVersionKind)
 		if err != nil {
-			t.Logf("failed to list rebootnodes: %v", err)
+			t.Logf("failed to list CRs: %v", err)
 			return false
 		}
 
-		for i := range rebootNodeList.Items {
-			item := &rebootNodeList.Items[i]
+		for i := range crList.Items {
+			item := &crList.Items[i]
 
 			nodeNameInCR, found, err := unstructured.NestedString(item.Object, "spec", "nodeName")
 			if err != nil || !found || nodeNameInCR != nodeName {
@@ -578,54 +656,80 @@ func WaitForRebootNodeCR(
 			// Found the CR for this node
 			completionTime, found, err := unstructured.NestedString(item.Object, "status", "completionTime")
 			if err != nil || !found || completionTime == "" {
-				t.Logf("RebootNode for node %s: waiting for completion", nodeName)
+				t.Logf("CR for node %s: waiting for completion %s", nodeName, item.GetName())
 
 				return false
 			}
 
-			t.Logf("RebootNode for node %s completed at %s", nodeName, completionTime)
+			t.Logf("CR for node %s completed at %s", nodeName, completionTime)
 
 			resultCR = item
 
 			return true
 		}
 
-		t.Logf("No RebootNode CR found for node %s yet", nodeName)
+		t.Logf("No CR found for node %s yet", nodeName)
 
 		return false
 	}, EventuallyWaitTimeout, WaitInterval,
-		"RebootNode CR should be created and complete for node %s", nodeName)
+		"CR should be created and complete for node %s", nodeName)
 
 	return resultCR
 }
 
-func DeleteAllRebootNodeCRs(ctx context.Context, t *testing.T, c klient.Client) error {
-	rebootNodeList, err := listAllRebootNodes(ctx, c)
+func DeleteAllCRs(ctx context.Context, t *testing.T, c klient.Client, groupVersionKind schema.GroupVersionKind) error {
+	crList, err := ListAllCRs(ctx, c, groupVersionKind)
 	if err != nil {
-		return fmt.Errorf("failed to list rebootnodes: %w", err)
+		return fmt.Errorf("failed to list CRs: %w", err)
 	}
 
-	for _, item := range rebootNodeList.Items {
-		err = DeleteRebootNodeCR(ctx, c, &item)
+	for _, item := range crList.Items {
+		err = DeleteCR(ctx, c, &item)
 		if err != nil {
-			return fmt.Errorf("failed to delete reboot node: %w", err)
+			return fmt.Errorf("failed to delete CR: %w", err)
 		}
 	}
 
 	return nil
 }
 
-func DeleteRebootNodeCR(ctx context.Context, c klient.Client, rebootNode *unstructured.Unstructured) error {
-	err := c.Resources().Delete(ctx, rebootNode)
+func DeleteCR(ctx context.Context, c klient.Client, cr *unstructured.Unstructured) error {
+	err := c.Resources().Delete(ctx, cr)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
 
-		return fmt.Errorf("failed to delete RebootNode CR %s: %w", rebootNode.GetName(), err)
+		return fmt.Errorf("failed to delete CR %s: %w", cr.GetName(), err)
 	}
 
 	return nil
+}
+
+func GetStartAndCompletionTimes(maintenanceCR *unstructured.Unstructured) (*time.Time, *time.Time, error) {
+	startTimeStr, found, err := unstructured.NestedString(maintenanceCR.Object, "status", "startTime")
+	if err != nil || !found {
+		return nil, nil, fmt.Errorf("failed to get startTime for maintenance CR: %s", maintenanceCR.GetName())
+	}
+
+	completionTimeStr, found, err := unstructured.NestedString(maintenanceCR.Object, "status", "completionTime")
+	if err != nil || !found {
+		return nil, nil, fmt.Errorf("failed to get completionTime for maintenance CR: %s", maintenanceCR.GetName())
+	}
+
+	startTime, err := time.Parse(time.RFC3339, startTimeStr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse start time for maintenance CR %s: %w",
+			maintenanceCR.GetName(), err)
+	}
+
+	completionTime, err := time.Parse(time.RFC3339, completionTimeStr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to parse completionTime for maintenance CR %s: %w",
+			maintenanceCR.GetName(), err)
+	}
+
+	return &startTime, &completionTime, nil
 }
 
 func GetAllNodesNames(ctx context.Context, c klient.Client) ([]string, error) {
@@ -658,29 +762,50 @@ func CountSchedulableNodes(nodeList v1.NodeList) int {
 	return count
 }
 
-// GetRealNodeName returns a real (non-KWOK) worker node name from the cluster.
+// GetRealNodeNames returns up to count distinct real (non-KWOK) worker node names.
 // Prefers schedulable workers, falls back to unschedulable workers if needed.
-func GetRealNodeName(ctx context.Context, c klient.Client) (string, error) {
+func GetRealNodeNames(ctx context.Context, c klient.Client, count int) ([]string, error) {
 	var nodeList v1.NodeList
 
 	err := c.Resources().List(ctx, &nodeList,
 		resources.WithLabelSelector("type!=kwok,!node-role.kubernetes.io/control-plane,!node-role.kubernetes.io/agent"))
 	if err != nil {
-		return "", fmt.Errorf("failed to list nodes: %w", err)
+		return nil, fmt.Errorf("failed to list nodes: %w", err)
 	}
 
-	if len(nodeList.Items) == 0 {
-		return "", fmt.Errorf("no real worker nodes found in cluster")
-	}
+	var names []string
 
 	for _, node := range nodeList.Items {
 		if !node.Spec.Unschedulable {
-			return node.Name, nil
+			names = append(names, node.Name)
 		}
 	}
 
-	return nodeList.Items[0].Name, nil
+	for _, node := range nodeList.Items {
+		if node.Spec.Unschedulable {
+			names = append(names, node.Name)
+		}
+	}
+
+	if len(names) < count {
+		return nil, fmt.Errorf(
+			"need %d real worker nodes but found %d", count, len(names),
+		)
+	}
+
+	return names[:count], nil
 }
+
+// GetRealNodeName returns a single real (non-KWOK) worker node name.
+func GetRealNodeName(ctx context.Context, c klient.Client) (string, error) {
+	names, err := GetRealNodeNames(ctx, c, 1)
+	if err != nil {
+		return "", err
+	}
+
+	return names[0], nil
+}
+
 func CreatePodsAndWaitTillRunning(
 	ctx context.Context, t *testing.T, c klient.Client, nodeNames []string, podTemplate *v1.Pod,
 ) {
@@ -787,7 +912,7 @@ func NewGPUPodSpec(namespace string, gpuCount int) *v1.Pod {
 					Name:    "gpu-container",
 					Image:   "busybox:latest",
 					Command: []string{"/bin/sh", "-c"},
-					Args:    []string{"sleep infinity"},
+					Args:    []string{"sleep 3600"},
 					Resources: v1.ResourceRequirements{
 						Requests: v1.ResourceList{
 							"nvidia.com/gpu": resource.MustParse(fmt.Sprintf("%d", gpuCount)),
@@ -849,18 +974,10 @@ func GetPodsOnNode(
 // CreateRebootNodeCR creates a RebootNode custom resource for the specified node.
 // Returns the created CR object and any error that occurred.
 // If creation fails (e.g., webhook rejection), the error is returned for the caller to inspect.
-func CreateRebootNodeCR(
-	ctx context.Context,
-	c klient.Client,
-	nodeName string,
-	crName string,
-) (*unstructured.Unstructured, error) {
+func CreateRebootNodeCR(ctx context.Context, c klient.Client, nodeName string,
+	crName string) (*unstructured.Unstructured, error) {
 	rebootNode := &unstructured.Unstructured{}
-	rebootNode.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "janitor.dgxc.nvidia.com",
-		Version: "v1alpha1",
-		Kind:    "RebootNode",
-	})
+	rebootNode.SetGroupVersionKind(RebootNodeGVK)
 	rebootNode.SetName(crName)
 
 	err := unstructured.SetNestedField(rebootNode.Object, nodeName, "spec", "nodeName")
@@ -874,6 +991,30 @@ func CreateRebootNodeCR(
 	}
 
 	return rebootNode, nil
+}
+
+func CreateGPUResetCR(ctx context.Context, c klient.Client, nodeName string, crName string,
+	uuid string) (*unstructured.Unstructured, error) {
+	gpuReset := &unstructured.Unstructured{}
+	gpuReset.SetGroupVersionKind(GPUResetGVK)
+	gpuReset.SetName(crName)
+
+	err := unstructured.SetNestedField(gpuReset.Object, nodeName, "spec", "nodeName")
+	if err != nil {
+		return nil, fmt.Errorf("failed to set nodeName in spec: %w", err)
+	}
+
+	err = unstructured.SetNestedSlice(gpuReset.Object, []interface{}{uuid}, "spec", "selector", "uuids")
+	if err != nil {
+		return nil, fmt.Errorf("failed to set selector.uuids in spec: %w", err)
+	}
+
+	err = c.Resources().Create(ctx, gpuReset)
+	if err != nil {
+		return nil, err
+	}
+
+	return gpuReset, nil
 }
 
 func createConfigMapFromBytes(ctx context.Context, c klient.Client, yamlData []byte, name, namespace string) error {
@@ -1013,7 +1154,8 @@ func ScaleDeployment(ctx context.Context, t *testing.T, c klient.Client, name, n
 	})
 }
 
-//nolint:cyclop,gocognit // Test helper with complex deployment rollout logic
+// WaitForDeploymentRollout blocks until the named Deployment's rollout is complete
+// (all replicas ready and the current ReplicaSet has ready pods) or ctx is cancelled.
 func WaitForDeploymentRollout(
 	ctx context.Context, t *testing.T, c klient.Client, name, namespace string,
 ) {
@@ -1027,125 +1169,28 @@ func WaitForDeploymentRollout(
 			return false
 		}
 
-		// Check all conditions for a successful rollout (same as kubectl rollout status)
-		if deployment.Spec.Replicas == nil {
-			t.Logf("Deployment spec replicas is nil")
+		expectedReplicas, replicasReady := checkDeploymentReplicaStatus(t, deployment)
+		if !replicasReady {
 			return false
 		}
 
-		expectedReplicas := *deployment.Spec.Replicas
+		if expectedReplicas == 0 {
+			t.Logf("Rollout complete: deployment %s/%s scaled to zero", deployment.Namespace, deployment.Name)
+			return true
+		}
 
-		if deployment.Status.UpdatedReplicas != expectedReplicas {
-			t.Logf("Waiting: UpdatedReplicas=%d, Expected=%d", deployment.Status.UpdatedReplicas, expectedReplicas)
+		selector := buildMatchLabelSelector(t, deployment)
+		if selector == "" {
+			t.Logf("Deployment %s/%s has empty or invalid selector", deployment.Namespace, deployment.Name)
 			return false
 		}
 
-		if deployment.Status.ReadyReplicas != expectedReplicas {
-			t.Logf("Waiting: ReadyReplicas=%d, Expected=%d", deployment.Status.ReadyReplicas, expectedReplicas)
+		currentRS, foundReplicaSet := findCurrentReplicaSet(ctx, t, c, selector, deployment, namespace)
+		if !foundReplicaSet {
 			return false
 		}
 
-		if deployment.Status.AvailableReplicas != expectedReplicas {
-			t.Logf("Waiting: AvailableReplicas=%d, Expected=%d", deployment.Status.AvailableReplicas, expectedReplicas)
-			return false
-		}
-
-		if deployment.Status.ObservedGeneration < deployment.Generation {
-			t.Logf("Waiting: ObservedGeneration=%d, Generation=%d", deployment.Status.ObservedGeneration, deployment.Generation)
-			return false
-		}
-
-		// Find the current ReplicaSet (highest revision) to verify we're checking the right pods
-		rsList := &appsv1.ReplicaSetList{}
-		rsLabelSelector := ""
-
-		rsLabels := []string{}
-		for k, v := range deployment.Spec.Selector.MatchLabels {
-			rsLabels = append(rsLabels, fmt.Sprintf("%s=%s", k, v))
-		}
-
-		rsLabelSelector = strings.Join(rsLabels, ",")
-
-		if err := c.Resources(namespace).List(ctx, rsList, resources.WithLabelSelector(rsLabelSelector)); err != nil {
-			t.Logf("Error listing ReplicaSets: %v", err)
-			return false
-		}
-
-		// Find the ReplicaSet with highest revision (current one)
-		var currentRS *appsv1.ReplicaSet
-
-		highestRevision := int64(-1)
-
-		for i := range rsList.Items {
-			rs := &rsList.Items[i]
-			if rs.Annotations == nil {
-				continue
-			}
-
-			revisionStr := rs.Annotations["deployment.kubernetes.io/revision"]
-			if revisionStr == "" {
-				continue
-			}
-
-			revision := int64(0)
-			if _, err := fmt.Sscanf(revisionStr, "%d", &revision); err != nil {
-				// Skip this replica set if revision parsing fails
-				continue
-			}
-
-			if revision > highestRevision {
-				highestRevision = revision
-				currentRS = rs
-			}
-		}
-
-		if currentRS == nil {
-			t.Logf("Could not find current ReplicaSet")
-			return false
-		}
-
-		currentPodTemplateHash := currentRS.Labels["pod-template-hash"]
-		t.Logf("Current ReplicaSet: %s (revision: %d, hash: %s)", currentRS.Name, highestRevision, currentPodTemplateHash)
-
-		// Now verify at least one pod from the current ReplicaSet is ready
-		labelSelector := ""
-
-		labels := []string{}
-		for k, v := range deployment.Spec.Selector.MatchLabels {
-			labels = append(labels, fmt.Sprintf("%s=%s", k, v))
-		}
-
-		labelSelector = strings.Join(labels, ",")
-
-		pods := &v1.PodList{}
-		if err := c.Resources(namespace).List(ctx, pods, resources.WithLabelSelector(labelSelector)); err != nil {
-			t.Logf("Error listing pods: %v", err)
-			return false
-		}
-
-		readyPodFound := false
-
-		for _, pod := range pods.Items {
-			if pod.DeletionTimestamp != nil {
-				continue
-			}
-
-			podHash := pod.Labels["pod-template-hash"]
-			if podHash != currentPodTemplateHash {
-				t.Logf("Skipping pod %s from old ReplicaSet (hash: %s)", pod.Name, podHash)
-				continue
-			}
-
-			if pod.Status.Phase == v1.PodRunning && IsPodReady(pod) {
-				t.Logf("Found ready pod from current ReplicaSet: %s", pod.Name)
-
-				readyPodFound = true
-
-				break
-			}
-		}
-
-		if !readyPodFound {
+		if !hasReadyPodFromReplicaSet(ctx, t, c, selector, namespace, currentRS) {
 			return false
 		}
 
@@ -1155,6 +1200,161 @@ func WaitForDeploymentRollout(
 	}, EventuallyWaitTimeout, WaitInterval, "deployment %s/%s rollout should complete", namespace, name)
 
 	t.Logf("Deployment %s/%s rollout completed successfully", namespace, name)
+}
+
+func checkDeploymentReplicaStatus(t *testing.T, deployment *appsv1.Deployment) (int32, bool) {
+	t.Helper()
+
+	if deployment.Spec.Replicas == nil {
+		t.Logf("Deployment %s/%s has nil Spec.Replicas, will retry", deployment.Namespace, deployment.Name)
+		return 0, false
+	}
+
+	expectedReplicas := *deployment.Spec.Replicas
+
+	if deployment.Status.UpdatedReplicas != expectedReplicas {
+		t.Logf("Waiting: UpdatedReplicas=%d, Expected=%d", deployment.Status.UpdatedReplicas, expectedReplicas)
+		return 0, false
+	}
+
+	if deployment.Status.ReadyReplicas != expectedReplicas {
+		t.Logf("Waiting: ReadyReplicas=%d, Expected=%d", deployment.Status.ReadyReplicas, expectedReplicas)
+		return 0, false
+	}
+
+	if deployment.Status.AvailableReplicas != expectedReplicas {
+		t.Logf("Waiting: AvailableReplicas=%d, Expected=%d", deployment.Status.AvailableReplicas, expectedReplicas)
+		return 0, false
+	}
+
+	if deployment.Status.ObservedGeneration < deployment.Generation {
+		t.Logf("Waiting: ObservedGeneration=%d, Generation=%d", deployment.Status.ObservedGeneration, deployment.Generation)
+		return 0, false
+	}
+
+	return expectedReplicas, true
+}
+
+func findCurrentReplicaSet(ctx context.Context, t *testing.T, c klient.Client,
+	selector string, deployment *appsv1.Deployment, namespace string) (*appsv1.ReplicaSet, bool) {
+	t.Helper()
+
+	rsList := &appsv1.ReplicaSetList{}
+	if err := c.Resources(namespace).List(ctx, rsList,
+		resources.WithLabelSelector(selector)); err != nil {
+		t.Logf("Error listing ReplicaSets: %v", err)
+		return nil, false
+	}
+
+	currentRS, highestRevision := highestRevisionRS(rsList, deployment)
+
+	if currentRS == nil {
+		t.Logf("Could not find current ReplicaSet")
+		return nil, false
+	}
+
+	hashLabel, ok := currentRS.Labels["pod-template-hash"]
+	if !ok || hashLabel == "" {
+		t.Logf("Current ReplicaSet %s missing pod-template-hash label", currentRS.Name)
+		return nil, false
+	}
+
+	t.Logf("Current ReplicaSet: %s (revision: %d, hash: %s)",
+		currentRS.Name, highestRevision, hashLabel)
+
+	return currentRS, true
+}
+
+func highestRevisionRS(rsList *appsv1.ReplicaSetList, owner *appsv1.Deployment) (*appsv1.ReplicaSet, int64) {
+	var currentRS *appsv1.ReplicaSet
+
+	highest := int64(-1)
+
+	for i := range rsList.Items {
+		rs := &rsList.Items[i]
+
+		if !metav1.IsControlledBy(rs, owner) {
+			continue
+		}
+
+		if rs.Annotations == nil {
+			continue
+		}
+
+		revisionStr := rs.Annotations["deployment.kubernetes.io/revision"]
+		if revisionStr == "" {
+			continue
+		}
+
+		revision, err := strconv.ParseInt(revisionStr, 10, 64)
+		if err != nil {
+			continue
+		}
+
+		if revision > highest {
+			highest = revision
+			currentRS = rs
+		}
+	}
+
+	return currentRS, highest
+}
+
+// buildMatchLabelSelector converts the deployment's label selector to a string.
+// Returns "" if the selector is nil or invalid.
+func buildMatchLabelSelector(t *testing.T, deployment *appsv1.Deployment) string {
+	t.Helper()
+
+	if deployment.Spec.Selector == nil {
+		return ""
+	}
+
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		t.Logf("Deployment %s/%s has invalid label selector: %v",
+			deployment.Namespace, deployment.Name, err)
+
+		return ""
+	}
+
+	return selector.String()
+}
+
+func hasReadyPodFromReplicaSet(ctx context.Context, t *testing.T, c klient.Client,
+	selector, namespace string, currentRS *appsv1.ReplicaSet) bool {
+	t.Helper()
+
+	currentPodTemplateHash, ok := currentRS.Labels["pod-template-hash"]
+	if !ok || currentPodTemplateHash == "" {
+		t.Logf("Current ReplicaSet %s missing pod-template-hash label", currentRS.Name)
+		return false
+	}
+
+	pods := &v1.PodList{}
+	if err := c.Resources(namespace).List(ctx, pods,
+		resources.WithLabelSelector(selector)); err != nil {
+		t.Logf("Error listing pods: %v", err)
+		return false
+	}
+
+	for _, pod := range pods.Items {
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
+
+		podHash, exists := pod.Labels["pod-template-hash"]
+		if !exists || podHash != currentPodTemplateHash {
+			t.Logf("Skipping pod %s from old ReplicaSet (hash: %s)", pod.Name, podHash)
+			continue
+		}
+
+		if pod.Status.Phase == v1.PodRunning && IsPodReady(pod) {
+			t.Logf("Found ready pod from current ReplicaSet: %s", pod.Name)
+			return true
+		}
+	}
+
+	return false
 }
 
 // RestartDeployment triggers a rolling restart of the specified deployment by updating
@@ -2687,4 +2887,232 @@ func DeleteExistingNodeEvents(ctx context.Context, t *testing.T, c klient.Client
 	t.Logf("Deleted %d event(s) for node %s", deletedCount, nodeName)
 
 	return nil
+}
+
+// ListDaemonSetPods returns all pods owned by the specified DaemonSet.
+func ListDaemonSetPods(ctx context.Context, client klient.Client, namespace, dsName string) ([]v1.Pod, error) {
+	var podList v1.PodList
+
+	err := client.Resources(namespace).List(ctx, &podList)
+	if err != nil {
+		return nil, err
+	}
+
+	var dsPods []v1.Pod
+
+	for _, pod := range podList.Items {
+		for _, ownerRef := range pod.OwnerReferences {
+			if ownerRef.Kind == "DaemonSet" && ownerRef.Name == dsName {
+				dsPods = append(dsPods, pod)
+
+				break
+			}
+		}
+	}
+
+	return dsPods, nil
+}
+
+// CleanupDaemonSet deletes a DaemonSet and waits for it and its pods to be fully deleted.
+func CleanupDaemonSet(ctx context.Context, t *testing.T, client klient.Client, namespace, name string) {
+	t.Helper()
+
+	ds := &appsv1.DaemonSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+
+	// Check if DaemonSet exists first - skip cleanup if not found
+	err := client.Resources(namespace).Get(ctx, name, namespace, ds)
+	if apierrors.IsNotFound(err) {
+		t.Logf("DaemonSet %s/%s does not exist, skipping cleanup", namespace, name)
+		return
+	}
+
+	if err != nil {
+		t.Logf("Warning: error checking DaemonSet existence: %v", err)
+	}
+
+	// Delete the DaemonSet
+	if err := client.Resources().Delete(ctx, ds); err != nil {
+		if apierrors.IsNotFound(err) {
+			t.Logf("DaemonSet %s/%s already deleted", namespace, name)
+			return
+		}
+
+		t.Logf("Note: DaemonSet deletion returned error: %v", err)
+	}
+
+	// Wait for pods to be deleted (short timeout since terminationGracePeriodSeconds=1)
+	require.Eventually(t, func() bool {
+		pods, err := ListDaemonSetPods(ctx, client, namespace, name)
+		return err == nil && len(pods) == 0
+	}, 30*time.Second, 1*time.Second, "timed out waiting for pods of DaemonSet %s/%s to be deleted", namespace, name)
+
+	// Wait for DaemonSet to be fully deleted
+	require.Eventually(t, func() bool {
+		err := client.Resources(namespace).Get(ctx, name, namespace, &appsv1.DaemonSet{})
+		if err == nil {
+			return false // Object still exists
+		}
+
+		if apierrors.IsNotFound(err) {
+			return true // Deleted successfully
+		}
+
+		// Transient error - log and retry
+		t.Logf("Note: transient error checking DaemonSet deletion: %v", err)
+
+		return false
+	}, 15*time.Second, 1*time.Second, "timed out waiting for DaemonSet %s/%s to be fully deleted", namespace, name)
+}
+
+// UpdateDaemonSet gets a DaemonSet, applies a modifier function, and updates it.
+func UpdateDaemonSet(
+	ctx context.Context, client klient.Client, namespace, name string, modifier func(*appsv1.DaemonSet),
+) error {
+	ds := &appsv1.DaemonSet{}
+
+	err := client.Resources(namespace).Get(ctx, name, namespace, ds)
+	if err != nil {
+		return err
+	}
+
+	modifier(ds)
+
+	return client.Resources().Update(ctx, ds)
+}
+
+// CheckPodCrashLoopBackOff checks if a pod has CrashLoopBackOff in its container statuses.
+// Returns true if CrashLoopBackOff is found.
+func CheckPodCrashLoopBackOff(statuses []v1.ContainerStatus) bool {
+	for _, cs := range statuses {
+		if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
+			return true
+		}
+	}
+
+	return false
+}
+
+// LogContainerStatuses logs the current state of container statuses for debugging.
+func LogContainerStatuses(t *testing.T, statuses []v1.ContainerStatus, containerType string) {
+	t.Helper()
+
+	for _, cs := range statuses {
+		switch {
+		case cs.State.Waiting != nil:
+			t.Logf("  %s %s: waiting (reason=%s)", containerType, cs.Name, cs.State.Waiting.Reason)
+		case cs.State.Running != nil:
+			t.Logf("  %s %s: running", containerType, cs.Name)
+		case cs.State.Terminated != nil:
+			t.Logf("  %s %s: terminated (exitCode=%d, reason=%s)",
+				containerType, cs.Name, cs.State.Terminated.ExitCode, cs.State.Terminated.Reason)
+		}
+	}
+}
+
+// WaitForCrashLoopBackOff waits for CrashLoopBackOff in either containerStatuses or
+// initContainerStatuses based on the checkInit flag.
+// When checkInit=false, checks main container statuses; when checkInit=true, checks init containers.
+func WaitForCrashLoopBackOff(
+	ctx context.Context, t *testing.T, client klient.Client,
+	namespace, podNamePrefix string, checkInit bool,
+) *v1.Pod {
+	t.Helper()
+
+	var foundPod *v1.Pod
+
+	containerType := "Container"
+	if checkInit {
+		containerType = "InitContainer"
+	}
+
+	require.Eventually(t, func() bool {
+		var podList v1.PodList
+		if err := client.Resources(namespace).List(ctx, &podList); err != nil {
+			return false
+		}
+
+		for i := range podList.Items {
+			pod := &podList.Items[i]
+
+			// Find pod by prefix (DaemonSet pods have generated suffixes)
+			if !strings.HasPrefix(pod.Name, podNamePrefix) {
+				continue
+			}
+
+			// Select which container statuses to check
+			statuses := pod.Status.ContainerStatuses
+			if checkInit {
+				statuses = pod.Status.InitContainerStatuses
+			}
+
+			if CheckPodCrashLoopBackOff(statuses) {
+				t.Logf("Pod %s %s is in CrashLoopBackOff (phase: %s)",
+					pod.Name, containerType, pod.Status.Phase)
+				foundPod = pod
+
+				return true
+			}
+
+			// Log current state for debugging
+			t.Logf("Pod %s: phase=%s, %sStatuses=%d",
+				pod.Name, pod.Status.Phase, containerType, len(statuses))
+			LogContainerStatuses(t, statuses, containerType)
+		}
+
+		return false
+	}, EventuallyWaitTimeout, WaitInterval,
+		"pod with prefix %s %s did not enter CrashLoopBackOff", podNamePrefix, containerType)
+
+	return foundPod
+}
+
+// WaitForDaemonSetPodRunning waits for a DaemonSet pod to reach Running state with all
+// containers ready, and ensures no terminating pods exist. The function waits until:
+// 1. All terminating pods are fully deleted
+// 2. Exactly one pod exists on the target node
+// 3. That pod is Running and Ready (using isPodRunningAndReady)
+func WaitForDaemonSetPodRunning(
+	ctx context.Context, t *testing.T, client klient.Client, namespace, dsName, nodeName string,
+) {
+	t.Helper()
+
+	require.Eventually(t, func() bool {
+		pods, err := ListDaemonSetPods(ctx, client, namespace, dsName)
+		if err != nil {
+			t.Logf("Error listing pods: %v", err)
+			return false
+		}
+
+		var podsOnNode []v1.Pod
+
+		for _, pod := range pods {
+			if pod.Spec.NodeName == nodeName {
+				podsOnNode = append(podsOnNode, pod)
+			}
+		}
+
+		// Ensure exactly one non-terminating pod exists on the node
+		if len(podsOnNode) != 1 {
+			t.Logf("Expected 1 pod on node %s, found %d", nodeName, len(podsOnNode))
+			return false
+		}
+
+		pod := &podsOnNode[0]
+
+		// isPodRunningAndReady checks DeletionTimestamp, Phase, and Ready condition
+		if !isPodRunningAndReady(pod) {
+			t.Logf("Pod %s: phase=%s, deletionTimestamp=%v", pod.Name, pod.Status.Phase, pod.DeletionTimestamp)
+			return false
+		}
+
+		t.Logf("Pod %s is Running and Ready", pod.Name)
+
+		return true
+	}, EventuallyWaitTimeout, WaitInterval,
+		"DaemonSet %s pod on node %s did not reach Running state", dsName, nodeName)
 }

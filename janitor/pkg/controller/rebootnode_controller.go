@@ -12,11 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// nolint:wsl,lll,gocognit,cyclop,gocyclo,nestif // Business logic migrated from old code
 package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"time"
@@ -24,7 +24,9 @@ import (
 	"log/slog"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,6 +53,13 @@ type RebootNodeReconciler struct {
 	grpcConn      *grpc.ClientConn
 }
 
+// errRebootNodeDeleted is returned when the RebootNode was deleted during status update (do not requeue).
+var errRebootNodeDeleted = errors.New("rebootnode deleted during status update")
+
+// requeueBackoffForTransientCSPError is the delay before retrying after a transient gRPC/CSP error.
+const requeueBackoffForTransientCSPError = 15 * time.Second
+
+//nolint:lll // kubebuilder RBAC marker must stay on one line
 // +kubebuilder:rbac:groups=janitor.dgxc.nvidia.com,resources=rebootnodes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=janitor.dgxc.nvidia.com,resources=rebootnodes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=janitor.dgxc.nvidia.com,resources=rebootnodes/finalizers,verbs=update
@@ -68,252 +77,299 @@ func (r *RebootNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Check if reconciliation is complete
 	completedReconciling := rebootNode.Status.CompletionTime != nil
 	if !completedReconciling {
-		// Try to acquire node lock before reconciling
 		locked := r.NodeLock.LockNode(ctx, &rebootNode, rebootNode.Spec.NodeName)
 		if !locked {
-			return ctrl.Result{Requeue: true}, nil
+			return ctrl.Result{RequeueAfter: time.Second * 2}, nil
 		}
-		// Execute the reconcile logic
+
 		result, err := r.reconcileHelper(ctx, &rebootNode)
-		// We always re-queue after successful reconcile to check if unlock is needed on the next reconcile.
-		// This avoids having to re-fetch the object at the end of reconciling to check if CompletionTime was set.
-		//nolint:staticcheck // SA1019: Requeue deprecated but changing behavior needs careful review
-		if err != nil || result.Requeue || result.RequeueAfter > 0 {
+		// We will always re-queue the object and check if Unlock is needed on the next reconcile rather than
+		// re-fetch the object or require reconcileHelper to specify it completed reconciling. If the controller
+		// forces a re-queue by returning an error or setting a RequeueAfter, we will respect that re-queue behavior,
+		// else we will manually set RequeueAfter. As a result, if the controller doesn't force a re-queue or forces
+		// a re-queue by setting Requeue, we will set RequeueAfter. Setting Requeue to true is deprecated
+		// and can lead to long reconcile times so we will enforce that RequeueAfter is used.
+		if err != nil || result.RequeueAfter > 0 {
 			return result, err
 		}
 
-		//nolint:staticcheck // SA1019: Requeue deprecated but changing behavior needs careful review
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second * 2}, nil
 	}
-	// CompletionTime is set, try to release the lock
+
 	retryUnlock := r.NodeLock.CheckUnlock(ctx, &rebootNode, rebootNode.Spec.NodeName)
 	if retryUnlock {
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: time.Second * 2}, nil
 	}
 
 	return ctrl.Result{}, nil
 }
 
 // reconcileHelper contains the main reconciliation logic
-func (r *RebootNodeReconciler) reconcileHelper(ctx context.Context, rebootNode *janitordgxcnvidiacomv1alpha1.RebootNode) (ctrl.Result, error) {
-	// Take a deep copy to compare against at the end
+func (r *RebootNodeReconciler) reconcileHelper(
+	ctx context.Context, rebootNode *janitordgxcnvidiacomv1alpha1.RebootNode,
+) (ctrl.Result, error) {
 	originalRebootNode := rebootNode.DeepCopy()
 
-	var result ctrl.Result
-
-	// Initialize conditions if not already set
 	rebootNode.SetInitialConditions()
-
-	// Set the start time if it is not already set
 	rebootNode.SetStartTime()
 
-	// Get the node to reboot
 	var node corev1.Node
 	if err := r.Get(ctx, client.ObjectKey{Name: rebootNode.Spec.NodeName}, &node); err != nil {
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// Check if reboot has already started
+	var result ctrl.Result
+
 	if rebootNode.IsRebootInProgress() {
-		// Check if csp reports the node is ready
-		var nodeReadyErr error
-
-		cspReady := false
-		if r.Config.ManualMode {
-			cspReady = true
-		} else {
-			var rsp *cspv1alpha1.IsNodeReadyResponse
-
-			rsp, nodeReadyErr = r.CSPClient.IsNodeReady(ctx, &cspv1alpha1.IsNodeReadyRequest{
-				NodeName:  node.Name,
-				RequestId: rebootNode.GetCSPReqRef(),
-			})
-			if nodeReadyErr != nil {
-				cspReady = false
-			} else {
-				cspReady = rsp.IsReady
-			}
-		}
-
-		// Check if kubernetes reports the node is ready.
-		kubernetesReady := false
-
-		for _, condition := range node.Status.Conditions {
-			if condition.Type == corev1.NodeReady {
-				kubernetesReady = condition.Status == corev1.ConditionTrue
-			}
-		}
-
-		// nolint:gocritic // the if/else chain is fine
-		if nodeReadyErr != nil {
-			slog.Error("Node ready status check failed", "node", node.Name, "error", nodeReadyErr)
-
-			rebootNode.SetCompletionTime()
-			rebootNode.SetCondition(metav1.Condition{
-				Type:               janitordgxcnvidiacomv1alpha1.RebootNodeConditionNodeReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             "Failed",
-				Message:            fmt.Sprintf("Node status could not be checked from CSP: %s", nodeReadyErr),
-				LastTransitionTime: metav1.Now(),
-			})
-
-			metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metrics.StatusFailed, node.Name)
-
-			result = ctrl.Result{} // Don't requeue on failure
-		} else if cspReady && kubernetesReady {
-			slog.Info("Node reached ready state post-reboot", "node", node.Name)
-
-			// Update status
-			rebootNode.SetCompletionTime()
-			rebootNode.SetCondition(metav1.Condition{
-				Type:               janitordgxcnvidiacomv1alpha1.RebootNodeConditionNodeReady,
-				Status:             metav1.ConditionTrue,
-				Reason:             "Succeeded",
-				Message:            "Node reached ready state post-reboot",
-				LastTransitionTime: metav1.Now(),
-			})
-
-			// Metrics and final result
-			metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metrics.StatusSucceeded, node.Name)
-			metrics.GlobalMetrics.RecordActionMTTR(metrics.ActionTypeReboot, time.Since(rebootNode.Status.StartTime.Time))
-
-			result = ctrl.Result{} // Don't requeue on success
-		} else if time.Since(rebootNode.Status.StartTime.Time) > r.getRebootTimeout() {
-			slog.Error("Node reboot timed out", "node", node.Name, "timeout", r.getRebootTimeout())
-
-			// Update status
-			rebootNode.SetCompletionTime()
-			rebootNode.SetCondition(metav1.Condition{
-				Type:               janitordgxcnvidiacomv1alpha1.RebootNodeConditionNodeReady,
-				Status:             metav1.ConditionFalse,
-				Reason:             "Timeout",
-				Message:            "Node failed to return to ready state after timeout duration",
-				LastTransitionTime: metav1.Now(),
-			})
-
-			metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metrics.StatusFailed, node.Name)
-
-			result = ctrl.Result{} // Don't requeue on timeout
-		} else {
-			// Still waiting for reboot to complete
-			result = ctrl.Result{RequeueAfter: 60 * time.Second}
-		}
+		result = r.handleRebootInProgress(ctx, rebootNode, &node)
 	} else {
-		// Check if signal was already sent (but reboot not in progress due to other issues)
-		signalAlreadySent := false
-
-		for _, condition := range rebootNode.Status.Conditions {
-			if condition.Type == janitordgxcnvidiacomv1alpha1.RebootNodeConditionSignalSent && condition.Status == metav1.ConditionTrue {
-				signalAlreadySent = true
-				break
-			}
-		}
-
-		if signalAlreadySent {
-			// Signal was already sent, just continue monitoring
-			slog.Debug("Reboot signal already sent for node, continuing monitoring", "node", node.Name)
-
-			result = ctrl.Result{RequeueAfter: 30 * time.Second}
-		} else {
-			if r.Config.ManualMode {
-				isManualModeConditionSet := false
-
-				for _, condition := range rebootNode.Status.Conditions {
-					if condition.Type == janitordgxcnvidiacomv1alpha1.ManualModeConditionType {
-						isManualModeConditionSet = true
-						break
-					}
-				}
-
-				if !isManualModeConditionSet {
-					now := metav1.Now()
-					rebootNode.SetCondition(metav1.Condition{
-						Type:               janitordgxcnvidiacomv1alpha1.ManualModeConditionType,
-						Status:             metav1.ConditionTrue,
-						Reason:             "OutsideActorRequired",
-						Message:            "Janitor is in manual mode, outside actor required to send reboot signal",
-						LastTransitionTime: now,
-					})
-					metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metrics.StatusStarted, node.Name)
-				}
-
-				slog.Info("Manual mode enabled, janitor will not send reboot signal for node", "node", node.Name)
-
-				result = ctrl.Result{}
-			} else {
-				// Start the reboot process
-				metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metrics.StatusStarted, node.Name)
-				slog.Info("Sending reboot signal to node", "node", node.Name)
-				rsp, rebootErr := r.CSPClient.SendRebootSignal(ctx, &cspv1alpha1.SendRebootSignalRequest{
-					NodeName: node.Name,
-				})
-
-				// Update status based on reboot result
-				var signalSentCondition metav1.Condition
-				if rebootErr == nil {
-					signalSentCondition = metav1.Condition{
-						Type:               janitordgxcnvidiacomv1alpha1.RebootNodeConditionSignalSent,
-						Status:             metav1.ConditionTrue,
-						Reason:             "Succeeded",
-						Message:            rsp.RequestId,
-						LastTransitionTime: metav1.Now(),
-					}
-					// Continue monitoring if signal was sent successfully
-					result = ctrl.Result{RequeueAfter: 30 * time.Second}
-				} else {
-					signalSentCondition = metav1.Condition{
-						Type:               janitordgxcnvidiacomv1alpha1.RebootNodeConditionSignalSent,
-						Status:             metav1.ConditionFalse,
-						Reason:             "Failed",
-						Message:            rebootErr.Error(),
-						LastTransitionTime: metav1.Now(),
-					}
-
-					rebootNode.SetCompletionTime()
-
-					// Don't requeue on failure
-					result = ctrl.Result{}
-
-					metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metrics.StatusFailed, node.Name)
-				}
-
-				rebootNode.SetCondition(signalSentCondition)
-			}
-		}
+		result = r.handleRebootNotStarted(ctx, rebootNode, &node)
 	}
 
-	// Compare status to see if anything changed, and push updates if needed
-	if !reflect.DeepEqual(originalRebootNode.Status, rebootNode.Status) {
-		// Refresh the object before updating to avoid precondition failures
-		var freshRebootNode janitordgxcnvidiacomv1alpha1.RebootNode
-
-		objectKey := client.ObjectKey{Name: rebootNode.Name, Namespace: rebootNode.Namespace}
-		if err := r.Get(ctx, objectKey, &freshRebootNode); err != nil {
-			if apierrors.IsNotFound(err) {
-				slog.Info("Post-reconciliation status update: not found, object assumed deleted", "node", rebootNode.Name)
-				return ctrl.Result{}, nil
-			}
-
-			slog.Error("failed to refresh RebootNode before status update", "error", err)
-
-			return ctrl.Result{}, err
+	if err := r.updateRebootNodeStatusIfChanged(ctx, originalRebootNode, rebootNode); err != nil {
+		if errors.Is(err, errRebootNodeDeleted) {
+			return ctrl.Result{}, nil
 		}
 
-		// Apply status changes to the fresh object
-		freshRebootNode.Status = rebootNode.Status
-
-		if err := r.Status().Update(ctx, &freshRebootNode); err != nil {
-			slog.Error("failed to update RebootNode status", "error", err)
-			return ctrl.Result{}, err
-		}
-
-		slog.Info("RebootNode status updated", "node", rebootNode.Spec.NodeName)
+		return ctrl.Result{}, err
 	}
 
 	return result, nil
+}
+
+// updateRebootNodeStatusIfChanged refreshes and updates status when it has changed;
+// returns errRebootNodeDeleted if the object was deleted.
+func (r *RebootNodeReconciler) updateRebootNodeStatusIfChanged(
+	ctx context.Context, original, rebootNode *janitordgxcnvidiacomv1alpha1.RebootNode,
+) error {
+	if reflect.DeepEqual(original.Status, rebootNode.Status) {
+		return nil
+	}
+
+	var freshRebootNode janitordgxcnvidiacomv1alpha1.RebootNode
+
+	objectKey := client.ObjectKey{Name: rebootNode.Name, Namespace: rebootNode.Namespace}
+	if err := r.Get(ctx, objectKey, &freshRebootNode); err != nil {
+		if apierrors.IsNotFound(err) {
+			slog.Info("Post-reconciliation status update: not found, object assumed deleted", "node", rebootNode.Name)
+
+			return errRebootNodeDeleted
+		}
+
+		slog.Error("failed to refresh RebootNode before status update", "error", err)
+
+		return fmt.Errorf("refreshing RebootNode %q before status update: %w", rebootNode.Name, err)
+	}
+
+	freshRebootNode.Status = rebootNode.Status
+
+	if err := r.Status().Update(ctx, &freshRebootNode); err != nil {
+		slog.Error("failed to update RebootNode status", "error", err)
+
+		return fmt.Errorf("updating RebootNode %q status: %w", rebootNode.Name, err)
+	}
+
+	slog.Info("RebootNode status updated", "node", rebootNode.Spec.NodeName)
+
+	return nil
+}
+
+// --- Reboot in progress: node ready checks and outcome ---
+
+// isTransientGRPCError returns true for gRPC/network errors worth retrying
+// (e.g. Unavailable, DeadlineExceeded).
+func isTransientGRPCError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	s, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+
+	c := s.Code()
+
+	return c == codes.Unavailable || c == codes.DeadlineExceeded
+}
+
+// handleRebootInProgress evaluates node ready state and returns the appropriate requeue result.
+func (r *RebootNodeReconciler) handleRebootInProgress(
+	ctx context.Context, rebootNode *janitordgxcnvidiacomv1alpha1.RebootNode, node *corev1.Node,
+) ctrl.Result {
+	cspReady, nodeReadyErr := r.checkNodeReadyFromCSP(ctx, rebootNode, node.Name)
+	kubernetesReady := isNodeKubernetesReady(node)
+
+	if nodeReadyErr != nil {
+		if isTransientGRPCError(nodeReadyErr) {
+			slog.Warn("Transient CSP error during node ready check, will requeue",
+				"node", node.Name, "error", nodeReadyErr, "requeueAfter", requeueBackoffForTransientCSPError)
+
+			return ctrl.Result{RequeueAfter: requeueBackoffForTransientCSPError}
+		}
+
+		slog.Error("Node ready status check failed", "node", node.Name, "error", nodeReadyErr)
+
+		return r.completeNodeReadyCheck(rebootNode, node, metav1.ConditionFalse, "Failed",
+			fmt.Sprintf("Node status could not be checked from CSP: %s", nodeReadyErr), metrics.StatusFailed)
+	}
+
+	if cspReady && kubernetesReady {
+		slog.Info("Node reached ready state post-reboot", "node", node.Name)
+		metrics.GlobalMetrics.RecordActionMTTR(metrics.ActionTypeReboot, time.Since(rebootNode.CreationTimestamp.Time))
+
+		return r.completeNodeReadyCheck(rebootNode, node, metav1.ConditionTrue, "Succeeded",
+			"Node reached ready state post-reboot", metrics.StatusSucceeded)
+	}
+
+	if time.Since(rebootNode.Status.StartTime.Time) > r.getRebootTimeout() {
+		slog.Error("Node reboot timed out", "node", node.Name, "timeout", r.getRebootTimeout())
+
+		return r.completeNodeReadyCheck(rebootNode, node, metav1.ConditionFalse, "Timeout",
+			"Node failed to return to ready state after timeout duration", metrics.StatusFailed)
+	}
+
+	return ctrl.Result{RequeueAfter: 60 * time.Second}
+}
+
+func (r *RebootNodeReconciler) completeNodeReadyCheck(
+	rebootNode *janitordgxcnvidiacomv1alpha1.RebootNode, node *corev1.Node,
+	conditionStatus metav1.ConditionStatus, reason, message, metricsStatus string,
+) ctrl.Result {
+	rebootNode.SetCompletionTime()
+	rebootNode.SetCondition(metav1.Condition{
+		Type:               janitordgxcnvidiacomv1alpha1.RebootNodeConditionNodeReady,
+		Status:             conditionStatus,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.Now(),
+	})
+	metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metricsStatus, node.Name)
+
+	return ctrl.Result{}
+}
+
+func (r *RebootNodeReconciler) checkNodeReadyFromCSP(
+	ctx context.Context, rebootNode *janitordgxcnvidiacomv1alpha1.RebootNode, nodeName string,
+) (bool, error) {
+	if *r.Config.ManualMode {
+		return true, nil
+	}
+
+	rsp, err := r.CSPClient.IsNodeReady(ctx, &cspv1alpha1.IsNodeReadyRequest{
+		NodeName:  nodeName,
+		RequestId: rebootNode.GetCSPReqRef(),
+	})
+	if err != nil {
+		return false, err
+	}
+
+	return rsp.IsReady, nil
+}
+
+func isNodeKubernetesReady(node *corev1.Node) bool {
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == corev1.NodeReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+
+	return false
+}
+
+// --- Reboot not started: signal sent / manual mode / send signal ---
+
+// handleRebootNotStarted handles the case when reboot has not yet started (signal not sent or manual mode).
+func (r *RebootNodeReconciler) handleRebootNotStarted(
+	ctx context.Context, rebootNode *janitordgxcnvidiacomv1alpha1.RebootNode, node *corev1.Node,
+) ctrl.Result {
+	if hasConditionTrue(rebootNode.Status.Conditions, janitordgxcnvidiacomv1alpha1.RebootNodeConditionSignalSent) {
+		slog.Debug("Reboot signal already sent for node, continuing monitoring", "node", node.Name)
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}
+	}
+
+	if *r.Config.ManualMode {
+		return r.handleManualMode(rebootNode, node)
+	}
+
+	return r.sendRebootSignalAndSetCondition(ctx, rebootNode, node)
+}
+
+func hasConditionTrue(conditions []metav1.Condition, condType string) bool {
+	for _, c := range conditions {
+		if c.Type == condType && c.Status == metav1.ConditionTrue {
+			return true
+		}
+	}
+
+	return false
+}
+
+func (r *RebootNodeReconciler) handleManualMode(
+	rebootNode *janitordgxcnvidiacomv1alpha1.RebootNode, node *corev1.Node,
+) ctrl.Result {
+	if !hasConditionTrue(rebootNode.Status.Conditions, janitordgxcnvidiacomv1alpha1.ManualModeConditionType) {
+		rebootNode.SetCondition(metav1.Condition{
+			Type:               janitordgxcnvidiacomv1alpha1.ManualModeConditionType,
+			Status:             metav1.ConditionTrue,
+			Reason:             "OutsideActorRequired",
+			Message:            "Janitor is in manual mode, outside actor required to send reboot signal",
+			LastTransitionTime: metav1.Now(),
+		})
+		metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metrics.StatusStarted, node.Name)
+	}
+
+	slog.Info("Manual mode enabled, janitor will not send reboot signal for node", "node", node.Name)
+
+	return ctrl.Result{}
+}
+
+func (r *RebootNodeReconciler) sendRebootSignalAndSetCondition(
+	ctx context.Context, rebootNode *janitordgxcnvidiacomv1alpha1.RebootNode, node *corev1.Node,
+) ctrl.Result {
+	metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metrics.StatusStarted, node.Name)
+	slog.Info("Sending reboot signal to node", "node", node.Name)
+
+	rsp, rebootErr := r.CSPClient.SendRebootSignal(ctx, &cspv1alpha1.SendRebootSignalRequest{
+		NodeName: node.Name,
+	})
+	if rebootErr == nil {
+		rebootNode.SetCondition(metav1.Condition{
+			Type:               janitordgxcnvidiacomv1alpha1.RebootNodeConditionSignalSent,
+			Status:             metav1.ConditionTrue,
+			Reason:             "Succeeded",
+			Message:            rsp.RequestId,
+			LastTransitionTime: metav1.Now(),
+		})
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}
+	}
+
+	if isTransientGRPCError(rebootErr) {
+		slog.Warn("Transient CSP error sending reboot signal, will requeue",
+			"node", node.Name, "error", rebootErr)
+
+		return ctrl.Result{RequeueAfter: 30 * time.Second}
+	}
+
+	rebootNode.SetCompletionTime()
+	rebootNode.SetCondition(metav1.Condition{
+		Type:               janitordgxcnvidiacomv1alpha1.RebootNodeConditionSignalSent,
+		Status:             metav1.ConditionFalse,
+		Reason:             "Failed",
+		Message:            rebootErr.Error(),
+		LastTransitionTime: metav1.Now(),
+	})
+	metrics.GlobalMetrics.IncActionCount(metrics.ActionTypeReboot, metrics.StatusFailed, node.Name)
+
+	return ctrl.Result{}
 }
 
 // SetupWithManager sets up the controller with the Manager.

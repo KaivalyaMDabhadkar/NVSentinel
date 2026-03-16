@@ -469,6 +469,38 @@ func (c *MongoDBClient) UpdateDocumentStatus(
 	return nil
 }
 
+// UpdateDocumentStatusFields updates multiple status fields in a document in one operation.
+func (c *MongoDBClient) UpdateDocumentStatusFields(
+	ctx context.Context, documentID string, fields map[string]interface{},
+) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	objectID, err := primitive.ObjectIDFromHex(documentID)
+	if err != nil {
+		return datastore.NewValidationError(
+			datastore.ProviderMongoDB,
+			fmt.Sprintf("invalid document ID %s", documentID),
+			err,
+		).WithMetadata("documentID", documentID)
+	}
+
+	filter := bson.M{"_id": objectID}
+	update := bson.M{"$set": fields}
+
+	_, err = c.mongoCol.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return datastore.NewUpdateError(
+			datastore.ProviderMongoDB,
+			fmt.Sprintf("failed to update document %s fields", documentID),
+			err,
+		).WithMetadata("documentID", documentID)
+	}
+
+	return nil
+}
+
 // isNestedFieldPath determines if the status path is a nested field path (contains ".")
 // Used to distinguish between direct field updates and struct-based updates
 func (c *MongoDBClient) isNestedFieldPath(statusPath string) bool {
@@ -521,15 +553,48 @@ func (c *MongoDBClient) buildStructFieldUpdates(basePath string, status interfac
 		}
 	}
 
+	// Timestamps and bools are stored in protobuf-compatible format so they can be
+	// deserialized into the proto types used by model.HealthEventWithStatus
+	// (timestamppb.Timestamp expects {seconds, nanos}; wrapperspb.BoolValue expects {value}).
+	if healthStatus.QuarantineFinishTimestamp != nil {
+		updateFields[basePath+".quarantinefinishtimestamp"] = map[string]interface{}{
+			"seconds": healthStatus.QuarantineFinishTimestamp.Seconds,
+			"nanos":   healthStatus.QuarantineFinishTimestamp.Nanos,
+		}
+	}
+
+	if healthStatus.DrainFinishTimestamp != nil {
+		updateFields[basePath+".drainfinishtimestamp"] = map[string]interface{}{
+			"seconds": healthStatus.DrainFinishTimestamp.Seconds,
+			"nanos":   healthStatus.DrainFinishTimestamp.Nanos,
+		}
+	}
+
 	if healthStatus.FaultRemediated != nil {
-		updateFields[basePath+".faultremediated"] = *healthStatus.FaultRemediated
+		updateFields[basePath+".faultremediated"] = map[string]interface{}{
+			"value": *healthStatus.FaultRemediated,
+		}
 	}
 
 	if healthStatus.LastRemediationTimestamp != nil {
-		updateFields[basePath+".lastremediationtimestamp"] = *healthStatus.LastRemediationTimestamp
+		updateFields[basePath+".lastremediationtimestamp"] = map[string]interface{}{
+			"seconds": healthStatus.LastRemediationTimestamp.Seconds,
+			"nanos":   healthStatus.LastRemediationTimestamp.Nanos,
+		}
 	}
 
 	return updateFields
+}
+
+// resolveMongoFilter converts a *query.Builder (or any type implementing ToMongo())
+// to a MongoDB filter map so the driver can BSON-marshal it correctly.
+// Plain map[string]interface{} filters pass through unchanged.
+func resolveMongoFilter(filter interface{}) interface{} {
+	if b, ok := filter.(interface{ ToMongo() map[string]interface{} }); ok {
+		return b.ToMongo()
+	}
+
+	return filter
 }
 
 // UpdateDocument performs a general update operation
@@ -628,7 +693,7 @@ func (c *MongoDBClient) FindOne(ctx context.Context, filter interface{}, opts *F
 		}
 	}
 
-	result := c.mongoCol.FindOne(ctx, filter, mongoOpts)
+	result := c.mongoCol.FindOne(ctx, resolveMongoFilter(filter), mongoOpts)
 
 	return &mongoSingleResult{result: result}, nil
 }
@@ -651,13 +716,15 @@ func (c *MongoDBClient) Find(ctx context.Context, filter interface{}, opts *Find
 		}
 	}
 
-	cursor, err := c.mongoCol.Find(ctx, filter, mongoOpts)
+	resolvedFilter := resolveMongoFilter(filter)
+
+	cursor, err := c.mongoCol.Find(ctx, resolvedFilter, mongoOpts)
 	if err != nil {
 		return nil, datastore.NewQueryError(
 			datastore.ProviderMongoDB,
 			"failed to execute find query",
 			err,
-		).WithMetadata("filter", filter)
+		).WithMetadata("filter", resolvedFilter)
 	}
 
 	return &mongoCursor{cursor: cursor}, nil
@@ -677,13 +744,15 @@ func (c *MongoDBClient) CountDocuments(ctx context.Context, filter interface{}, 
 		}
 	}
 
-	count, err := c.mongoCol.CountDocuments(ctx, filter, mongoOpts)
+	resolvedFilter := resolveMongoFilter(filter)
+
+	count, err := c.mongoCol.CountDocuments(ctx, resolvedFilter, mongoOpts)
 	if err != nil {
 		return 0, datastore.NewQueryError(
 			datastore.ProviderMongoDB,
 			"failed to count documents",
 			err,
-		).WithMetadata("filter", filter)
+		).WithMetadata("filter", resolvedFilter)
 	}
 
 	return count, nil

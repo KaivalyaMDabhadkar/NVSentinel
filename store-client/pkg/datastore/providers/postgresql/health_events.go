@@ -20,10 +20,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // PostgreSQLHealthEventStore implements HealthEventStore for PostgreSQL
@@ -34,6 +38,16 @@ type PostgreSQLHealthEventStore struct {
 // NewPostgreSQLHealthEventStore creates a new PostgreSQL health event store
 func NewPostgreSQLHealthEventStore(db *sql.DB) *PostgreSQLHealthEventStore {
 	return &PostgreSQLHealthEventStore{db: db}
+}
+
+// formatTimeRFC3339 formats t as RFC3339Nano with "Z" for JSONB document storage.
+// Ensures timestamps parse correctly in Go (RFC3339) and other consumers; PostgreSQL to_jsonb(timestamp) can omit "Z".
+func formatTimeRFC3339(t *timestamppb.Timestamp) string {
+	if t == nil {
+		return ""
+	}
+
+	return t.AsTime().UTC().Format(time.RFC3339Nano)
 }
 
 // InsertHealthEvents inserts health events into the database
@@ -158,10 +172,12 @@ func (p *PostgreSQLHealthEventStore) insertHealthEventRecord(
 	query := `
 		INSERT INTO health_events (
 			node_name, event_type, severity, recommended_action,
-			node_quarantined, user_pods_eviction_status, user_pods_eviction_message,
-			fault_remediated, last_remediation_timestamp, document
+			node_quarantined, quarantine_finish_timestamp,
+			user_pods_eviction_status, user_pods_eviction_message,
+			drain_finish_timestamp, fault_remediated, last_remediation_timestamp,
+			document
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12
 		)
 	`
 
@@ -186,8 +202,10 @@ func (p *PostgreSQLHealthEventStore) insertHealthEventRecord(
 		fields.severity,
 		fields.recommendedAction,
 		nodeQuarantined,
+		eventWithStatus.HealthEventStatus.QuarantineFinishTimestamp,
 		evictionStatus,
 		eventWithStatus.HealthEventStatus.UserPodsEvictionStatus.Message,
+		eventWithStatus.HealthEventStatus.DrainFinishTimestamp,
 		eventWithStatus.HealthEventStatus.FaultRemediated,
 		eventWithStatus.HealthEventStatus.LastRemediationTimestamp,
 		documentJSON,
@@ -215,75 +233,126 @@ func (p *PostgreSQLHealthEventStore) UpdateHealthEventStatus(
 
 	var params []interface{}
 
-	if status.NodeQuarantined != nil {
-		// NodeQuarantined has a value - update it in both column and JSONB
+	switch {
+	case status.NodeQuarantined != nil:
+		// NodeQuarantined has a value - update it in both column and JSONB.
+		// Store lastremediationtimestamp in document as RFC3339 with "Z" for parseable JSON.
 		statusStr := string(*status.NodeQuarantined)
+		lastRemediationRFC3339 := formatTimeRFC3339(status.LastRemediationTimestamp)
 		//nolint:dupword // SQL query uses nested jsonb_set calls
 		query = `
 			UPDATE health_events
 			SET node_quarantined = $1::text,
+			    quarantine_finish_timestamp = $2::timestamp,
+			    user_pods_eviction_status = $3::text,
+			    user_pods_eviction_message = $4::text,
+			    drain_finish_timestamp = $5::timestamp,
+			    fault_remediated = $6::boolean,
+			    last_remediation_timestamp = $7::timestamp,
+			    document = jsonb_set(
+			        jsonb_set(
+			            jsonb_set(
+			                jsonb_set(
+			                    jsonb_set(
+			                        document,
+			                        '{healtheventstatus,nodequarantined}',
+			                        to_jsonb($1::text)
+			                    ),
+			                    '{healtheventstatus,userpodsevictionstatus,status}',
+			                    to_jsonb($3::text)
+			                ),
+			                '{healtheventstatus,userpodsevictionstatus,message}',
+			                to_jsonb($4::text)
+			            ),
+			            '{healtheventstatus,faultremediated}',
+			            to_jsonb($6::boolean)
+			        ),
+			        '{healtheventstatus,lastremediationtimestamp}',
+			        to_jsonb($9::text)
+			    ),
+			    updated_at = NOW()
+			WHERE id = $8::uuid
+		`
+		params = []interface{}{
+			statusStr,
+			status.QuarantineFinishTimestamp,
+			string(status.UserPodsEvictionStatus.Status),
+			status.UserPodsEvictionStatus.Message,
+			status.DrainFinishTimestamp,
+			status.FaultRemediated,
+			status.LastRemediationTimestamp,
+			id,
+			lastRemediationRFC3339,
+		}
+	case status.UserPodsEvictionStatus.Status != "":
+		// NodeQuarantined is NULL but UserPodsEvictionStatus is set - update eviction + remediation fields only.
+		// Store lastremediationtimestamp in document as RFC3339 with "Z" for parseable JSON.
+		lastRemediationRFC3339 := formatTimeRFC3339(status.LastRemediationTimestamp)
+		//nolint:dupword // SQL query uses nested jsonb_set calls
+		query = `
+			UPDATE health_events
+			SET quarantine_finish_timestamp = $1::timestamp,
 			    user_pods_eviction_status = $2::text,
 			    user_pods_eviction_message = $3::text,
-			    fault_remediated = $4::boolean,
-			    last_remediation_timestamp = $5::timestamp,
+			    drain_finish_timestamp = $4::timestamp,
+			    fault_remediated = $5::boolean,
+			    last_remediation_timestamp = $6::timestamp,
 			    document = jsonb_set(
 			        jsonb_set(
 			            jsonb_set(
 			                jsonb_set(
 			                    document,
-			                    '{healtheventstatus,nodequarantined}',
-			                    to_jsonb($1::text)
+			                    '{healtheventstatus,userpodsevictionstatus,status}',
+			                    to_jsonb($2::text)
 			                ),
-			                '{healtheventstatus,userpodsevictionstatus,status}',
-			                to_jsonb($2::text)
+			                '{healtheventstatus,userpodsevictionstatus,message}',
+			                to_jsonb($3::text)
 			            ),
-			            '{healtheventstatus,userpodsevictionstatus,message}',
-			            to_jsonb($3::text)
+			            '{healtheventstatus,faultremediated}',
+			            to_jsonb($5::boolean)
 			        ),
-			        '{healtheventstatus,faultremediated}',
-			        to_jsonb($4::boolean)
+			        '{healtheventstatus,lastremediationtimestamp}',
+			        to_jsonb($8::text)
 			    ),
 			    updated_at = NOW()
-			WHERE id = $6::uuid
+			WHERE id = $7::uuid
 		`
 		params = []interface{}{
-			statusStr,
+			status.QuarantineFinishTimestamp,
 			string(status.UserPodsEvictionStatus.Status),
 			status.UserPodsEvictionStatus.Message,
+			status.DrainFinishTimestamp,
 			status.FaultRemediated,
 			status.LastRemediationTimestamp,
 			id,
+			lastRemediationRFC3339,
 		}
-	} else {
-		// NodeQuarantined is NULL - only update other fields, skip nodequarantined in JSONB
-		//nolint:dupword // SQL query uses nested jsonb_set calls
+	default:
+		// NodeQuarantined is NULL and UserPodsEvictionStatus is empty (e.g. FR-only update):
+		// only update fault_remediated and last_remediation_timestamp, preserve existing eviction status.
+		// Store lastremediationtimestamp in document as RFC3339 with "Z" so JSON unmarshal (Go/MongoDB consumers) succeeds.
+		lastRemediationRFC3339 := formatTimeRFC3339(status.LastRemediationTimestamp)
+		//nolint:dupword // SQL query uses nested jsonb_set
 		query = `
 			UPDATE health_events
-			SET user_pods_eviction_status = $1::text,
-			    user_pods_eviction_message = $2::text,
-			    fault_remediated = $3::boolean,
-			    last_remediation_timestamp = $4::timestamp,
+			SET fault_remediated = $1::boolean,
+			    last_remediation_timestamp = $2::timestamp,
 			    document = jsonb_set(
 			        jsonb_set(
-			            jsonb_set(
-			                document,
-			                '{healtheventstatus,userpodsevictionstatus,status}',
-			                to_jsonb($1::text)
-			            ),
-			            '{healtheventstatus,userpodsevictionstatus,message}',
-			            to_jsonb($2::text)
+			            document,
+			            '{healtheventstatus,faultremediated}',
+			            to_jsonb($1::boolean)
 			        ),
-			        '{healtheventstatus,faultremediated}',
-			        to_jsonb($3::boolean)
+			        '{healtheventstatus,lastremediationtimestamp}',
+			        to_jsonb($3::text)
 			    ),
 			    updated_at = NOW()
-			WHERE id = $5::uuid
+			WHERE id = $4::uuid
 		`
 		params = []interface{}{
-			string(status.UserPodsEvictionStatus.Status),
-			status.UserPodsEvictionStatus.Message,
 			status.FaultRemediated,
 			status.LastRemediationTimestamp,
+			lastRemediationRFC3339,
 			id,
 		}
 	}
@@ -325,18 +394,22 @@ func (p *PostgreSQLHealthEventStore) UpdateHealthEventStatusByNode(
 	query := `
 		UPDATE health_events
 		SET node_quarantined = $1,
-		    user_pods_eviction_status = $2,
-		    user_pods_eviction_message = $3,
-		    fault_remediated = $4,
-		    last_remediation_timestamp = $5,
+		    quarantine_finish_timestamp = $2,
+		    user_pods_eviction_status = $3,
+		    user_pods_eviction_message = $4,
+		    drain_finish_timestamp = $5,
+		    fault_remediated = $6,
+		    last_remediation_timestamp = $7,
 		    updated_at = NOW()
-		WHERE node_name = $6
+		WHERE node_name = $8
 	`
 
 	result, err := p.db.ExecContext(ctx, query,
 		nodeQuarantined,
+		status.QuarantineFinishTimestamp,
 		string(status.UserPodsEvictionStatus.Status),
 		status.UserPodsEvictionStatus.Message,
+		status.DrainFinishTimestamp,
 		status.FaultRemediated,
 		status.LastRemediationTimestamp,
 		nodeName,
@@ -808,25 +881,31 @@ func (p *PostgreSQLHealthEventStore) UpdateHealthEventsByQuery(ctx context.Conte
 	setClause, setArgs := updateBuilder.ToSQL()
 
 	// Combine arguments (SET args come first, then WHERE args)
-	//nolint:gocritic // allArgs is a new combined slice, not reassigning
-	allArgs := append(setArgs, whereArgs...)
+	var allArgs []interface{}
 
-	// Adjust WHERE clause parameter numbers
+	allArgs = append(allArgs, setArgs...)
+	allArgs = append(allArgs, whereArgs...)
 
-	// SET clause uses $1, $2, etc., so WHERE clause needs to start after those
-	adjustedWhereClause := whereClause
+	// Adjust WHERE clause parameter numbers.
+	// SET clause uses $1..$len(setArgs), so WHERE placeholders must shift by len(setArgs).
+	// Single-pass regex: match all $N placeholders and rewrite each by adding len(setArgs).
+	paramRe := regexp.MustCompile(`\$(\d+)`)
+	setLen := len(setArgs)
 
-	for i := len(setArgs); i >= 1; i-- {
-		oldParam := fmt.Sprintf("$%d", i)
-		newParam := fmt.Sprintf("$%d", i+len(setArgs))
-		adjustedWhereClause = strings.ReplaceAll(adjustedWhereClause, oldParam, newParam)
-	}
+	adjustedWhereClause := paramRe.ReplaceAllStringFunc(whereClause, func(match string) string {
+		n, err := strconv.Atoi(match[1:])
+		if err != nil {
+			return match
+		}
+
+		return fmt.Sprintf("$%d", n+setLen)
+	})
 
 	// Build the full UPDATE query
 	//nolint:gosec // G202 false positive - using parameterized query with placeholders
 	query := `
 		UPDATE health_events
-		SET ` + setClause + `, updatedAt = NOW()
+		SET ` + setClause + `, updated_at = NOW()
 		WHERE ` + adjustedWhereClause
 
 	result, err := p.db.ExecContext(ctx, query, allArgs...)

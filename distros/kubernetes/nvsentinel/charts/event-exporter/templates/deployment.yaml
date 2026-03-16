@@ -86,6 +86,7 @@ spec:
           - "--config=/etc/config/config.toml"
           - "--metrics-port={{ .Values.global.metricsPort }}"
           - "--oidc-secret-path=/var/secrets/oidc-client-secret"
+          - "--workers={{ .Values.exporter.workers }}"
           ports:
             - name: metrics
               containerPort: {{ .Values.global.metricsPort }}

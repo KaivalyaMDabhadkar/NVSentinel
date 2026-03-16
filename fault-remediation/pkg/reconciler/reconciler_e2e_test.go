@@ -27,6 +27,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -1733,7 +1734,76 @@ func cleanupNodeAnnotations(ctx context.Context, t *testing.T, nodeName string) 
 	}
 }
 
-// Metrics E2E Tests
+// TestMetrics_CRGenerationDuration tests that CR generation duration metric is recorded
+func TestMetrics_CRGenerationDuration(t *testing.T) {
+	mockStore.updateCalled = 0
+	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
+	defer cancel()
+
+	nodeName := testutils.GenerateTestNodeName("test-cr-duration")
+
+	nodeLabels := map[string]string{
+		"test":                               "label",
+		statemanager.NVSentinelStateLabelKey: string(statemanager.DrainSucceededLabelValue),
+	}
+	createTestNode(ctx, nodeName, nil, nodeLabels)
+	defer func() {
+		_ = testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+	}()
+
+	cleanupNodeAnnotations(ctx, t, nodeName)
+
+	gvr := schema.GroupVersionResource{
+		Group:    "janitor.dgxc.nvidia.com",
+		Version:  "v1alpha1",
+		Resource: "rebootnodes",
+	}
+
+	beforeDuration := getHistogramCount(t, metrics.CRGenerationDuration)
+
+	t.Log("Sending quarantine event with DrainFinishTimestamp set to 5 seconds ago")
+	eventID1 := "test-event-id-1"
+	event1 := createQuarantineEvent(eventID1, nodeName, protos.RecommendedAction_RESTART_BM)
+
+	drainFinishTime := time.Now().Add(-5 * time.Second)
+	if fullDoc, ok := event1["fullDocument"].(map[string]interface{}); ok {
+		if status, ok := fullDoc["healtheventstatus"].(map[string]interface{}); ok {
+			status["drainfinishtimestamp"] = timestamppb.New(drainFinishTime)
+		}
+	}
+
+	eventToken1 := datastore.EventWithToken{
+		Event:       map[string]interface{}(event1),
+		ResumeToken: []byte("test-token-1"),
+	}
+	mockWatcher.EventsChan <- eventToken1
+
+	var crName string
+	require.Eventually(t, func() bool {
+		state, _, err := reconciler.annotationManager.GetRemediationState(ctx, nodeName)
+		if err != nil {
+			return false
+		}
+		if grp, ok := state.EquivalenceGroups["restart"]; ok {
+			crName = grp.MaintenanceCR
+			return crName != ""
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "CR should be created")
+
+	t.Log("Verifying CRGenerationDuration metric was recorded")
+	require.Eventually(t, func() bool {
+		afterDuration := getHistogramCount(t, metrics.CRGenerationDuration)
+		return afterDuration > beforeDuration
+	}, 10*time.Second, 500*time.Millisecond, "CRGenerationDuration metric should be recorded")
+
+	afterDuration := getHistogramCount(t, metrics.CRGenerationDuration)
+	assert.GreaterOrEqual(t, afterDuration, beforeDuration+1,
+		"CRGenerationDuration histogram should record at least one observation")
+	t.Log("CRGenerationDuration metric recorded successfully")
+
+	_ = testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
+}
 
 // TestMetrics_ProcessingErrors tests error tracking
 func TestMetrics_ProcessingErrors(t *testing.T) {

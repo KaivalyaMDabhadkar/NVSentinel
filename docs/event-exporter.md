@@ -29,7 +29,7 @@ The Event Exporter runs as a deployment in the cluster:
 5. Tracks progress using resume tokens for reliable delivery
 6. Retries failed publishes with exponential backoff
 
-The exporter maintains exactly-once delivery semantics by persisting resume tokens, ensuring no events are lost even if the exporter restarts.
+The exporter maintains at-least-once delivery semantics by persisting resume tokens, ensuring no events are lost even if the exporter restarts.
 
 ## Configuration
 
@@ -70,6 +70,9 @@ event-exporter:
       batchSize: 500
       rateLimit: 1000     # events/second
     
+    # Concurrent publish workers
+    workers: 10           # See scale-up guide below
+    
     # Failure handling
     failureHandling:
       maxRetries: 17      # ~30 minutes
@@ -84,6 +87,7 @@ event-exporter:
 - **Sink Endpoint**: HTTP/HTTPS URL where CloudEvents are posted
 - **OIDC Authentication**: OAuth2 client credentials for endpoint authentication
 - **Backfill**: On first startup, optionally export historical events (disabled after initial run)
+- **Workers**: Number of concurrent goroutines that publish events to the sink in parallel. Resume tokens are advanced in strict order regardless of which worker finishes first, preserving at-least-once delivery guarantees. Note that concurrent publishing means events may arrive at the sink out of order. Default is `10`.
 - **Retry Policy**: Exponential backoff configuration for failed publishes
 
 ## CloudEvents Format
@@ -135,7 +139,7 @@ Uses industry-standard CloudEvents v1.0 format for broad compatibility with even
 On first deployment, optionally exports up to N days of historical events for complete visibility.
 
 ### Resume Token Tracking
-Persists progress in the datastore to ensure exactly-once delivery - no events lost on restart.
+Persists progress in the datastore to ensure at-least-once delivery - no events lost on restart.
 
 ### OIDC Authentication
 Supports OAuth2 client credentials flow with automatic token refresh for secure authentication.
@@ -148,6 +152,9 @@ Enriches every event with custom metadata (cluster, environment, region, etc.) f
 
 ### Rate Limiting
 Configurable rate limiting for backfill to avoid overwhelming destination systems.
+
+### Concurrent Workers
+Publishes events in parallel using a configurable worker pool. A sequence tracker ensures resume tokens advance in strict order regardless of which worker finishes first, preserving at-least-once delivery guarantees. Note that concurrent publishing means events may arrive at the sink out of order. See the [configuration reference](configuration/event-exporter.md#scale-up-guide) for sizing guidance.
 
 ### Change Stream Based
 Uses datastore change streams for real-time event delivery with minimal latency.

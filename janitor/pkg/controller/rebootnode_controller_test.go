@@ -16,16 +16,20 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	janitordgxcnvidiacomv1alpha1 "github.com/nvidia/nvsentinel/janitor/api/v1alpha1"
@@ -69,6 +73,32 @@ func TestRebootNodeReconciler_getRebootTimeout(t *testing.T) {
 			timeout := r.getRebootTimeout()
 			if timeout != tt.expectedTimeout {
 				t.Errorf("getRebootTimeout() = %v, want %v", timeout, tt.expectedTimeout)
+			}
+		})
+	}
+}
+
+// Test_isTransientGRPCError cases follow the order of checks in isTransientGRPCError:
+// nil → context.DeadlineExceeded (and wrapped) → gRPC Unavailable/DeadlineExceeded → other (non-transient).
+func Test_isTransientGRPCError(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		transient bool
+	}{
+		{"nil", nil, false},
+		{"context.DeadlineExceeded", context.DeadlineExceeded, true},
+		{"wrapped context.DeadlineExceeded", fmt.Errorf("wrap: %w", context.DeadlineExceeded), true},
+		{"gRPC Unavailable", status.Errorf(codes.Unavailable, "unavailable"), true},
+		{"gRPC DeadlineExceeded", status.Errorf(codes.DeadlineExceeded, "deadline"), true},
+		{"gRPC Internal (non-transient)", status.Errorf(codes.Internal, "internal"), false},
+		{"plain error (non-gRPC)", errors.New("other"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isTransientGRPCError(tt.err)
+			if got != tt.transient {
+				t.Errorf("isTransientGRPCError() = %v, want %v", got, tt.transient)
 			}
 		})
 	}
@@ -126,7 +156,8 @@ var _ = Describe("RebootNode Controller", func() {
 			Client: k8sClient,
 			Scheme: scheme.Scheme,
 			Config: &config.RebootNodeControllerConfig{
-				Timeout: 30 * time.Minute,
+				Timeout:    30 * time.Minute,
+				ManualMode: ptr.To(false),
 			},
 			CSPClient: mockCSP.Client,
 			NodeLock:  distributedlock.NewNodeLock(k8sClient, "default"),
@@ -231,7 +262,7 @@ var _ = Describe("RebootNode Controller", func() {
 
 			result, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(time.Duration(0))) // Should not requeue on completion
+			Expect(result.RequeueAfter).To(Equal(2 * time.Second))
 
 			// Get updated RebootNode
 			var updatedRebootNode janitordgxcnvidiacomv1alpha1.RebootNode
@@ -270,6 +301,28 @@ var _ = Describe("RebootNode Controller", func() {
 			Expect(updatedRebootNode.Status.CompletionTime).To(BeNil())
 			Expect(updatedRebootNode.IsRebootInProgress()).To(BeTrue())
 		})
+
+		It("should requeue on transient CSP error during node ready check instead of failing", func() {
+			// Configure mock to return transient gRPC error so controller requeues instead of failing
+			mockCSP.Server.SetNodeReadyError(status.Errorf(codes.Unavailable, "transient"))
+
+			req := reconcile.Request{
+				NamespacedName: types.NamespacedName{
+					Name: testRebootNode.Name,
+				},
+			}
+
+			result, err := reconciler.Reconcile(ctx, req)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(requeueBackoffForTransientCSPError))
+
+			// Verify still in progress (no completion, will retry)
+			var updatedRebootNode janitordgxcnvidiacomv1alpha1.RebootNode
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: testRebootNode.Name}, &updatedRebootNode)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(updatedRebootNode.Status.CompletionTime).To(BeNil())
+			Expect(updatedRebootNode.IsRebootInProgress()).To(BeTrue())
+		})
 	})
 
 	Context("when reboot signal fails", func() {
@@ -285,7 +338,7 @@ var _ = Describe("RebootNode Controller", func() {
 
 			result, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
-			Expect(result.RequeueAfter).To(Equal(time.Duration(0))) // Should not requeue on failure
+			Expect(result.RequeueAfter).To(Equal(2 * time.Second))
 
 			// Get updated RebootNode
 			var updatedRebootNode janitordgxcnvidiacomv1alpha1.RebootNode
@@ -482,7 +535,7 @@ var _ = Describe("RebootNode Controller", func() {
 	Context("when manual mode is enabled", func() {
 		BeforeEach(func() {
 			// Enable manual mode in the reconciler config
-			reconciler.Config.ManualMode = true
+			reconciler.Config.ManualMode = ptr.To(true)
 		})
 
 		It("should set ManualMode condition on the first reconciliation", func() {
@@ -495,8 +548,7 @@ var _ = Describe("RebootNode Controller", func() {
 
 			result, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
-			// In manual mode, controller doesn't requeue after setting ManualMode condition
-			Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+			Expect(result.RequeueAfter).To(Equal(2 * time.Second))
 
 			// Get updated RebootNode
 			var updatedRebootNode janitordgxcnvidiacomv1alpha1.RebootNode
@@ -584,8 +636,7 @@ var _ = Describe("RebootNode Controller", func() {
 			// Next reconciliation should complete the reboot since node is ready
 			result, err := reconciler.Reconcile(ctx, req)
 			Expect(err).NotTo(HaveOccurred())
-			// In manual mode, when both CSP (always true) and Kubernetes report ready, reboot completes
-			Expect(result.RequeueAfter).To(Equal(time.Duration(0)))
+			Expect(result.RequeueAfter).To(Equal(2 * time.Second))
 
 			// Get final state
 			var finalRebootNode janitordgxcnvidiacomv1alpha1.RebootNode

@@ -101,7 +101,7 @@ func TestPublish(t *testing.T) {
 			defer tokenServer.Close()
 
 			tokenProvider := auth.NewTokenProvider(tokenServer.URL, "client-id", "client-secret", "scope", false)
-			sink := NewHTTPSink(server.URL, 10*time.Second, tokenProvider, false)
+			sink := NewHTTPSink(server.URL, 10*time.Second, tokenProvider, false, 1)
 
 			event := &transformer.CloudEvent{
 				SpecVersion: "1.0",

@@ -40,7 +40,12 @@ func NewHTTPSink(
 	timeout time.Duration,
 	tokenProvider *auth.TokenProvider,
 	insecureSkipVerify bool,
+	maxConcurrency int,
 ) *HTTPSink {
+	if maxConcurrency <= 0 {
+		maxConcurrency = 1
+	}
+
 	return &HTTPSink{
 		endpoint:      endpoint,
 		timeout:       timeout,
@@ -48,6 +53,10 @@ func NewHTTPSink(
 		client: &http.Client{
 			Timeout: timeout,
 			Transport: &http.Transport{
+				MaxIdleConns:        maxConcurrency * 2,
+				MaxIdleConnsPerHost: maxConcurrency,
+				MaxConnsPerHost:     maxConcurrency,
+				IdleConnTimeout:     90 * time.Second,
 				TLSClientConfig: &tls.Config{
 					MinVersion:         tls.VersionTLS12,
 					InsecureSkipVerify: insecureSkipVerify, //nolint:gosec // This is only used for testing

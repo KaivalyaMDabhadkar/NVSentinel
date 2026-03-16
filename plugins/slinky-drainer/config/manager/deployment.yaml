@@ -33,9 +33,9 @@ spec:
         args:
         - --pod-check-interval=5s
         - --drain-timeout=30m
+        - --slinky-namespace=slinky
         - --metrics-bind-address=:8080
         - --health-probe-bind-address=:8081
-        - --zap-encoder=json
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
