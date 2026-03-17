@@ -541,10 +541,17 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 		assert.NoError(t, err)
 		assert.True(t, shouldCreateCR, "Should allow retry after CR failed")
 
-		// Verify annotation was cleaned up
-		state, _, err := r.annotationManager.GetRemediationState(ctx, nodeName)
-		require.NoError(t, err)
-		assert.NotContains(t, state.EquivalenceGroups, "restart", "Failed CR should be removed from annotation")
+		// Verify annotation was cleaned up.
+		// Use Eventually because RemoveGroupsFromState writes to the API server but
+		// GetRemediationState reads from the informer cache, which syncs asynchronously.
+		assert.Eventually(t, func() bool {
+			state, _, err := r.annotationManager.GetRemediationState(ctx, nodeName)
+			if err != nil {
+				return false
+			}
+			_, exists := state.EquivalenceGroups["restart"]
+			return !exists
+		}, 5*time.Second, 100*time.Millisecond, "Failed CR should be removed from annotation")
 
 		// Event 2: Create retry CR
 		event2 := &events.HealthEventDoc{
@@ -566,7 +573,7 @@ func TestCRBasedDeduplication_Integration(t *testing.T) {
 		assert.NoError(t, err)
 
 		// Verify new annotation
-		state, _, err = r.annotationManager.GetRemediationState(ctx, nodeName)
+		state, _, err := r.annotationManager.GetRemediationState(ctx, nodeName)
 		require.NoError(t, err)
 		assert.Contains(t, state.EquivalenceGroups, "restart")
 		assert.Equal(t, secondCRName, state.EquivalenceGroups["restart"].MaintenanceCR)
