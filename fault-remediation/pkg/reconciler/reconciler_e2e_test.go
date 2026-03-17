@@ -1046,11 +1046,17 @@ func TestEventSequenceWithSupersedingGroup(t *testing.T) {
 	assert.True(t, shouldCreate, "COMPONENT_RESET should be allowed (same group as previous "+
 		"COMPONENT_RESET that completed)")
 
-	// Verify annotation removed for CR-2 but not CR-3
-	state, _, err = r.annotationManager.GetRemediationState(ctx, nodeName)
-	require.NoError(t, err)
-	assert.Equal(t, "", state.EquivalenceGroups["reset-GPU-455d8f70-2051-db6c-0430-ffc457bff834"].MaintenanceCR)
-	assert.Equal(t, crName3, state.EquivalenceGroups["reset-GPU-927d8f70-2051-db6c-0430-ffc457bff834"].MaintenanceCR)
+	// Verify annotation removed for CR-2 but not CR-3.
+	// Use Eventually because RemoveGroupsFromState writes to the API server but
+	// GetRemediationState reads from the informer cache, which syncs asynchronously.
+	assert.Eventually(t, func() bool {
+		state, _, err = r.annotationManager.GetRemediationState(ctx, nodeName)
+		if err != nil {
+			return false
+		}
+		return state.EquivalenceGroups["reset-GPU-455d8f70-2051-db6c-0430-ffc457bff834"].MaintenanceCR == "" &&
+			state.EquivalenceGroups["reset-GPU-927d8f70-2051-db6c-0430-ffc457bff834"].MaintenanceCR == crName3
+	}, 5*time.Second, 100*time.Millisecond, "Expected CR-2 group to be removed and CR-3 group to remain")
 
 	// Event 9: COMPONENT_RESET missing GPU_UUID should result in a nvsentinel-state label having value remediation-failed.
 	_, _ = stateManager.UpdateNVSentinelStateNodeLabel(ctx, nodeName, statemanager.DrainSucceededLabelValue, false)
