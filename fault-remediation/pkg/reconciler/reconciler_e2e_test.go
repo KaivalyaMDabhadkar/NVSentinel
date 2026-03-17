@@ -1054,8 +1054,9 @@ func TestEventSequenceWithSupersedingGroup(t *testing.T) {
 		if err != nil {
 			return false
 		}
-		return state.EquivalenceGroups["reset-GPU-455d8f70-2051-db6c-0430-ffc457bff834"].MaintenanceCR == "" &&
-			state.EquivalenceGroups["reset-GPU-927d8f70-2051-db6c-0430-ffc457bff834"].MaintenanceCR == crName3
+		_, cr2GroupExists := state.EquivalenceGroups["reset-GPU-455d8f70-2051-db6c-0430-ffc457bff834"]
+		cr3Group, cr3GroupExists := state.EquivalenceGroups["reset-GPU-927d8f70-2051-db6c-0430-ffc457bff834"]
+		return !cr2GroupExists && cr3GroupExists && cr3Group.MaintenanceCR == crName3
 	}, 5*time.Second, 100*time.Millisecond, "Expected CR-2 group to be removed and CR-3 group to remain")
 
 	// Event 9: COMPONENT_RESET missing GPU_UUID should result in a nvsentinel-state label having value remediation-failed.
