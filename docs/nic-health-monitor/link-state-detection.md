@@ -7,7 +7,7 @@
 1. [Overview](#1-overview)
 2. [Architecture](#2-architecture)
 3. [State Monitoring Specification](#3-state-monitoring-specification)
-4. [Management NIC Exclusion and Uncabled Port Detection](#4-management-nic-exclusion-and-uncabled-port-detection)
+4. [Management NIC Exclusion, NIC Role Classification, and Uncabled Port Detection](#4-management-nic-exclusion-and-uncabled-port-detection)
 5. [Device Discovery and Parsing](#5-device-discovery-and-parsing)
 6. [State Change and Flap Detection](#6-state-change-and-flap-detection)
 7. [PCI Configuration Space Health Check](#7-pci-configuration-space-health-check)
@@ -117,7 +117,7 @@ The State Monitor follows NVSentinel's established architectural pattern where:
 
 | Architectural Principle     | Implementation                             | Purpose                                                                   |
 |-----------------------------|--------------------------------------------|---------------------------------------------------------------------------|
-| **Raw Event Reporting**     | Each state change → immediate event        | Enables centralized correlation with full historical context              |
+| **Raw Event Reporting**     | Health boundary crossing → immediate event | One event per port per healthy↔fatal transition                           |
 | **Centralized Correlation** | Health Events Analyzer MongoDB pipelines   | Flexible, configurable rules without monitor code changes                 |
 | **Temporal Correlation**    | Analyzer rules with time windows           | Detects patterns like "3 link flaps in 10 minutes"                        |
 | **Stabilization Windows**   | Analyzer rules with sticky XID-style logic | Prevents "Alert Blinking" where transient recoveries hide critical issues |
@@ -272,32 +272,39 @@ cat /sys/class/infiniband/mlx5_0/ports/1/rate
 
 ### 3.4 State-Based Event Generation Algorithm
 
-**Port State Evaluation Steps:**
+**Port Health Evaluation Steps:**
 
-1. **Read port state** from `/sys/class/infiniband/<dev>/ports/<port>/state`
-2. **Evaluate logical state:**
-   - If `state = DOWN` → Mark as **FATAL**, message: "Port DOWN - no connectivity"
-   - If `state = INIT` → Non-Fatal, message: "Port stuck in INIT - check Subnet Manager"
-   - If `state = ARMED` → Non-Fatal, message: "Port ARMED but not ACTIVE - check fabric manager"
-   - If `state = ACTIVE` → Healthy
+1. **Read port state** from `/sys/class/infiniband/<dev>/ports/<port>/state` and `phys_state`
+2. **Determine health status:**
+   - If `state = ACTIVE` AND `phys_state = LinkUp` → **Healthy**
+   - Otherwise → **Unhealthy** (the specific state/phys_state combination determines the message)
 
-3. **Read physical state** from `/sys/class/infiniband/<dev>/ports/<port>/phys_state`
-4. **Evaluate physical state:**
-   - If `phys_state = Disabled` → Mark as **FATAL**, message: "Physical state DISABLED"
-   - If `phys_state = Polling` → Non-Fatal, message: "Link training in progress"
-   - If `phys_state = LinkErrorRecovery` → Mark as **FATAL**, message: "Active link problems"
-   - If `phys_state = LinkUp` → Healthy
+3. **Emit event only on health boundary crossing:**
+   - **First poll (discovery)**:
+     - Healthy ports: Emit healthy event (baseline)
+     - Unhealthy ports on **anomalous cards** (card active count below peer mode): Emit fatal event (genuine failure detected at startup)
+     - Unhealthy ports on **expected cards** (card matches peer mode): **Suppressed** — this is an uncabled second port, not a failure (see Section 4.3 for the homogeneity check)
+   - **Subsequent polls**: Only emit when `wasHealthy ≠ isHealthy`
+     - Healthy → Unhealthy: **FATAL event** with consolidated message (e.g., "state DOWN, phys_state Disabled - no connectivity")
+     - Unhealthy → Healthy: **HEALTHY event** (e.g., "healthy (ACTIVE, LinkUp)")
+     - Unhealthy → Unhealthy (e.g., DOWN/Disabled → DOWN/Polling): **No event** — still unhealthy, intermediate transition suppressed
+     - Healthy → Healthy: **No event** — still healthy
 
-5. **Generate event** if any issues detected:
-   - Set `IsFatal = true` for fatal conditions
-   - Set `EntityType = "NICPort"`, `EntityValue = "<device>_port<n>"`
-   - Set `RecommendedAction = REPLACE_VM` for fatal conditions
+4. **One consolidated event per port per transition:**
+   - Logical state and physical state are combined into a single message
+   - For Ethernet/RoCE, the operstate is also included in the same event
+   - `EntitiesImpacted` includes both NIC and Port entities
+   - `RecommendedAction = REPLACE_VM` for fatal events
 
 ---
 
 ## 4. Management NIC Exclusion and Uncabled Port Detection
 
-This section describes two zero-configuration mechanisms that replace the previous `gpu_port_config` / `AtLeastPorts` / `AtLeastRate` approach. These mechanisms require no per-GPU-type configuration and work automatically across DGX, HGX, OEM servers, and cloud VMs.
+This section describes three zero-configuration mechanisms that replace the previous `gpu_port_config` / `AtLeastPorts` / `AtLeastRate` approach. These mechanisms require no per-GPU-type configuration and work automatically across DGX, HGX, OEM servers, and cloud VMs.
+
+- **Section 4.1**: NUMA-based management NIC exclusion (exclude NICs on non-GPU NUMA nodes)
+- **Section 4.2**: PCIe tree walk classification (distinguish compute NICs from storage NICs)
+- **Section 4.3**: Role-based card homogeneity (detect uncabled ports and failures within each role group)
 
 ### 4.1 Management NIC Exclusion (NUMA-Based)
 
@@ -328,69 +335,108 @@ Management NICs on DGX systems are placed on CPU sockets that have **no compute 
 
 > **Design Note**: Storage NICs (e.g., H100 Slot1/Slot2 ConnectX-7 cards) share a NUMA node with compute GPUs. They are intentionally **not excluded** because storage NIC failures also impact workloads (I/O hangs, checkpoint failures). The NUMA check only excludes NICs on NUMA nodes with **zero** compute GPUs.
 
-#### 4.1.4 Why Not Other Approaches?
-
-| Approach | Why Not General Enough |
-|----------|----------------------|
-| PCI domain root comparison | Fails on single-socket servers (all devices share one root) and for NODE connections (L40 `mlx5_2`) |
-| Full PCIe tree walk | Fails on single-socket servers where all devices connect to the CPU root |
-| NVML `nvidia-smi topo` | NVML cannot query non-GPU PCI devices; `nvidia-smi topo` internally reads sysfs |
-| `monitorNetworkType` config | Requires operator to know IB vs RoCE per cluster; doesn't address management NICs specifically |
-
-### 4.2 Uncabled Port Detection (Card Homogeneity)
+### 4.2 NIC Role Classification (PCIe Tree Walk)
 
 #### 4.2.1 The Problem
 
+DGX/HGX systems have both **compute fabric NICs** (OSFP ports on the GPU tray) and **storage NICs** (Slot1/Slot2 on the CPU motherboard). These are the same hardware (ConnectX-7) but serve different roles, may have different port counts, and run at different speeds. The card homogeneity check (Section 4.3) must compare NICs of the same role — compute against compute, storage against storage — to avoid false positives.
+
+#### 4.2.2 Detection Mechanism: Shared PCIe Switch Ancestor
+
+Compute NICs share a **PCIe switch** with their paired GPU (PXB/PIX in `nvidia-smi topo`). Storage NICs do not — they connect through the CPU root port only (NODE in `nvidia-smi topo`). This topological difference is detectable from sysfs by comparing the real device paths:
+
+1. Resolve GPU real path: `/sys/bus/pci/devices/<gpu_pci>` → e.g., `/sys/devices/pci0000:07/.../0000:0f:00.0`
+2. Resolve NIC real path: `/sys/class/infiniband/<dev>/device` → e.g., `/sys/devices/pci0000:07/.../0000:0c:00.0`
+3. Find the **longest common path prefix** (number of matching `/`-delimited components)
+4. If common depth > 4 → NIC shares a PCIe switch with a GPU → **Compute**
+5. If common depth ≤ 4 → NIC only shares the PCI domain root → **Storage**
+
+The threshold of 4 corresponds to the PCI host bridge level: `["", "sys", "devices", "pciXXXX:XX"]`. Anything deeper means the NIC and GPU share at least one PCIe switch or root port.
+
+#### 4.2.3 Three-Tier Classification
+
+Combined with the NUMA check (Section 4.1), the monitor classifies each NIC into one of three roles:
+
+| Role | Detection | Monitoring Behavior |
+|------|-----------|-------------------|
+| **Management** | NIC NUMA has no compute GPU | Excluded from monitoring entirely |
+| **Compute** | NIC shares PCIe switch ancestor with a GPU (common path depth > 4) | Monitored; compared against other compute NICs for homogeneity |
+| **Storage** | NIC on GPU NUMA but no shared PCIe switch (common path depth ≤ 4) | Monitored; compared against other storage NICs for homogeneity |
+
+#### 4.2.4 Field Validation (H100 OCI Node)
+
+Verified against `nvidia-smi topo -m` output on an H100 OCI node with 8 GPUs, 18 PF NICs:
+
+| NIC | PCI Domain | GPU in Same Domain? | Common Depth | Classification | nvidia-smi topo |
+|-----|-----------|-------------------|--------------|----------------|-----------------|
+| mlx5_0, mlx5_1 | `pci0000:07` | GPU0 (0000:0f:00.0) | 6 | **Compute** | PXB to GPU0 |
+| **mlx5_2** | **`pci0000:1e`** | **None** | **3** | **Storage** | NODE to GPUs |
+| mlx5_3, mlx5_4 | `pci0000:25` | GPU1 | 6 | **Compute** | PXB to GPU1 |
+| mlx5_5, mlx5_6 | `pci0000:3c` | GPU2 | 6 | **Compute** | PXB to GPU2 |
+| mlx5_7, mlx5_8 | `pci0000:53` | GPU3 | 6 | **Compute** | PXB to GPU3 |
+| mlx5_9, mlx5_10 | `pci0000:81` | GPU4 | 6 | **Compute** | PXB to GPU4 |
+| **mlx5_11** | **`pci0000:99`** | **None** | **3** | **Storage** | NODE to GPUs |
+| mlx5_12, mlx5_13 | `pci0000:a0` | GPU5 | 6 | **Compute** | PXB to GPU5 |
+| mlx5_14, mlx5_15 | `pci0000:b8` | GPU6 | 6 | **Compute** | PXB to GPU6 |
+| mlx5_16, mlx5_17 | `pci0000:d0` | GPU7 | 6 | **Compute** | PXB to GPU7 |
+
+**18/18 PF NICs correctly classified. Perfect match with `nvidia-smi topo -m`.**
+
+### 4.3 Uncabled Port Detection (Role-Based Card Homogeneity)
+
+#### 4.3.1 The Problem
+
 Some NIC cards have multiple ports, but not all ports are cabled. For example, dual-port ConnectX cards may have only port 1 cabled and port 2 unused. The monitor must distinguish between a genuinely failed port and an intentionally uncabled one — without requiring static configuration like `gpu_port_config`.
 
-#### 4.2.2 Detection Mechanism
+Additionally, compute and storage NICs may have different port counts (e.g., dual-port compute cards vs single-port storage cards). The homogeneity check must compare NICs within the same role group to avoid false positives.
 
-Compute fabric NICs on a given node are **homogeneous** — all the same model with the same port configuration. The monitor uses this property to detect anomalies:
+#### 4.3.2 Detection Mechanism
 
-1. Group remaining NICs (after NUMA + VF + exclusion filters) by **physical card** (PCI `bus:device` address — e.g., `0000:47:00` groups `0000:47:00.0` and `0000:47:00.1`)
+NICs are grouped by **role** (Compute or Storage, from Section 4.2), then within each role group:
+
+1. Group NICs by **physical card** (PCI `bus:device` address — e.g., `0000:47:00` groups `0000:47:00.0` and `0000:47:00.1`)
 2. Count active (`ACTIVE` + `LinkUp`) ports per card
-3. Calculate the **mode** (most common active-port-count) across all cards
-4. Any card with fewer active ports than the mode → **FATAL event**
+3. Calculate the **mode** (most common active-port-count) within the role group
+4. Any card with fewer active ports than its role's mode → **FATAL event**
 
-#### 4.2.3 Algorithm
+#### 4.3.3 Algorithm
 
 ```
 For all monitored PF NICs:
-  Group by PCI bus:device (same physical card)
-  For each card, count ports with state=ACTIVE AND phys_state=LinkUp
-  mode_active = most common active-port-count across all cards
+  Classify each NIC as Compute or Storage (Section 4.2)
+  Group by physical card (PCI bus:device)
+  Assign each card's role from its NICs
 
-  For each card:
-    If card_active_count < mode_active:
-      FATAL event: "Card <pci> has <n> active ports, expected <mode>"
+  For each role group (Compute, Storage):
+    Calculate mode_active = most common active-port-count in this group
+    For each card in this group:
+      If card_active_count < mode_active:
+        FATAL event: "Card <pci> (<role>) has <n> active ports, expected <mode>"
 ```
 
-#### 4.2.4 Field Validation
+#### 4.3.4 Field Validation
 
-**L40 (dual-port NICs, 1 port cabled per card):**
+**H100 OCI (compute dual-port + storage single-port):**
 ```
-Card 0000:XX:00 → mlx5_0 (ACTIVE), mlx5_1 (DOWN) → 1 active
-Card 0000:YY:00 → mlx5_3 (ACTIVE), mlx5_4 (DOWN) → 1 active
-Mode = 1 active per card → consistent (uncabled ports NOT flagged)
+Compute group (8 cards): all dual-port, 2 active each → mode = 2
+Storage group (2 cards): all single-port, 1 active each → mode = 1
+→ No false positives (storage NICs NOT compared against compute mode)
 
-If mlx5_0 goes DOWN → Card 0000:XX:00 has 0 active < mode 1 → FATAL
-```
-
-**H100 DGX (single-port NICs, all cabled):**
-```
-8 compute NICs, each single-port, all ACTIVE → mode = 1
-If mlx5_5 goes DOWN → 0 active < mode 1 → FATAL
+If compute card drops to 1 active → 1 < mode 2 → FATAL
+If storage card drops to 0 active → 0 < mode 1 → FATAL
 ```
 
-**A100 RoCE (single-port NICs, all cabled):**
+**L40 (dual-port compute NICs, 1 port cabled per card):**
 ```
-16 compute NICs (after NUMA exclusion), all ACTIVE → mode = 1
-If mlx5_7 goes DOWN → 0 active < mode 1 → FATAL
+Compute group (2 cards): Card A (1 active, 1 down), Card B (1 active, 1 down) → mode = 1
+→ Uncabled ports NOT flagged (consistent pattern)
+
+If Card A drops to 0 active → 0 < mode 1 → FATAL
 ```
 
-> **Probability analysis**: For the mode to be incorrect (masking real failures), more than half of the cards would need to be independently failed at startup. With a ~1% per-NIC failure rate, the probability of 4+ out of 8 NICs failing simultaneously is ~0.00003% — effectively impossible. Such a catastrophic scenario would be caught by other monitoring (K8s node health, GPU health monitor).
+> **Probability analysis**: For the mode to be incorrect (masking real failures), more than half of the cards in a role group would need to be independently failed at startup. With a ~1% per-NIC failure rate, the probability of 4+ out of 8 NICs failing simultaneously is ~0.00003% — effectively impossible.
 
-### 4.3 Design Decision: Why Speed Degradation Detection Was Removed
+### 4.4 Design Decision: Why Speed Degradation Detection Was Removed
 
 The previous design included a speed degradation check that compared the sysfs `rate` against an expected rate from `gpu_port_config`. This was removed for the following reasons:
 
@@ -461,12 +507,12 @@ The monitor detects Mellanox devices using the following logic:
 
 ## 6. State Change and Flap Detection
 
-The NIC Health Monitor reports **raw state events** (each `link_downed` increment, each state change). The **Health Events Analyzer** performs pattern detection to distinguish between persistent drops and transient flapping.
+The NIC Health Monitor reports **health boundary events** — one event per port when the port transitions between healthy and unhealthy states. Intermediate transitions (e.g., DOWN/Disabled → DOWN/Polling) are suppressed. The **Health Events Analyzer** performs pattern detection to distinguish between persistent drops and transient flapping.
 
 ### 6.1 Architecture
 
-1. NIC Health Monitor reports each state change as a raw event
-2. Raw events flow to MongoDB via Platform Connector
+1. NIC Health Monitor reports health boundary crossings (healthy→fatal, fatal→healthy)
+2. Events flow to MongoDB via Platform Connector
 3. Health Events Analyzer applies correlation rules to detect patterns
 
 ### 6.2 Port Drop Detection (Analyzer Rule: `NICPortDrop`)
@@ -834,27 +880,53 @@ AutoDetectSRIOVVFs = true
 
 ### 13.1 State Event Construction
 
-Port state issues emit **Fatal** events with `RecommendedAction = REPLACE_VM`.
+Events are emitted only on **health boundary crossings** — one consolidated event per port per transition. Logical state and physical state are combined into a single message.
 
-**Example Event Fields (Fatal - Port DOWN):**
+**Example Event Fields (Fatal - IB Port DOWN):**
 
 | Field             | Value                                                    |
 |-------------------|----------------------------------------------------------|
 | Agent             | `nic-health-monitor`                                     |
-| CheckName         | `InfiniBandErrorCheck`                                   |
+| CheckName         | `InfiniBandStateCheck`                                   |
 | ComponentClass    | `NIC`                                                    |
-| Message           | "Port mlx5_0 port 1: state DOWN - no connectivity"       |
+| Message           | "Port mlx5_0 port 1: state DOWN, phys_state Disabled - no connectivity" |
 | IsFatal           | `true`                                                   |
 | IsHealthy         | `false`                                                  |
 | RecommendedAction | `REPLACE_VM`                                             |
-| EntitiesImpacted  | `[{EntityType: "Port", EntityValue: "1"}, {EntityType: "NIC", EntityValue: "mlx5_0"}]` |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
+
+**Example Event Fields (Fatal - RoCE Port DOWN):**
+
+| Field             | Value                                                    |
+|-------------------|----------------------------------------------------------|
+| Agent             | `nic-health-monitor`                                     |
+| CheckName         | `EthernetStateCheck`                                     |
+| ComponentClass    | `NIC`                                                    |
+| Message           | "RoCE port mlx5_0 port 1: state DOWN, operstate down - no connectivity" |
+| IsFatal           | `true`                                                   |
+| IsHealthy         | `false`                                                  |
+| RecommendedAction | `REPLACE_VM`                                             |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
+
+**Example Event Fields (Healthy - Recovery):**
+
+| Field             | Value                                                    |
+|-------------------|----------------------------------------------------------|
+| Agent             | `nic-health-monitor`                                     |
+| CheckName         | `InfiniBandStateCheck`                                   |
+| ComponentClass    | `NIC`                                                    |
+| Message           | "Port mlx5_0 port 1: healthy (ACTIVE, LinkUp)"          |
+| IsFatal           | `false`                                                  |
+| IsHealthy         | `true`                                                   |
+| RecommendedAction | `NONE`                                                   |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
 
 **Example Event Fields (Fatal - Device Disappeared):**
 
 | Field             | Value                                                                   |
 |-------------------|-------------------------------------------------------------------------|
 | Agent             | `nic-health-monitor`                                                    |
-| CheckName         | `InfiniBandErrorCheck`                                                  |
+| CheckName         | `InfiniBandStateCheck`                                                  |
 | ComponentClass    | `NIC`                                                                   |
 | Message           | "NIC mlx5_0 disappeared from /sys/class/infiniband/ - hardware failure" |
 | IsFatal           | `true`                                                                  |

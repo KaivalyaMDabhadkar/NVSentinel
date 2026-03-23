@@ -903,7 +903,9 @@ For each configured counter:
        - IsFatal = counter.isFatal
        - RecommendedAction = counter.recommendedAction
        - Message = counter.description + " (value={value}, delta={delta}, rate={rate})"
-       - CheckName = "CounterThresholdCheck"
+       - CheckName:
+           If isFatal: use state check name (InfiniBandStateCheck / EthernetStateCheck)
+           If non-fatal: use degradation check name (InfiniBandDegradationCheck / EthernetDegradationCheck)
        - ComponentClass = "NIC"
 ```
 
@@ -927,29 +929,33 @@ The monitor validates configuration at startup:
 
 **Example Event Fields (Fatal - link_downed):**
 
+> **Note**: Fatal counter events use the **state check name** (`InfiniBandStateCheck` / `EthernetStateCheck`) so that all fatal signals for a given NIC type consolidate under a single node condition.
+
 | Field             | Value                                                                           |
 |-------------------|---------------------------------------------------------------------------------|
 | Agent             | `nic-health-monitor`                                                            |
-| CheckName         | `InfiniBandErrorCheck`                                                          |
+| CheckName         | `InfiniBandStateCheck`                                                          |
 | ComponentClass    | `NIC`                                                                           |
-| Message           | "Port mlx5_0 port 1: link_downed counter incremented (Delta=1) - QP disconnect" |
+| Message           | "Port mlx5_0 port 1: link_downed - Port Training State Machine failed - QP disconnect (value=1, delta=1, rate=0.20/sec)" |
 | IsFatal           | `true`                                                                          |
 | IsHealthy         | `false`                                                                         |
 | RecommendedAction | `REPLACE_VM`                                                                    |
-| EntitiesImpacted  | `[{EntityType: "Port", EntityValue: "1"}, {EntityType: "NIC", EntityValue: "mlx5_0"}]` |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
 
 **Example Event Fields (Non-Fatal - Degradation):**
+
+> **Note**: Non-fatal counter events use the **degradation check name** (`InfiniBandDegradationCheck` / `EthernetDegradationCheck`) to keep degradation signals separate from fatal conditions on the node.
 
 | Field             | Value                                                       |
 |-------------------|-------------------------------------------------------------|
 | Agent             | `nic-health-monitor`                                        |
-| CheckName         | `InfiniBandErrorCheck`                                      |
+| CheckName         | `InfiniBandDegradationCheck`                                |
 | ComponentClass    | `NIC`                                                       |
-| Message           | "Port mlx5_0 port 1: symbol_error rate elevated (15.2/sec)" |
+| Message           | "Port mlx5_0 port 1: symbol_error - PHY bit errors before FEC - physical layer degradation (value=100, delta=100, rate=20.00/sec)" |
 | IsFatal           | `false`                                                     |
 | IsHealthy         | `false`                                                     |
-| RecommendedAction | `NONE` (monitor for escalation)                             |
-| EntitiesImpacted  | `[{EntityType: "Port", EntityValue: "1"}, {EntityType: "NIC", EntityValue: "mlx5_0"}]` |
+| RecommendedAction | `NONE`                                                      |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
 
 ### 11.2 Event Routing
 

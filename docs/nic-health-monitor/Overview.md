@@ -10,7 +10,7 @@ This documentation is organized into three focused areas:
 
 | Document                                                                | Focus                                       | Key Capabilities                                              |
 |-------------------------------------------------------------------------|---------------------------------------------|---------------------------------------------------------------|
-| [**Link State Detection**](./link-state-detection.md)                   | UP/DOWN monitoring, device disappearance    | Binary state changes, uncabled port anomalies, management NIC auto-exclusion |
+| [**Link State Detection**](./link-state-detection.md)                   | UP/DOWN monitoring, device disappearance    | Binary state changes, NIC role classification (compute/storage/management), uncabled port anomalies |
 | [**Link Counter Detection**](./link-counter-detection.md)               | Error rate monitoring, threshold violations | BER tracking, FEC exhaustion prediction, congestion detection |
 | [**Syslog Detection & Correlation**](./syslog-detection-correlation.md) | Kernel log monitoring, repeat failures      | Driver/firmware errors, correlated failure patterns           |
 
@@ -243,7 +243,9 @@ This monitor uses a binary severity model based on **workload impact**:
 |-----------------------------------|---------------------------------------------------------------------|------------|
 | UP/DOWN state monitoring          | [Link State Detection](./link-state-detection.md)                   | Section 3  |
 | Device disappearance / PCI checks | [Link State Detection](./link-state-detection.md)                   | Section 7  |
-| Management NIC exclusion & uncabled port detection | [Link State Detection](./link-state-detection.md)              | Section 4  |
+| Management NIC exclusion (NUMA)   | [Link State Detection](./link-state-detection.md)                   | Section 4.1 |
+| NIC role classification (PCIe)    | [Link State Detection](./link-state-detection.md)                   | Section 4.2 |
+| Uncabled port detection           | [Link State Detection](./link-state-detection.md)                   | Section 4.3 |
 | SR-IOV VF handling                | [Link State Detection](./link-state-detection.md)                   | Section 8  |
 | BER/FEC theory                    | [Link Counter Detection](./link-counter-detection.md)               | Section 2  |
 | Counter thresholds                | [Link Counter Detection](./link-counter-detection.md)               | Section 4  |
