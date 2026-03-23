@@ -64,8 +64,7 @@ This monitor uses a binary severity model based on **workload impact**:
 │  ├─────────────────────────────────────────────────────────────────────┤   │
 │  │  /sys/class/infiniband/<dev>/ports/<port>/                          │   │
 │  │  ├── state           →  Logical state (DOWN, INIT, ARMED, ACTIVE)   │   │
-│  │  ├── phys_state      →  Physical state (LinkUp, Disabled, Polling)  │   │
-│  │  └── rate            →  Negotiated link speed (e.g., 400 Gb/sec)    │   │
+│  │  └── phys_state      →  Physical state (LinkUp, Disabled, Polling)  │   │
 │  │                                                                      │   │
 │  │  /sys/class/net/<interface>/                                         │   │
 │  │  └── operstate       →  Interface state (up, down, unknown)         │   │
@@ -265,9 +264,6 @@ cat /sys/class/infiniband/mlx5_0/ports/1/state
 
 cat /sys/class/infiniband/mlx5_0/ports/1/phys_state
 # Output: 5: LinkUp
-
-cat /sys/class/infiniband/mlx5_0/ports/1/rate
-# Output: 400 Gb/sec (4X NDR)
 ```
 
 ### 3.4 State-Based Event Generation Algorithm
@@ -457,7 +453,7 @@ The NIC Health Monitor discovers and parses InfiniBand/RoCE devices by iterating
 
 1. Iterating over `/sys/class/infiniband`
 2. Parsing `hca_type`, `fw_ver`, and `board_id`
-3. Enumerating ports and reading `link_layer`, `state`, `phys_state`, and `rate`
+3. Enumerating ports and reading `link_layer`, `state`, and `phys_state`
 4. Identifying device type (PF vs VF) for proper alerting
 
 ### 5.2 Device Discovery Diagram
@@ -480,7 +476,6 @@ The NIC Health Monitor discovers and parses InfiniBand/RoCE devices by iterating
 │  │       └── 1/                                                                  │
 │  │           ├── state               → "4: ACTIVE"                               │
 │  │           ├── phys_state          → "5: LinkUp"                               │
-│  │           ├── rate                → "400 Gb/sec (4X NDR)"                     │
 │  │           ├── link_layer          → "InfiniBand"                              │
 │  │           └── counters/           → (see counter detection doc)               │
 │  │                                                                               │
@@ -795,7 +790,6 @@ type IBPort struct {
     Port             uint   `json:"port,omitempty"`             // Port number
     State            string `json:"state,omitempty"`            // e.g., "Active", "Down"
     PhysicalState    string `json:"physical_state,omitempty"`   // e.g., "LinkUp", "Disabled"
-    RateGBSec        int    `json:"rate_gb_sec,omitempty"`      // e.g., 400
     LinkLayer        string `json:"link_layer,omitempty"`       // e.g., "Infiniband", "Ethernet"
     TotalLinkDowned  uint64 `json:"total_link_downed"`         // From sysfs link_downed counter
 }
