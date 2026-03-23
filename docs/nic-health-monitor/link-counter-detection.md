@@ -91,7 +91,8 @@ This monitor uses a binary severity model based on **workload impact**:
 │  │  ├── link_downed (Delta > 0)               →  FATAL                     │    │
 │  │  ├── excessive_buffer_overrun (any)        →  FATAL                     │    │
 │  │  ├── local_link_integrity_errors (any)     →  FATAL                     │    │
-│  │  └── rnr_nak_retry_err (any)               →  FATAL                     │    │
+│  │  ├── rnr_nak_retry_err (any)               →  FATAL                     │    │
+│  │  └── symbol_error_fatal (> 120/hour)       →  FATAL                     │    │
 │  │                                                                          │    │
 │  │  NON-FATAL THRESHOLDS (degradation event):                               │    │
 │  │  ├── symbol_error           > 10/sec       →  NON-FATAL                 │    │
@@ -200,7 +201,7 @@ The following counters represent **absolute deterministic failure** when they in
 | **RNR_nak_retry_err**               | Receiver Not Ready NAK retry exhausted                   | Terminal state of error handling; connection is severed                                 |
 | **local_link_integrity_errors**     | Raw physical errors exceed LocalPhyErrors hardware limit | Link is operating outside design specifications                                         |
 
-> **Note**: These four counters are the **only** counter-based fatal conditions. All other counters (symbol_error, port_rcv_errors, etc.) are non-fatal degradation indicators.
+> **Note**: These four counters represent absolute deterministic failure. Additionally, `symbol_error` has a fatal threshold at > 120/hour (IBTA BER spec violation) via the `symbol_error_fatal` config entry. All other counters (symbol_error at > 10/sec, port_rcv_errors, etc.) are non-fatal degradation indicators.
 
 ### 2.5 The Transport Layer Retry Window
 
@@ -323,7 +324,8 @@ Fatal counter thresholds (configurable, defaults shown):
 ├── link_downed (Delta > 0)                    → QP disconnect (FATAL)
 ├── excessive_buffer_overrun_errors (any)      → Lossless violation (FATAL)
 ├── local_link_integrity_errors (any)          → Link outside spec (FATAL)
-└── rnr_nak_retry_err (any)                    → Connection severed (FATAL)
+├── rnr_nak_retry_err (any)                    → Connection severed (FATAL)
+└── symbol_error_fatal (> 120/hour)            → IBTA BER spec violation (FATAL)
 
 Non-fatal thresholds (configurable, defaults shown):
 ├── symbol_error           > 10/sec
@@ -424,6 +426,7 @@ Breaching these thresholds **guarantees application failure** or mandatory node 
 | `excessive_buffer_overrun_errors` | Standard | **> 0 (Any)**           | **YES** | Lossless guarantee violation; packet dropped immediately. HCA ingress buffer overflow.                                                                            | [IBM Redbooks](https://www.redbooks.ibm.com/redbooks/pdfs/sg247767.pdf)                                                                                                                                                              |
 | `rnr_nak_retry_err`               | Extended | **> 0 (Any)**           | **YES** | Receiver Not Ready NAK retry exhausted; QP transitions to error state (`IBV_WC_RNR_RETRY_EXC_ERR`). Connection cannot recover without application-level teardown. | [ibv_modify_qp(3) - rnr_retry QP attr](https://man7.org/linux/man-pages/man3/ibv_modify_qp.3.html), [NVIDIA RDMA Programming](https://docs.nvidia.com/networking/display/rdmaawareprogrammingv17/queue+pair+bringup+(ibv_modify_qp)) |
 | `local_link_integrity_errors`     | Standard | **> 0 (Any)**           | **YES** | Physical error density exceeds hardware-defined LocalPhyErrors cap. Link outside spec.                                                                            | [HPE ClusterStor](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00001143en_us)                                                                                                                                             |
+| `symbol_error_fatal`              | Standard | **> 120/hour**          | **YES** | IBTA BER spec violation (10E-12). Link operating outside specification; FEC margin exhausted.                                                                     | [Oracle/IBTA BER Threshold](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html)                                                                                                                                    |
 
 **Table 2: Predictive Thresholds (Non-Fatal - IsFatal=false)**
 
@@ -470,8 +473,10 @@ The following analysis validates the efficacy of the proposed monitoring design 
 
 For Mellanox devices (IB and RoCE), the monitor reads:
 1.  **Standard Counters**: `/sys/class/infiniband/<dev>/ports/1/counters/`
-    *   Fatal counters: `symbol_error`, `link_downed`, `local_link_integrity_errors`, `excessive_buffer_overrun_errors`, `req_transport_retries_exceeded` (Native IB)
+    *   Fatal counters: `link_downed`, `local_link_integrity_errors`, `excessive_buffer_overrun_errors`
+    *   Two-tier counter: `symbol_error` — non-fatal at > 10/sec (degradation warning), fatal at > 120/hour (IBTA BER spec violation)
 2.  **Extended Counters**: `/sys/class/infiniband/<dev>/ports/1/hw_counters/`
+    *   Fatal counter: `rnr_nak_retry_err`
     *   Non-fatal counters for degradation monitoring
 
 > **Note**: Mellanox throughput counters (`port_rcv_data`, `port_xmit_data`) are in 4-byte words. Multiply by 4 to get bytes.
@@ -480,12 +485,12 @@ For Mellanox devices (IB and RoCE), the monitor reads:
 
 | Counter                           | Path                                                                                  | Fatal Threshold                |
 |-----------------------------------|---------------------------------------------------------------------------------------|--------------------------------|
-| `symbol_error`                    | `/sys/class/infiniband/<dev>/ports/<port>/counters/symbol_error`                      | Delta > 120/hour               |
+| `symbol_error_fatal`              | `/sys/class/infiniband/<dev>/ports/<port>/counters/symbol_error`                      | > 120/hour                     |
 | `local_link_integrity_errors`     | `/sys/class/infiniband/<dev>/ports/<port>/counters/local_link_integrity_errors`       | Delta > 0                      |
-| `excessive_buffer_overrun_errors` | `/sys/class/infiniband/<dev>/ports/<port>/counters/excessive_buffer_overrun_errors`   | Delta > 2/hour                 |
-| `req_transport_retries_exceeded`  | `/sys/class/infiniband/<dev>/ports/<port>/hw_counters/req_transport_retries_exceeded` | Delta > 0 **(Native IB only)** |
+| `excessive_buffer_overrun_errors` | `/sys/class/infiniband/<dev>/ports/<port>/counters/excessive_buffer_overrun_errors`   | Delta > 0                      |
+| `rnr_nak_retry_err`               | `/sys/class/infiniband/<dev>/ports/<port>/hw_counters/rnr_nak_retry_err`             | Delta > 0                      |
 
-> **Note**: The `symbol_error > 120/hour` threshold is per [IBTA specification (10E-12 BER)](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html). `req_transport_retries_exceeded` is only available on Native InfiniBand (not RoCE).
+> **Note**: `symbol_error` has two default config entries: `symbol_error` (non-fatal, > 10/sec for degradation) and `symbol_error_fatal` (fatal, > 120/hour per [IBTA specification (10E-12 BER)](https://docs.oracle.com/cd/E19654-01/820-7751-12/z40004881932077.html)). Both read from the same sysfs file. On PAM4 links (HDR/NDR), some non-zero symbol errors are expected; tune the fatal threshold if 120/hour is too sensitive for your environment.
 
 ---
 
@@ -656,7 +661,7 @@ NICs and Ports are modeled as separate entity types to enable precise fault loca
 | Entity Type | Entity Value Format | Example        | Use Case                      |
 |-------------|---------------------|----------------|-------------------------------|
 | `NIC`       | `<device_name>`     | `mlx5_0` | Device-level failures         |
-| `Port`      | `<port_number>`     | `1`      | Port-level counter violations |
+| `NICPort`   | `<port_number>`     | `1`      | Port-level counter violations |
 
 ---
 
@@ -750,7 +755,7 @@ counterDetection:
     # These counters indicate degradation requiring monitoring
     #--------------------------------------------------------------------------
     
-    # Physical Layer (PHY)
+    # Physical Layer (PHY) - two-tier symbol_error monitoring
     - name: symbol_error
       path: counters/symbol_error
       enabled: true
@@ -760,6 +765,16 @@ counterDetection:
       velocityUnit: second
       description: "PHY bit errors before FEC - physical layer degradation"
       recommendedAction: NONE
+
+    - name: symbol_error_fatal
+      path: counters/symbol_error
+      enabled: true
+      isFatal: true
+      thresholdType: velocity
+      threshold: 120.0
+      velocityUnit: hour
+      description: "Symbol errors exceed IBTA BER threshold (10E-12) - link outside spec"
+      recommendedAction: REPLACE_VM
       
     - name: link_error_recovery
       path: counters/link_error_recovery
@@ -940,7 +955,7 @@ The monitor validates configuration at startup:
 | IsFatal           | `true`                                                                          |
 | IsHealthy         | `false`                                                                         |
 | RecommendedAction | `REPLACE_VM`                                                                    |
-| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "NICPort", EntityValue: "1"}]` |
 
 **Example Event Fields (Non-Fatal - Degradation):**
 
@@ -955,7 +970,7 @@ The monitor validates configuration at startup:
 | IsFatal           | `false`                                                     |
 | IsHealthy         | `false`                                                     |
 | RecommendedAction | `NONE`                                                      |
-| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "NICPort", EntityValue: "1"}]` |
 
 ### 11.2 Event Routing
 
@@ -978,6 +993,7 @@ The monitor validates configuration at startup:
 | `excessive_buffer_overrun_errors` | `counters/`    | Delta > 0         | **REPLACE_VM** | Yes          |
 | `local_link_integrity_errors`     | `counters/`    | Delta > 0         | **REPLACE_VM** | Yes          |
 | `rnr_nak_retry_err`               | `hw_counters/` | Delta > 0         | **REPLACE_VM** | Yes          |
+| `symbol_error_fatal`              | `counters/`    | > 120/hour        | **REPLACE_VM** | Yes          |
 
 ### Driver/Firmware Logs
 

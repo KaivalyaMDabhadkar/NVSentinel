@@ -237,8 +237,8 @@ const (
 **Logical State Flow**: `DOWN (1)` → `INIT (2)` → `ARMED (3)` → `ACTIVE (4)`
 
 - **DOWN**: No connectivity (FATAL)
-- **INIT**: Initializing — normal transient state during startup. Every port passes through INIT during boot and Subnet Manager configuration. Classified as **Non-Fatal** (`IsFatal=false`) because it is expected during these transitions. If a port remains stuck in INIT, it won't satisfy the `ACTIVE/LinkUp` condition, causing the card's active port count to fall below its peers, which is caught as a Fatal condition by the card homogeneity check (see Section 4.2).
-- **ARMED**: Waiting for Subnet Manager — same rationale as INIT. Normal transient state. Classified as **Non-Fatal** (`IsFatal=false`). Prolonged ARMED state is caught by the card homogeneity check.
+- **INIT**: Initializing — normal transient state during startup. Every port passes through INIT during boot and Subnet Manager configuration. For **InfiniBand ports**, classified as **Non-Fatal** (`IsFatal=false`) because INIT can persist while waiting for SM configuration. For **Ethernet/RoCE ports**, INIT is a brief sub-second transient during link training and is not reported (logged at DEBUG level only). If an IB port remains stuck in INIT, it won't satisfy the `ACTIVE/LinkUp` condition, causing the card's active port count to fall below its peers, which is caught as a Fatal condition by the card homogeneity check (see Section 4.2).
+- **ARMED**: Waiting for Subnet Manager — same rationale as INIT. For **InfiniBand ports**, classified as **Non-Fatal** (`IsFatal=false`). For **Ethernet/RoCE ports**, this state is rare/transient and is not reported. Prolonged ARMED state on IB is caught by the card homogeneity check.
 - **ACTIVE**: Normal operational state (HEALTHY)
 
 **Physical State Substates**: `Sleep (1)`, `Polling (2)`, `Disabled (3)`, `Training (4)`, `LinkUp (5)`, `LinkErrorRecovery (6)`
@@ -591,7 +591,7 @@ The monitor tracks devices across polling cycles. If a previously-seen device is
 
 **Case 2: Device missing on startup (no prior state — e.g., after pod restart)**
 
-On every poll cycle, including the very first one after startup, the monitor uses the **card homogeneity check** (see Section 4.2) to detect anomalies without requiring prior state or static configuration:
+On the **first poll cycle after startup**, the monitor uses the **card homogeneity check** (see Section 4.2) to detect anomalies without requiring prior state or static configuration. After the first poll, all runtime state changes (cable pulls, link failures, recoveries) are handled by the per-port boundary-crossing transition detection, making repeated homogeneity checks unnecessary:
 
 1. Group all monitored PF NICs by physical card (PCI `bus:device`)
 2. Count active (`ACTIVE/LinkUp`) ports per card
@@ -816,7 +816,7 @@ NICs and Ports are modeled as separate entity types to enable precise fault loca
 | Entity Type | Entity Value Format | Example  | Use Case                                       |
 |-------------|---------------------|----------|------------------------------------------------|
 | `NIC`       | `<device_name>`     | `mlx5_0` | Device-level failures (disappeared, PCI error) |
-| `Port`      | `<port_number>`     | `1`      | Port-level failures (DOWN, uncabled anomaly)   |
+| `NICPort`   | `<port_number>`     | `1`      | Port-level failures (DOWN, uncabled anomaly)   |
 
 **Rationale**: A single NIC (e.g., `mlx5_0`) can have multiple ports. Port-level events include **both** the NIC and Port entities in `EntitiesImpacted`, enabling:
 - Precise fault localization (NIC + Port together identify the exact failing component)
@@ -893,7 +893,7 @@ Events are emitted only on **health boundary crossings** — one consolidated ev
 | IsFatal           | `true`                                                   |
 | IsHealthy         | `false`                                                  |
 | RecommendedAction | `REPLACE_VM`                                             |
-| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "NICPort", EntityValue: "1"}]` |
 
 **Example Event Fields (Fatal - RoCE Port DOWN):**
 
@@ -906,7 +906,7 @@ Events are emitted only on **health boundary crossings** — one consolidated ev
 | IsFatal           | `true`                                                   |
 | IsHealthy         | `false`                                                  |
 | RecommendedAction | `REPLACE_VM`                                             |
-| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "NICPort", EntityValue: "1"}]` |
 
 **Example Event Fields (Healthy - Recovery):**
 
@@ -919,7 +919,7 @@ Events are emitted only on **health boundary crossings** — one consolidated ev
 | IsFatal           | `false`                                                  |
 | IsHealthy         | `true`                                                   |
 | RecommendedAction | `NONE`                                                   |
-| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "Port", EntityValue: "1"}]` |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "NICPort", EntityValue: "1"}]` |
 
 **Example Event Fields (Fatal - Device Disappeared):**
 
