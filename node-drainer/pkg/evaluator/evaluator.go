@@ -50,41 +50,55 @@ func NewNodeDrainEvaluator(
 
 // EvaluateEvent method has been removed - use EvaluateEventWithDatabase instead
 
-// EvaluateEventWithDatabase evaluates using the new database-agnostic interface
-func (e *NodeDrainEvaluator) EvaluateEventWithDatabase(ctx context.Context, healthEvent model.HealthEventWithStatus,
-	database queue.DataStore, healthEventStore datastore.HealthEventStore) (*DrainActionResult, error) {
+// checkPreconditions returns an early result if the event should not proceed
+// to full drain evaluation. Returns nil if evaluation should continue.
+func checkPreconditions(healthEvent model.HealthEventWithStatus) *DrainActionResult {
 	nodeName := healthEvent.HealthEvent.NodeName
 
-	// Helper for returning ActionWait with a log
-	actionWaitWithLog := func(msg, nodeName string) *DrainActionResult {
-		slog.Warn(msg, "node", nodeName)
-
-		return &DrainActionResult{
-			Action:    ActionWait,
-			WaitDelay: time.Minute,
-		}
-	}
-
 	if healthEvent.HealthEventStatus == nil {
-		return actionWaitWithLog("HealthEventStatus is nil, cannot evaluate event", nodeName), nil
+		slog.Warn("HealthEventStatus is nil, cannot evaluate event", "node", nodeName)
+		return &DrainActionResult{Action: ActionWait, WaitDelay: time.Minute}
 	}
 
 	statusStr := healthEvent.HealthEventStatus.NodeQuarantined
 	if statusStr == "" || statusStr == string(model.UnQuarantined) {
-		return &DrainActionResult{Action: ActionSkip}, nil
+		return &DrainActionResult{Action: ActionSkip}
 	}
 
 	if healthEvent.HealthEventStatus.UserPodsEvictionStatus == nil {
-		return actionWaitWithLog("HealthEventStatus is missing UserPodsEvictionStatus", nodeName), nil
+		slog.Warn("HealthEventStatus is missing UserPodsEvictionStatus", "node", nodeName)
+		return &DrainActionResult{Action: ActionWait, WaitDelay: time.Minute}
 	}
 
 	if isTerminalStatus(model.Status(healthEvent.HealthEventStatus.UserPodsEvictionStatus.Status)) {
 		slog.Info("Event for node is in terminal state, skipping", "node", nodeName)
-
-		return &DrainActionResult{
-			Action: ActionSkip,
-		}, nil
+		return &DrainActionResult{Action: ActionSkip}
 	}
+
+	// Honor DrainOverrides.Skip: mark drain as already completed so
+	// fault-remediation can proceed immediately without waiting for pods.
+	// This is used by ergatos debug events where drain is intentionally
+	// skipped to test the Slack notification pipeline.
+	if healthEvent.HealthEvent.DrainOverrides != nil &&
+		healthEvent.HealthEvent.DrainOverrides.Skip {
+		slog.Info("DrainOverrides.Skip is true, skipping drain for node",
+			"node", nodeName)
+
+		return &DrainActionResult{Action: ActionMarkAlreadyDrained, Status: model.AlreadyDrained}
+	}
+
+	return nil
+}
+
+// EvaluateEventWithDatabase evaluates using the new database-agnostic interface
+func (e *NodeDrainEvaluator) EvaluateEventWithDatabase(ctx context.Context, healthEvent model.HealthEventWithStatus,
+	database queue.DataStore, healthEventStore datastore.HealthEventStore) (*DrainActionResult, error) {
+	if result := checkPreconditions(healthEvent); result != nil {
+		return result, nil
+	}
+
+	nodeName := healthEvent.HealthEvent.NodeName
+	statusStr := healthEvent.HealthEventStatus.NodeQuarantined
 
 	partialDrainEntity, err := e.shouldExecutePartialDrain(healthEvent.HealthEvent)
 	if err != nil {
@@ -330,11 +344,10 @@ func (e *NodeDrainEvaluator) evaluateCustomDrain(ctx context.Context, healthEven
 
 	crName := customdrain.GenerateCRName(nodeName, eventID)
 
-	exists, err := e.customDrainClient.Exists(ctx, crName)
+	nodeHasCR, nodeDrainComplete, err := e.customDrainClient.ExistsForNode(ctx, nodeName)
 	if err != nil {
-		slog.Error("Failed to check if drain CR exists",
+		slog.Error("Failed to check if any drain CR exists for node",
 			"node", nodeName,
-			"crName", crName,
 			"error", err)
 
 		return &DrainActionResult{
@@ -343,7 +356,7 @@ func (e *NodeDrainEvaluator) evaluateCustomDrain(ctx context.Context, healthEven
 		}, nil
 	}
 
-	if !exists {
+	if !nodeHasCR {
 		systemNamespaces := e.config.SystemNamespaces
 
 		namespaces, err := e.informers.GetNamespacesMatchingPattern(ctx, "*", systemNamespaces, nodeName)
@@ -362,12 +375,32 @@ func (e *NodeDrainEvaluator) evaluateCustomDrain(ctx context.Context, healthEven
 		}, nil
 	}
 
-	isComplete, err := e.customDrainClient.GetCRStatus(ctx, crName)
+	crExists, isComplete, err := e.customDrainClient.GetCRStatus(ctx, crName)
 	if err != nil {
 		slog.Error("Failed to get drain CR status",
 			"node", nodeName,
 			"crName", crName,
 			"error", err)
+
+		return &DrainActionResult{
+			Action:    ActionWait,
+			WaitDelay: customDrainPollInterval,
+		}, nil
+	}
+
+	if !crExists {
+		if nodeDrainComplete {
+			slog.Info("Another drain CR completed for this node, marking as already drained",
+				"node", nodeName)
+
+			return &DrainActionResult{
+				Action: ActionMarkAlreadyDrained,
+				Status: model.AlreadyDrained,
+			}, nil
+		}
+
+		slog.Info("Another drain CR is in progress for this node, waiting",
+			"node", nodeName)
 
 		return &DrainActionResult{
 			Action:    ActionWait,
