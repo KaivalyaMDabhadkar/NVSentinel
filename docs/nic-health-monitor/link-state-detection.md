@@ -123,10 +123,12 @@ The State Monitor follows NVSentinel's established architectural pattern where:
 
 ### 2.2 Component Responsibilities
 
-| Component                            | Responsibility                                                 | What It Does NOT Do                              |
-|--------------------------------------|----------------------------------------------------------------|--------------------------------------------------|
-| **NIC Health Monitor (State Check)** | Poll sysfs state files, detect UP/DOWN, send raw events        | Aggregation, deduplication, correlation, history |
-| **Health Events Analyzer**           | Correlate events, detect link flap patterns, escalate severity | Direct hardware access                           |
+| Component                            | Responsibility                                                                                                                              | What It Does NOT Do                                        |
+|--------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------|
+| **NIC Health Monitor (State Check)** | Poll sysfs state files, detect UP/DOWN transitions, persist port state snapshots and known device list, emit raw events and recovery events | Aggregation, deduplication, correlation, pattern detection |
+| **Health Events Analyzer**           | Correlate events, detect link flap patterns, escalate severity                                                                              | Direct hardware access                                     |
+
+> **Local State Persistence**: The State Check persists port state snapshots (`state`, `phys_state` per port) and the known device list to the shared NIC health monitor state file (hostPath-backed, see [Link Counter Detection, Section 6.6](./link-counter-detection.md#66-persistent-state-file)). This enables the monitor to (1) emit **recovery events** (`IsHealthy=true`) after pod restart when a previously-DOWN port has been fixed, (2) detect **device disappearance** across pod restarts by comparing the current device list against the persisted known devices, and (3) on **host reboot** (boot ID change), clear all state and emit **healthy baseline events** for all currently-healthy ports to clear stale FATAL conditions on the platform — since the node may have had NICs replaced during maintenance (see [Link Counter Detection, Section 6.5](./link-counter-detection.md#65-boot-id-handling)).
 
 ### 2.3 State Check Data Flow (1s polling interval)
 
@@ -145,7 +147,12 @@ Detects:
 On device disappearance:
 └── Device not in sysfs → Hardware failure (FATAL)
 
+Persists (to shared state file after each poll cycle):
+├── Port state snapshots → state + phys_state per port (for recovery events)
+└── Known device list    → Device names seen (for disappearance across restarts)
+
 Emits: Raw STATE_CHANGE events → Platform Connector → MongoDB
+       Recovery events (IsHealthy=true) when previously-DOWN port recovers
        (Link flap detection handled by Health Events Analyzer)
 ```
 
@@ -176,7 +183,11 @@ Emits: Raw STATE_CHANGE events → Platform Connector → MongoDB
 │  │  │                                    │                                  │  │
 │  │  │  BEHAVIOR:                         │                                  │  │
 │  │  │  • Reports RAW state events        │                                  │  │
-│  │  │  • Stateless (correlation centralized) │                            │  │
+│  │  │  • Persistent local state          │                                  │  │
+│  │  │    (port states, known devices,    │                                  │  │
+│  │  │    counter snapshots, breach flags,│                                  │  │
+│  │  │    boot ID)                        │                                  │  │
+│  │  │  • Correlation centralized         │                                  │  │
 │  │  └──────────────┬─────────────────────┘                                  │  │
 │  │                 │                                                        │  │
 │  └─────────────────┼────────────────────────────────────────────────────────┘  │
@@ -271,15 +282,22 @@ cat /sys/class/infiniband/mlx5_0/ports/1/phys_state
 **Port Health Evaluation Steps:**
 
 1. **Read port state** from `/sys/class/infiniband/<dev>/ports/<port>/state` and `phys_state`
-2. **Determine health status:**
+2. **Load previous port state** from persistent state file (or in-memory if available from a prior poll in this pod's lifetime)
+3. **Determine health status:**
    - If `state = ACTIVE` AND `phys_state = LinkUp` → **Healthy**
    - Otherwise → **Unhealthy** (the specific state/phys_state combination determines the message)
 
-3. **Emit event only on health boundary crossing:**
-   - **First poll (discovery)**:
-     - Healthy ports: Emit healthy event (baseline)
-     - Unhealthy ports on **anomalous cards** (card active count below peer mode): Emit fatal event (genuine failure detected at startup)
-     - Unhealthy ports on **expected cards** (card matches peer mode): **Suppressed** — this is an uncabled second port, not a failure (see Section 4.3 for the homogeneity check)
+4. **Emit event only on health boundary crossing:**
+   - **First poll after host reboot (boot ID changed — state cleared)**:
+     - All persisted state has been discarded (see [Link Counter Detection, Section 6.5](./link-counter-detection.md#65-boot-id-handling))
+     - Healthy ports (`ACTIVE/LinkUp`): Emit **healthy event** (`IsHealthy=true`) — this clears any stale FATAL conditions on the platform from the previous boot (the node may have had NICs replaced, cables reseated, etc.)
+     - Unhealthy ports on **anomalous cards**: Emit fatal event as usual
+     - Unhealthy ports on **expected cards**: **Suppressed** (uncabled port, not a failure)
+   - **First poll with no persisted state (fresh node, corrupt/missing state file)**:
+     - Same behavior as the reboot case above
+   - **First poll with persisted previous state (pod restart, same boot)**:
+     - Compare current health against **persisted** previous state
+     - Emit events on boundary crossings as with subsequent polls below (this is the key benefit of persistence — a port that was DOWN before restart and is now ACTIVE triggers a recovery event)
    - **Subsequent polls**: Only emit when `wasHealthy ≠ isHealthy`
      - Healthy → Unhealthy: **FATAL event** with consolidated message (e.g., "state DOWN, phys_state Disabled - no connectivity")
      - Unhealthy → Healthy: **HEALTHY event** (e.g., "healthy (ACTIVE, LinkUp)")
@@ -323,11 +341,11 @@ Management NICs on DGX systems are placed on CPU sockets that have **no compute 
 
 #### 4.1.3 Field Validation
 
-| Cluster | Management NICs | NUMA Check Result | Correct? |
-|---------|----------------|-------------------|----------|
-| **A100 RoCE** (4-socket) | `mlx5_0` (NUMA 0), `mlx5_13` (NUMA 6) — no compute GPU on those NUMAs | Excluded | Yes |
-| **L40** (2-socket) | None visible (BMC is non-Mellanox, invisible in `/sys/class/infiniband/`) | Nothing excluded | Yes |
-| **H100 DGX** (2-socket) | Storage/mgmt NICs share NUMA with GPUs — correctly kept for monitoring | All monitored | Yes |
+| Cluster                  | Management NICs                                                           | NUMA Check Result | Correct? |
+|--------------------------|---------------------------------------------------------------------------|-------------------|----------|
+| **A100 RoCE** (4-socket) | `mlx5_0` (NUMA 0), `mlx5_13` (NUMA 6) — no compute GPU on those NUMAs     | Excluded          | Yes      |
+| **L40** (2-socket)       | None visible (BMC is non-Mellanox, invisible in `/sys/class/infiniband/`) | Nothing excluded  | Yes      |
+| **H100 DGX** (2-socket)  | Storage/mgmt NICs share NUMA with GPUs — correctly kept for monitoring    | All monitored     | Yes      |
 
 > **Design Note**: Storage NICs (e.g., H100 Slot1/Slot2 ConnectX-7 cards) share a NUMA node with compute GPUs. They are intentionally **not excluded** because storage NIC failures also impact workloads (I/O hangs, checkpoint failures). The NUMA check only excludes NICs on NUMA nodes with **zero** compute GPUs.
 
@@ -353,28 +371,28 @@ The threshold of 4 corresponds to the PCI host bridge level: `["", "sys", "devic
 
 Combined with the NUMA check (Section 4.1), the monitor classifies each NIC into one of three roles:
 
-| Role | Detection | Monitoring Behavior |
-|------|-----------|-------------------|
-| **Management** | NIC NUMA has no compute GPU | Excluded from monitoring entirely |
-| **Compute** | NIC shares PCIe switch ancestor with a GPU (common path depth > 4) | Monitored; compared against other compute NICs for homogeneity |
-| **Storage** | NIC on GPU NUMA but no shared PCIe switch (common path depth ≤ 4) | Monitored; compared against other storage NICs for homogeneity |
+| Role           | Detection                                                          | Monitoring Behavior                                            |
+|----------------|--------------------------------------------------------------------|----------------------------------------------------------------|
+| **Management** | NIC NUMA has no compute GPU                                        | Excluded from monitoring entirely                              |
+| **Compute**    | NIC shares PCIe switch ancestor with a GPU (common path depth > 4) | Monitored; compared against other compute NICs for homogeneity |
+| **Storage**    | NIC on GPU NUMA but no shared PCIe switch (common path depth ≤ 4)  | Monitored; compared against other storage NICs for homogeneity |
 
 #### 4.2.4 Field Validation (H100 OCI Node)
 
 Verified against `nvidia-smi topo -m` output on an H100 OCI node with 8 GPUs, 18 PF NICs:
 
-| NIC | PCI Domain | GPU in Same Domain? | Common Depth | Classification | nvidia-smi topo |
-|-----|-----------|-------------------|--------------|----------------|-----------------|
-| mlx5_0, mlx5_1 | `pci0000:07` | GPU0 (0000:0f:00.0) | 6 | **Compute** | PXB to GPU0 |
-| **mlx5_2** | **`pci0000:1e`** | **None** | **3** | **Storage** | NODE to GPUs |
-| mlx5_3, mlx5_4 | `pci0000:25` | GPU1 | 6 | **Compute** | PXB to GPU1 |
-| mlx5_5, mlx5_6 | `pci0000:3c` | GPU2 | 6 | **Compute** | PXB to GPU2 |
-| mlx5_7, mlx5_8 | `pci0000:53` | GPU3 | 6 | **Compute** | PXB to GPU3 |
-| mlx5_9, mlx5_10 | `pci0000:81` | GPU4 | 6 | **Compute** | PXB to GPU4 |
-| **mlx5_11** | **`pci0000:99`** | **None** | **3** | **Storage** | NODE to GPUs |
-| mlx5_12, mlx5_13 | `pci0000:a0` | GPU5 | 6 | **Compute** | PXB to GPU5 |
-| mlx5_14, mlx5_15 | `pci0000:b8` | GPU6 | 6 | **Compute** | PXB to GPU6 |
-| mlx5_16, mlx5_17 | `pci0000:d0` | GPU7 | 6 | **Compute** | PXB to GPU7 |
+| NIC              | PCI Domain       | GPU in Same Domain? | Common Depth | Classification | nvidia-smi topo |
+|------------------|------------------|---------------------|--------------|----------------|-----------------|
+| mlx5_0, mlx5_1   | `pci0000:07`     | GPU0 (0000:0f:00.0) | 6            | **Compute**    | PXB to GPU0     |
+| **mlx5_2**       | **`pci0000:1e`** | **None**            | **3**        | **Storage**    | NODE to GPUs    |
+| mlx5_3, mlx5_4   | `pci0000:25`     | GPU1                | 6            | **Compute**    | PXB to GPU1     |
+| mlx5_5, mlx5_6   | `pci0000:3c`     | GPU2                | 6            | **Compute**    | PXB to GPU2     |
+| mlx5_7, mlx5_8   | `pci0000:53`     | GPU3                | 6            | **Compute**    | PXB to GPU3     |
+| mlx5_9, mlx5_10  | `pci0000:81`     | GPU4                | 6            | **Compute**    | PXB to GPU4     |
+| **mlx5_11**      | **`pci0000:99`** | **None**            | **3**        | **Storage**    | NODE to GPUs    |
+| mlx5_12, mlx5_13 | `pci0000:a0`     | GPU5                | 6            | **Compute**    | PXB to GPU5     |
+| mlx5_14, mlx5_15 | `pci0000:b8`     | GPU6                | 6            | **Compute**    | PXB to GPU6     |
+| mlx5_16, mlx5_17 | `pci0000:d0`     | GPU7                | 6            | **Compute**    | PXB to GPU7     |
 
 **18/18 PF NICs correctly classified. Perfect match with `nvidia-smi topo -m`.**
 
@@ -576,24 +594,30 @@ When the State Monitor detects a device has disappeared from `/sys/class/infinib
 
 ### 7.2 Detection
 
-Device disappearance is detected through two complementary mechanisms:
+Device disappearance is detected through three complementary mechanisms:
 
-**Case 1: Runtime disappearance (monitor has prior state)**
+**Case 1: Runtime disappearance (monitor has in-memory or persisted state, same boot)**
 
-The monitor tracks devices across polling cycles. If a previously-seen device is no longer present in `/sys/class/infiniband/`, a FATAL event is generated immediately with the exact device name.
+The monitor tracks devices across polling cycles via an in-memory device set and a persisted `KnownDevices` list (see [Link Counter Detection, Section 6.6](./link-counter-detection.md#66-persistent-state-file)). If a previously-seen device is no longer present in `/sys/class/infiniband/`, a FATAL event is generated immediately with the exact device name.
 
-- Example: `mlx5_3` was seen on previous poll, now absent → `EntityType: "NIC", EntityValue: "mlx5_3"`
+This works both during normal operation (in-memory state from prior poll) and **after pod restart on the same boot** (persisted `KnownDevices` loaded from the state file). Without persistence, a device that disappeared while the pod was restarting would go undetected — the new pod would have no knowledge the device ever existed.
 
-**Case 2: Device missing on startup (no prior state — e.g., after pod restart)**
+- Example: `mlx5_3` was in the persisted `KnownDevices`, but is absent from sysfs on startup → `EntityType: "NIC", EntityValue: "mlx5_3"`
 
-On the **first poll cycle after startup**, the monitor uses the **card homogeneity check** (see Section 4.2) to detect anomalies without requiring prior state or static configuration. After the first poll, all runtime state changes (cable pulls, link failures, recoveries) are handled by the per-port boundary-crossing transition detection, making repeated homogeneity checks unnecessary:
+**Case 2: Device missing after host reboot (boot ID changed — state cleared)**
+
+On host reboot, all persisted state (including `KnownDevices`) is cleared because the node may have had NICs replaced (see [Link Counter Detection, Section 6.5](./link-counter-detection.md#65-boot-id-handling)). The monitor cannot compare against prior devices because they may be entirely different hardware. Device disappearance detection after reboot falls through to Case 3 (homogeneity check).
+
+**Case 3: Device missing on startup (no persisted state — fresh node, post-reboot, or corrupt state file)**
+
+On the **first poll cycle after startup with no persisted state**, the monitor uses the **card homogeneity check** (see Section 4.2) to detect anomalies without requiring prior state or static configuration. This covers fresh nodes, post-reboot startups (where state was cleared), and corrupt state files. After the first poll, all runtime state changes (cable pulls, link failures, recoveries) are handled by the per-port boundary-crossing transition detection, making repeated homogeneity checks unnecessary:
 
 1. Group all monitored PF NICs by physical card (PCI `bus:device`)
 2. Count active (`ACTIVE/LinkUp`) ports per card
 3. Calculate the mode (most common active-port-count) across all cards
 4. Any card with fewer active ports than the mode → FATAL event
 
-This approach requires no state persistence and works immediately after startup. It detects missing ports by comparing against **peer NICs on the same node** rather than against a static expected count.
+This startup homogeneity check requires no persisted state and works immediately as a fallback. It detects missing ports by comparing against **peer NICs on the same node** rather than against a static expected count.
 
 - Example: 8 single-port NIC cards, 7 are ACTIVE, 1 is DOWN → mode is 1, the DOWN card has 0 active → FATAL
 - Message: "Card 0000:XX:00 has 0 active ports, expected 1 (peer mode)"
@@ -878,41 +902,41 @@ Events are emitted only on **health boundary crossings** — one consolidated ev
 
 **Example Event Fields (Fatal - IB Port DOWN):**
 
-| Field             | Value                                                    |
-|-------------------|----------------------------------------------------------|
-| Agent             | `nic-health-monitor`                                     |
-| CheckName         | `InfiniBandStateCheck`                                   |
-| ComponentClass    | `NIC`                                                    |
-| Message           | "Port mlx5_0 port 1: state DOWN, phys_state Disabled - no connectivity" |
-| IsFatal           | `true`                                                   |
-| IsHealthy         | `false`                                                  |
-| RecommendedAction | `REPLACE_VM`                                             |
+| Field             | Value                                                                                     |
+|-------------------|-------------------------------------------------------------------------------------------|
+| Agent             | `nic-health-monitor`                                                                      |
+| CheckName         | `InfiniBandStateCheck`                                                                    |
+| ComponentClass    | `NIC`                                                                                     |
+| Message           | "Port mlx5_0 port 1: state DOWN, phys_state Disabled - no connectivity"                   |
+| IsFatal           | `true`                                                                                    |
+| IsHealthy         | `false`                                                                                   |
+| RecommendedAction | `REPLACE_VM`                                                                              |
 | EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "NICPort", EntityValue: "1"}]` |
 
 **Example Event Fields (Fatal - RoCE Port DOWN):**
 
-| Field             | Value                                                    |
-|-------------------|----------------------------------------------------------|
-| Agent             | `nic-health-monitor`                                     |
-| CheckName         | `EthernetStateCheck`                                     |
-| ComponentClass    | `NIC`                                                    |
-| Message           | "RoCE port mlx5_0 port 1: state DOWN, operstate down - no connectivity" |
-| IsFatal           | `true`                                                   |
-| IsHealthy         | `false`                                                  |
-| RecommendedAction | `REPLACE_VM`                                             |
+| Field             | Value                                                                                     |
+|-------------------|-------------------------------------------------------------------------------------------|
+| Agent             | `nic-health-monitor`                                                                      |
+| CheckName         | `EthernetStateCheck`                                                                      |
+| ComponentClass    | `NIC`                                                                                     |
+| Message           | "RoCE port mlx5_0 port 1: state DOWN, operstate down - no connectivity"                   |
+| IsFatal           | `true`                                                                                    |
+| IsHealthy         | `false`                                                                                   |
+| RecommendedAction | `REPLACE_VM`                                                                              |
 | EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "NICPort", EntityValue: "1"}]` |
 
 **Example Event Fields (Healthy - Recovery):**
 
-| Field             | Value                                                    |
-|-------------------|----------------------------------------------------------|
-| Agent             | `nic-health-monitor`                                     |
-| CheckName         | `InfiniBandStateCheck`                                   |
-| ComponentClass    | `NIC`                                                    |
-| Message           | "Port mlx5_0 port 1: healthy (ACTIVE, LinkUp)"          |
-| IsFatal           | `false`                                                  |
-| IsHealthy         | `true`                                                   |
-| RecommendedAction | `NONE`                                                   |
+| Field             | Value                                                                                     |
+|-------------------|-------------------------------------------------------------------------------------------|
+| Agent             | `nic-health-monitor`                                                                      |
+| CheckName         | `InfiniBandStateCheck`                                                                    |
+| ComponentClass    | `NIC`                                                                                     |
+| Message           | "Port mlx5_0 port 1: healthy (ACTIVE, LinkUp)"                                            |
+| IsFatal           | `false`                                                                                   |
+| IsHealthy         | `true`                                                                                    |
+| RecommendedAction | `NONE`                                                                                    |
 | EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}, {EntityType: "NICPort", EntityValue: "1"}]` |
 
 **Example Event Fields (Fatal - Device Disappeared):**
@@ -936,14 +960,14 @@ The key question: **"Will the workload fail because of this?"**
 
 ### Fatal State Conditions (IsFatal = true)
 
-| Condition                          | Recommended Action               | Rationale                                       |
-|------------------------------------|----------------------------------|-------------------------------------------------|
-| **NIC state = DOWN**               | **RecommendedAction_REPLACE_VM** | No network connectivity, workloads will timeout |
-| **Device disappeared**             | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure         |
-| **phys_state = Disabled**          | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible        |
-| **phys_state = LinkErrorRecovery** | **RecommendedAction_REPLACE_VM** | Active link problems                            |
+| Condition                          | Recommended Action               | Rationale                                                  |
+|------------------------------------|----------------------------------|------------------------------------------------------------|
+| **NIC state = DOWN**               | **RecommendedAction_REPLACE_VM** | No network connectivity, workloads will timeout            |
+| **Device disappeared**             | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure                    |
+| **phys_state = Disabled**          | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible                   |
+| **phys_state = LinkErrorRecovery** | **RecommendedAction_REPLACE_VM** | Active link problems                                       |
 | **Uncabled port anomaly**          | **RecommendedAction_REPLACE_VM** | Card has fewer active ports than peers (homogeneity check) |
-| **Port flapping (3+ cycles)**      | **RecommendedAction_REPLACE_VM** | Intermittent hardware/cable instability         |
+| **Port flapping (3+ cycles)**      | **RecommendedAction_REPLACE_VM** | Intermittent hardware/cable instability                    |
 
 ### Fatal Counters (IsFatal = true)
 

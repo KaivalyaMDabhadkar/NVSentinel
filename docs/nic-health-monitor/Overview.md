@@ -8,11 +8,11 @@ The NIC Health Monitor is a comprehensive monitoring solution for detecting and 
 
 This documentation is organized into three focused areas:
 
-| Document                                                                | Focus                                       | Key Capabilities                                              |
-|-------------------------------------------------------------------------|---------------------------------------------|---------------------------------------------------------------|
+| Document                                                                | Focus                                       | Key Capabilities                                                                                    |
+|-------------------------------------------------------------------------|---------------------------------------------|-----------------------------------------------------------------------------------------------------|
 | [**Link State Detection**](./link-state-detection.md)                   | UP/DOWN monitoring, device disappearance    | Binary state changes, NIC role classification (compute/storage/management), uncabled port anomalies |
-| [**Link Counter Detection**](./link-counter-detection.md)               | Error rate monitoring, threshold violations | BER tracking, FEC exhaustion prediction, congestion detection |
-| [**Syslog Detection & Correlation**](./syslog-detection-correlation.md) | Kernel log monitoring, repeat failures      | Driver/firmware errors, correlated failure patterns           |
+| [**Link Counter Detection**](./link-counter-detection.md)               | Error rate monitoring, threshold violations | BER tracking, FEC exhaustion prediction, congestion detection                                       |
+| [**Syslog Detection & Correlation**](./syslog-detection-correlation.md) | Kernel log monitoring, repeat failures      | Driver/firmware errors, correlated failure patterns                                                 |
 
 ---
 
@@ -42,8 +42,12 @@ This documentation is organized into three focused areas:
 │  │  │  • EthernetDegradationCheck │  │                                 │   │  │
 │  │  │                             │  │  BEHAVIOR:                      │   │  │
 │  │  │  BEHAVIOR:                  │  │  • Reports RAW events as-is     │   │  │
-│  │  │  • Reports RAW events as-is │  │  • Stateless (correlation centralized) │   │  │
-│  │  │  • Stateless (correlation centralized) │  │                        │   │  │
+│  │  │  • Reports RAW events as-is │  │  • Persistent local state       │   │  │
+│  │  │  • Persistent local state   │  │    (journal cursors, boot ID)   │   │  │
+│  │  │    (port states, counters,  │  │  • Correlation centralized      │   │  │
+│  │  │    boot ID, breach flags,   │  │                                 │   │  │
+│  │  │    known devices)           │  │                                 │   │  │
+│  │  │  • Correlation centralized  │  │                                 │   │  │
 │  │  └─────────────┬───────────────┘  └───────────────┬─────────────────┘   │  │
 │  │                │                                  │                     │  │
 │  └────────────────┼──────────────────────────────────┼─────────────────────┘  │
@@ -94,13 +98,13 @@ This documentation is organized into three focused areas:
 
 The NIC Health Monitor follows NVSentinel's established architectural pattern:
 
-| Component                  | Function                                                         | Data Source                   | Event Flow                             |
-|----------------------------|------------------------------------------------------------------|-------------------------------|----------------------------------------|
-| **NIC Health Monitor**     | Detect hard UP/DOWN transitions and counter threshold violations | `sysfs` state files, counters | Raw events → Platform Connector        |
-| **Syslog Health Monitor**  | Detect driver/firmware events from kernel logs                   | `journald`/`dmesg`            | Raw events → Platform Connector        |
-| **Health Events Analyzer** | Correlate events, detect patterns, escalate to fatal             | MongoDB                       | Correlated events → Platform Connector |
+| Component                  | Function                                                                                                                                         | Data Source                   | Event Flow                                 |
+|----------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------|--------------------------------------------|
+| **NIC Health Monitor**     | Detect UP/DOWN transitions, counter threshold violations, emit recovery events on admin counter resets, emit healthy baselines after host reboot | `sysfs` state files, counters | Raw + recovery events → Platform Connector |
+| **Syslog Health Monitor**  | Detect driver/firmware events from kernel logs                                                                                                   | `journald`/`dmesg`            | Raw events → Platform Connector            |
+| **Health Events Analyzer** | Correlate events, detect patterns, escalate to fatal                                                                                             | MongoDB                       | Correlated events → Platform Connector     |
 
-> **Design Principle**: Health monitors report **raw events as-is**. All aggregation, correlation, link flap detection, and stabilization window logic is handled centrally by the **Health Events Analyzer** using configurable MongoDB aggregation rules.
+> **Design Principle**: Health monitors report **raw events as-is**. All aggregation, correlation, link flap detection, and stabilization window logic is handled centrally by the **Health Events Analyzer** using configurable MongoDB aggregation rules. Each monitor maintains **minimal persistent local state** on the node (via hostPath-backed state files) to survive pod restarts — port state snapshots, counter snapshots, breach flags, known device lists, and boot ID for the NIC monitor; journal cursors and boot ID for the syslog monitor. This local state is strictly for delta/velocity calculation, health boundary transition detection, recovery event emission, and resumption; it is not used for correlation or pattern detection.
 
 ### Binary Severity Model
 
@@ -183,6 +187,7 @@ This monitor uses a binary severity model based on **workload impact**:
 5. **Kernel log monitoring** integrated into the existing syslog-health-monitor with NIC-specific check patterns
 6. **Centralized event correlation** via Health Events Analyzer MongoDB aggregation pipelines
 7. **Link flap detection** via Health Events Analyzer rules (e.g., "link_downed 3+ times in 10 minutes")
+8. **Persistent local state** shared across state and counter checks — port state snapshots and known device list (state recovery and device disappearance detection across restarts), counter snapshots with per-counter timestamps (precise velocity calculation), breach flags (recovery event emission after admin counter resets), and boot ID (clear all state and emit healthy baselines on host reboot, since NICs may have been replaced)
 
 ---
 
@@ -190,8 +195,8 @@ This monitor uses a binary severity model based on **workload impact**:
 
 ### State Detection (Fatal)
 
-| Source            | Fatal Conditions                                                                                  | Recommended Action               |
-|-------------------|---------------------------------------------------------------------------------------------------|----------------------------------|
+| Source            | Fatal Conditions                                                               | Recommended Action               |
+|-------------------|--------------------------------------------------------------------------------|----------------------------------|
 | **State Monitor** | `state=DOWN`, `phys_state=Disabled`, device disappeared, uncabled port anomaly | **RecommendedAction_REPLACE_VM** |
 
 ### Counter Detection (Fatal - Defaults)
@@ -219,6 +224,18 @@ This monitor uses a binary severity model based on **workload impact**:
 | **Degradation Monitor** | `carrier_changes` (>2/interval), `rx_missed_errors` (host bottleneck)                       | Monitor for escalation |
 | **Degradation Monitor** | `roce_slow_restart` (>10/sec), `local_ack_timeout_err` (>1/sec)                             | Monitor for escalation |
 
+### Recovery and Healthy Baseline Events (IsHealthy = true)
+
+The NIC Health Monitor emits healthy events (`IsHealthy=true`) in two scenarios to clear stale unhealthy conditions on the platform:
+
+| Trigger                 | Source              | Behavior                                                                                                                                                                                                                                                                                                      | Purpose                                                                                         |
+|-------------------------|---------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------|
+| **Admin counter reset** | Degradation Monitor | When a previously-breached counter returns below threshold (typically after CSP clears counters via `perfquery -x`), emit recovery event per counter                                                                                                                                                          | Clears stale counter breach conditions                                                          |
+| **Port recovery**       | State Monitor       | When a previously-DOWN port transitions to `ACTIVE/LinkUp`, emit recovery event per port                                                                                                                                                                                                                      | Clears stale port FATAL conditions                                                              |
+| **Host reboot**         | Both                | On boot ID change, clear all persisted state and emit baseline events: healthy events for all `ACTIVE/LinkUp` ports and all counters (at 0 after reboot); fatal/non-fatal events for any ports that are unhealthy post-reboot. Counter unhealthy events follow on the second poll if errors are accumulating. | Clears all stale conditions from previous boot — NICs may have been replaced during maintenance |
+
+> **Design Note**: Without recovery events, a node that was marked FATAL on the platform would remain stuck in that state indefinitely after the issue is resolved. Persistent state (see [Link Counter Detection, Section 6.6](./link-counter-detection.md#66-persistent-state-file)) ensures recovery events survive pod restarts. On host reboot, all state is cleared and baseline events are emitted for every port and counter — healthy for those currently healthy, unhealthy for those currently unhealthy — because the node may have entirely new hardware and the platform needs a complete picture of the current state.
+
 ---
 
 ## Supported Hardware
@@ -239,20 +256,23 @@ This monitor uses a binary severity model based on **workload impact**:
 
 ## Quick Navigation
 
-| Topic                             | Document                                                            | Section    |
-|-----------------------------------|---------------------------------------------------------------------|------------|
-| UP/DOWN state monitoring          | [Link State Detection](./link-state-detection.md)                   | Section 3  |
-| Device disappearance / PCI checks | [Link State Detection](./link-state-detection.md)                   | Section 7  |
+| Topic                             | Document                                                            | Section     |
+|-----------------------------------|---------------------------------------------------------------------|-------------|
+| UP/DOWN state monitoring          | [Link State Detection](./link-state-detection.md)                   | Section 3   |
+| Device disappearance / PCI checks | [Link State Detection](./link-state-detection.md)                   | Section 7   |
 | Management NIC exclusion (NUMA)   | [Link State Detection](./link-state-detection.md)                   | Section 4.1 |
 | NIC role classification (PCIe)    | [Link State Detection](./link-state-detection.md)                   | Section 4.2 |
 | Uncabled port detection           | [Link State Detection](./link-state-detection.md)                   | Section 4.3 |
-| SR-IOV VF handling                | [Link State Detection](./link-state-detection.md)                   | Section 8  |
-| BER/FEC theory                    | [Link Counter Detection](./link-counter-detection.md)               | Section 2  |
-| Counter thresholds                | [Link Counter Detection](./link-counter-detection.md)               | Section 4  |
-| Counter reset handling            | [Link Counter Detection](./link-counter-detection.md)               | Section 6  |
-| Driver error patterns             | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Section 5  |
-| Repeat failure detection          | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Section 7  |
-| Health Events Analyzer rules      | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Appendix B |
+| SR-IOV VF handling                | [Link State Detection](./link-state-detection.md)                   | Section 8   |
+| BER/FEC theory                    | [Link Counter Detection](./link-counter-detection.md)               | Section 2   |
+| Counter thresholds                | [Link Counter Detection](./link-counter-detection.md)               | Section 4   |
+| Counter reset handling            | [Link Counter Detection](./link-counter-detection.md)               | Section 6   |
+| Admin reset recovery events       | [Link Counter Detection](./link-counter-detection.md)               | Section 6.4 |
+| Persistent state file             | [Link Counter Detection](./link-counter-detection.md)               | Section 6.6 |
+| Boot ID handling                  | [Link Counter Detection](./link-counter-detection.md)               | Section 6.5 |
+| Driver error patterns             | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Section 5   |
+| Repeat failure detection          | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Section 7   |
+| Health Events Analyzer rules      | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Appendix B  |
 
 ---
 
