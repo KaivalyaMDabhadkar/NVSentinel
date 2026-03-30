@@ -44,12 +44,12 @@ spec:
       securityContext:
         fsGroup: 65532
       {{- end }}
-      {{- if or .Values.global.auditLogging.enabled (and .Values.global.datastore (eq .Values.global.datastore.provider "postgresql")) }}
+      {{- if or .Values.global.auditLogging.enabled (and .Values.clientCertMountPath .Values.global.datastore (eq .Values.global.datastore.provider "postgresql")) }}
       initContainers:
         {{- if .Values.global.auditLogging.enabled }}
         {{- include "nvsentinel.auditLogging.initContainer" . | nindent 8 }}
         {{- end }}
-      {{- if and .Values.global.datastore (eq .Values.global.datastore.provider "postgresql") }}
+      {{- if and .Values.clientCertMountPath .Values.global.datastore (eq .Values.global.datastore.provider "postgresql") }}
         - name: fix-cert-permissions
           image: "{{ .Values.global.initContainerImage.repository }}:{{ .Values.global.initContainerImage.tag }}"
           imagePullPolicy: {{ .Values.global.initContainerImage.pullPolicy }}
@@ -111,19 +111,27 @@ spec:
           - "--metrics-port={{ .Values.global.metricsPort }}"
           - "--config-path=/etc/config/config.toml"
           - "--dry-run={{ .Values.global.dryRun }}"
-          - "--database-client-cert-mount-path={{ .Values.clientCertMountPath }}"
+          {{- $certMountPath := include "nvsentinel.mongodb.certMountPath" . }}
+          {{- if $certMountPath }}
+          - "--database-client-cert-mount-path={{ $certMountPath }}"
+          {{- else }}
+          - "--tls-enabled=false"
+          {{- end }}
           volumeMounts:
           - name: config-volume
             mountPath: /etc/config/config.toml
             subPath: config.toml
+          {{- $certMountPath := include "nvsentinel.mongodb.certMountPath" . }}
+          {{- if $certMountPath }}
           {{- if and .Values.global.datastore (eq .Values.global.datastore.provider "postgresql") }}
           - name: client-certs-fixed
-            mountPath: {{ .Values.clientCertMountPath }}
+            mountPath: {{ $certMountPath }}
             readOnly: true
-          {{- else }}
+          {{- else if eq (include "nvsentinel.mongodb.hasCertVolume" .) "true" }}
           - name: mongo-app-client-cert
-            mountPath: {{ .Values.clientCertMountPath }}
+            mountPath: {{ $certMountPath }}
             readOnly: true
+          {{- end }}
           {{- end }}
           {{- if .Values.customDrain.enabled }}
           - name: drain-template
@@ -146,12 +154,15 @@ spec:
             {{- if .Values.global.auditLogging.enabled }}
             {{- include "nvsentinel.auditLogging.envVars" . | nindent 12 }}
             {{- end }}
+            {{- $certMountPath := include "nvsentinel.mongodb.certMountPath" . }}
+            {{- if $certMountPath }}
             {{- if and .Values.global.datastore (eq .Values.global.datastore.provider "postgresql") }}
             - name: POSTGRESQL_CLIENT_CERT_MOUNT_PATH
-              value: {{ .Values.clientCertMountPath }}
+              value: {{ $certMountPath }}
             {{- else }}
             - name: MONGODB_CLIENT_CERT_MOUNT_PATH
-              value: {{ .Values.clientCertMountPath }}
+              value: {{ $certMountPath }}
+            {{- end }}
             {{- end }}
           envFrom:
             - configMapRef:
@@ -164,19 +175,15 @@ spec:
           items:
           - key: config.toml
             path: config.toml
-      {{- if and .Values.global.datastore (eq .Values.global.datastore.provider "postgresql") }}
+      {{- if and .Values.clientCertMountPath .Values.global.datastore (eq .Values.global.datastore.provider "postgresql") }}
       - name: postgresql-client-cert-original
         secret:
           secretName: postgresql-client-cert
           optional: false
       - name: client-certs-fixed
         emptyDir: {}
-      {{- else }}
-      - name: mongo-app-client-cert
-        secret:
-          secretName: {{ include "nvsentinel.certificates.secretName" . }}
-          {{- include "nvsentinel.certificates.volumeItems" . | nindent 10 }}
-          optional: true
+      {{- else if eq (include "nvsentinel.mongodb.hasCertVolume" .) "true" }}
+      {{- include "nvsentinel.mongodb.certVolume" . | nindent 6 }}
       {{- end }}
       {{- if .Values.customDrain.enabled }}
       - name: drain-template
