@@ -137,11 +137,24 @@ func setupCtrlRuntimeManagement(ctx context.Context) error {
 
 	// Initialize datastore and reconciler concurrently — the manager is already
 	// serving health probes, so the pod won't be killed during this phase.
+	// cleanupReconciler is set once the reconciler is created so cleanup can run
+	// after g.Wait() (i.e., after the manager has fully drained).
+	var cleanupReconciler func()
+
 	g.Go(func() error {
-		return initializeAndWatch(gCtx, params, mgr)
+		cleanup, initErr := initializeAndWatch(gCtx, params, mgr)
+		cleanupReconciler = cleanup
+
+		return initErr
 	})
 
-	return g.Wait()
+	err = g.Wait()
+
+	if cleanupReconciler != nil {
+		cleanupReconciler()
+	}
+
+	return err
 }
 
 func createManager() (ctrl.Manager, error) {
@@ -181,36 +194,47 @@ func createManager() (ctrl.Manager, error) {
 	return mgr, nil
 }
 
-func initializeAndWatch(ctx context.Context, params initializer.InitializationParams, mgr ctrl.Manager) error {
+const reconcilerCloseTimeout = 30 * time.Second
+
+// initializeAndWatch performs MongoDB initialization, registers the reconciler, and
+// blocks until shutdown or unexpected stream death. It returns a cleanup function that
+// the caller must invoke after the manager has fully stopped (after g.Wait) so that
+// datastore resources are not torn down under in-flight reconciles.
+func initializeAndWatch(
+	ctx context.Context, params initializer.InitializationParams, mgr ctrl.Manager,
+) (cleanup func(), err error) {
 	components, err := initializer.InitializeAll(ctx, params, mgr.GetClient())
 	if err != nil {
-		return fmt.Errorf("initialization failed: %w", err)
+		return nil, fmt.Errorf("initialization failed: %w", err)
 	}
 
 	reconciler := components.FaultRemediationReconciler
 
-	defer func() {
-		if err := reconciler.CloseAll(context.Background()); err != nil {
-			slog.Error("failed to close datastore components", "error", err)
-		}
-	}()
+	cleanup = func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), reconcilerCloseTimeout)
+		defer cancel()
 
-	watcherDone, err := reconciler.SetupWithManager(ctx, mgr)
-	if err != nil {
-		return fmt.Errorf("SetupWithManager failed: %w", err)
+		if closeErr := reconciler.CloseAll(closeCtx); closeErr != nil {
+			slog.Error("failed to close datastore components", "error", closeErr)
+		}
+	}
+
+	watcherDone, setupErr := reconciler.SetupWithManager(ctx, mgr)
+	if setupErr != nil {
+		return cleanup, fmt.Errorf("SetupWithManager failed: %w", setupErr)
 	}
 
 	slog.Info("Initialization completed, reconciler registered with manager")
 
 	select {
 	case <-ctx.Done():
-		return nil
+		return cleanup, nil
 	case <-watcherDone:
 		if ctx.Err() == nil {
-			return fmt.Errorf("change stream watcher terminated unexpectedly, event processing has stopped")
+			return cleanup, fmt.Errorf("change stream watcher terminated unexpectedly, event processing has stopped")
 		}
 
-		return nil
+		return cleanup, nil
 	}
 }
 

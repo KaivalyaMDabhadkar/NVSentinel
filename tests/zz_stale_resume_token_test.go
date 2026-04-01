@@ -273,7 +273,7 @@ func triggerDeploymentRestart(
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		deployment := &appsv1.Deployment{}
 		if err := client.Resources().Get(ctx, name, namespace, deployment); err != nil {
-			return fmt.Errorf("failed to get deployment %s/%s: %w", namespace, name, err)
+			return err
 		}
 
 		if deployment.Spec.Template.Annotations == nil {
