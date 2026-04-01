@@ -180,8 +180,7 @@ func TestStaleResumeTokenRecovery(t *testing.T) {
 					if containsStaleTokenRecovery(allLogs) {
 						t.Logf("Pod %s logs confirm stale token recovery path was taken", pod.Name)
 					} else {
-						t.Logf("Pod %s logs (recovery message not found — "+
-							"check that the fix logs when deleting a stale token)", pod.Name)
+						t.Logf("Pod %s logs do not contain stale token recovery evidence", pod.Name)
 					}
 					break
 				}
