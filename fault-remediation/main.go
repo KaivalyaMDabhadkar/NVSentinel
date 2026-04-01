@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -105,12 +106,50 @@ func run() error {
 func setupCtrlRuntimeManagement(ctx context.Context) error {
 	slog.Info("Running in controller runtime managed mode")
 
+	mgr, err := createManager()
+	if err != nil {
+		return err
+	}
+
+	params := initializer.InitializationParams{
+		TomlConfigPath:     tomlConfigPath,
+		DryRun:             dryRun,
+		EnableLogCollector: enableLogCollector,
+		Config:             mgr.GetConfig(),
+	}
+
+	g, gCtx := errgroup.WithContext(ctx)
+
+	// Start the manager first so health/metrics endpoints are live immediately.
+	// This prevents Kubernetes liveness probes from killing the pod while MongoDB
+	// initialization (which may be slow due to stale resume tokens or connectivity
+	// issues) is still in progress.
+	g.Go(func() error {
+		slog.Info("Starting controller runtime controller")
+
+		if err := mgr.Start(gCtx); err != nil {
+			slog.Error("Problem running manager", "error", err)
+			return err
+		}
+
+		return nil
+	})
+
+	// Initialize datastore and reconciler concurrently — the manager is already
+	// serving health probes, so the pod won't be killed during this phase.
+	g.Go(func() error {
+		return initializeAndWatch(gCtx, params, mgr)
+	})
+
+	return g.Wait()
+}
+
+func createManager() (ctrl.Manager, error) {
 	cfg := ctrl.GetConfigOrDie()
 	cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
 		return auditlogger.NewAuditingRoundTripper(rt)
 	})
 
-	//TODO: setup informers for node and job
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
@@ -126,26 +165,23 @@ func setupCtrlRuntimeManagement(ctx context.Context) error {
 	})
 	if err != nil {
 		slog.Error("Unable to start manager", "error", err)
-		return err
+		return nil, err
 	}
 
 	if err = mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		slog.Error("Unable to set up health check", "error", err)
-		return err
+		return nil, err
 	}
 
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		slog.Error("Unable to set up ready check", "error", err)
-		return err
+		return nil, err
 	}
 
-	params := initializer.InitializationParams{
-		TomlConfigPath:     tomlConfigPath,
-		DryRun:             dryRun,
-		EnableLogCollector: enableLogCollector,
-		Config:             mgr.GetConfig(),
-	}
+	return mgr, nil
+}
 
+func initializeAndWatch(ctx context.Context, params initializer.InitializationParams, mgr ctrl.Manager) error {
 	components, err := initializer.InitializeAll(ctx, params, mgr.GetClient())
 	if err != nil {
 		return fmt.Errorf("initialization failed: %w", err)
@@ -154,24 +190,28 @@ func setupCtrlRuntimeManagement(ctx context.Context) error {
 	reconciler := components.FaultRemediationReconciler
 
 	defer func() {
-		if err := reconciler.CloseAll(ctx); err != nil {
+		if err := reconciler.CloseAll(context.Background()); err != nil {
 			slog.Error("failed to close datastore components", "error", err)
 		}
 	}()
 
-	err = components.FaultRemediationReconciler.SetupWithManager(ctx, mgr)
+	watcherDone, err := reconciler.SetupWithManager(ctx, mgr)
 	if err != nil {
 		return fmt.Errorf("SetupWithManager failed: %w", err)
 	}
 
-	slog.Info("Starting controller runtime controller")
+	slog.Info("Initialization completed, reconciler registered with manager")
 
-	if err = mgr.Start(ctx); err != nil {
-		slog.Error("Problem running manager", "error", err)
-		return err
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-watcherDone:
+		if ctx.Err() == nil {
+			return fmt.Errorf("change stream watcher terminated unexpectedly, event processing has stopped")
+		}
+
+		return nil
 	}
-
-	return nil
 }
 
 func parseFlags() {

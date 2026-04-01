@@ -292,7 +292,7 @@ func TestMain(m *testing.M) {
 
 	reconciler = NewFaultRemediationReconciler(nil, mockWatcher, mockStore, cfg, false)
 
-	err = reconciler.SetupWithManager(testContext, mgr)
+	_, err = reconciler.SetupWithManager(testContext, mgr)
 	if err != nil {
 		log.Fatalf("Failed to launch reconciler with mgr %v", err)
 	}

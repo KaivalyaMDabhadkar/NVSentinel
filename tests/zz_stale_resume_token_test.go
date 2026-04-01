@@ -1,0 +1,293 @@
+//go:build amd64_group && mongodb
+// +build amd64_group,mongodb
+
+// Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package tests
+
+import (
+	"context"
+	"fmt"
+	"io"
+	"strings"
+	"testing"
+	"time"
+
+	"tests/helpers"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/util/retry"
+	"sigs.k8s.io/e2e-framework/klient"
+	"sigs.k8s.io/e2e-framework/pkg/envconf"
+	"sigs.k8s.io/e2e-framework/pkg/features"
+)
+
+// THIS TEST MUST RUN LAST IN THE SUITE — it modifies the MongoDB ResumeTokens collection.
+
+// TestStaleResumeTokenRecovery verifies that fault-remediation recovers from a
+// stale resume token without manual intervention.
+//
+// Background (GitHub issue #955): when a quiet cluster's oplog rolls over, the
+// stored resume token becomes invalid. Without recovery logic the module enters
+// an unrecoverable crash loop because:
+//   - openChangeStreamWithRetry retries with the same bad token for 300s
+//   - the liveness probe kills the pod at ~75s (health endpoint isn't up yet)
+//   - the next restart hits the same stale token → CrashLoopBackOff
+//
+// The fix detects ChangeStreamHistoryLost errors, deletes the stale token, and
+// opens a fresh stream. This test proves that path works end-to-end:
+//
+//  1. Insert a fake stale resume token into MongoDB
+//  2. Restart fault-remediation
+//  3. Assert the pod recovers and becomes ready (rollout completes)
+//  4. Verify the stale token was cleaned up from MongoDB
+func TestStaleResumeTokenRecovery(t *testing.T) {
+	feature := features.New("TestStaleResumeTokenRecovery").
+		WithLabel("suite", "stale-resume-token")
+
+	var mongoPod string
+
+	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		t.Log("Finding MongoDB pod")
+		mongoPod = helpers.GetMongoDBPrimaryPodName(ctx, t, client)
+		t.Logf("Using MongoDB pod: %s", mongoPod)
+
+		// Clean up any leftover stale token from a previous failed run.
+		// This makes the test idempotent — if a prior run crashed mid-test
+		// and left the token in MongoDB, we clear it before starting.
+		restConfig := client.RESTConfig()
+		t.Log("Cleaning up any leftover stale resume token from previous runs")
+		helpers.DeleteResumeToken(ctx, t, restConfig, mongoPod, "fault-remediation")
+
+		// Force a fresh rollout to ensure fault-remediation is healthy.
+		// A previous failed run may have left a stuck rollout with a
+		// crash-looping pod; just waiting wouldn't recover from that.
+		t.Log("Restarting fault-remediation to ensure clean state")
+		err = helpers.RestartDeployment(ctx, t, client, "fault-remediation", helpers.NVSentinelNamespace)
+		require.NoError(t, err, "fault-remediation must be healthy before test can proceed")
+		t.Log("fault-remediation is healthy")
+
+		return ctx
+	})
+
+	feature.Assess("fault-remediation recovers from stale resume token", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+		restConfig := client.RESTConfig()
+
+		// Step 1: Insert a stale resume token
+		t.Log("Step 1: Inserting stale resume token for fault-remediation")
+		helpers.InsertStaleResumeToken(ctx, t, restConfig, mongoPod, "fault-remediation")
+
+		tokenDoc := helpers.GetResumeTokenDoc(ctx, t, restConfig, mongoPod, "fault-remediation")
+		require.NotContains(t, tokenDoc, "NOT_FOUND", "stale token should have been inserted")
+		t.Logf("Stale resume token inserted: %s", tokenDoc)
+
+		// Step 2: Restart fault-remediation — the fix should detect the bad token,
+		// delete it, and open a fresh change stream. The pod should become ready.
+		//
+		// We use a tight 2-minute timeout instead of the default 10-minute
+		// EventuallyWaitTimeout. Normal recovery takes ~20-30s. If the fix is
+		// broken, the pod crash-loops and this fails fast rather than blocking
+		// the full CI suite.
+		//
+		// The rollout check verifies ALL four replica counters equal the desired
+		// count. With RollingUpdate, a stuck rollout has Replicas=2 (old ready +
+		// new crash-looping) while a completed rollout has Replicas=1. Checking
+		// only ReadyReplicas would false-pass because the OLD pod stays ready.
+		t.Log("Step 2: Restarting fault-remediation (expecting recovery within 2 minutes)")
+		err = triggerDeploymentRestart(ctx, t, client, "fault-remediation", helpers.NVSentinelNamespace)
+		require.NoError(t, err)
+
+		recoveryTimeout := 2 * time.Minute
+		require.Eventually(t, func() bool {
+			var deployment appsv1.Deployment
+			if err := client.Resources().Get(ctx, "fault-remediation", helpers.NVSentinelNamespace, &deployment); err != nil {
+				return false
+			}
+			desired := int32(1)
+			if deployment.Spec.Replicas != nil {
+				desired = *deployment.Spec.Replicas
+			}
+			ready := deployment.Status.ReadyReplicas == desired
+			updated := deployment.Status.UpdatedReplicas == desired
+			available := deployment.Status.AvailableReplicas == desired
+			totalCorrect := deployment.Status.Replicas == desired
+			observed := deployment.Status.ObservedGeneration >= deployment.Generation
+
+			t.Logf("Rollout status: replicas=%d updated=%d ready=%d available=%d (want %d, gen %d/%d)",
+				deployment.Status.Replicas, deployment.Status.UpdatedReplicas,
+				deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas,
+				desired, deployment.Status.ObservedGeneration, deployment.Generation)
+
+			return ready && updated && available && totalCorrect && observed
+		}, recoveryTimeout, 5*time.Second,
+			"fault-remediation did not recover from stale resume token within %v", recoveryTimeout)
+		t.Log("Deployment rollout completed — fault-remediation recovered successfully")
+
+		// Step 3: Verify the stale token was cleaned up from MongoDB.
+		// After recovery the module should have deleted the bad token and
+		// saved a fresh one (or no token if no events were processed yet).
+		t.Log("Step 3: Verifying stale token was cleaned up")
+		tokenDoc = helpers.GetResumeTokenDoc(ctx, t, restConfig, mongoPod, "fault-remediation")
+		assert.NotContains(t, tokenDoc,
+			helpers.StaleTokenMarker,
+			"the original stale token should have been deleted during recovery")
+		t.Logf("Resume token after recovery: %s", tokenDoc)
+
+		// Step 4: Verify the pod logs confirm the recovery path was taken.
+		t.Log("Step 4: Checking pod logs for recovery evidence")
+		clientset, err := kubernetes.NewForConfig(restConfig)
+		require.NoError(t, err)
+
+		var podList v1.PodList
+		err = client.Resources(helpers.NVSentinelNamespace).List(ctx, &podList)
+		require.NoError(t, err)
+
+		for i := range podList.Items {
+			pod := &podList.Items[i]
+			if !strings.HasPrefix(pod.Name, "fault-remediation-") {
+				continue
+			}
+			if pod.Status.Phase != v1.PodRunning {
+				continue
+			}
+			for _, cs := range pod.Status.ContainerStatuses {
+				if cs.Name == "fault-remediation" && cs.Ready {
+					currentLogs := fetchContainerLogs(ctx, clientset, pod.Name, "fault-remediation", false)
+					previousLogs := fetchContainerLogs(ctx, clientset, pod.Name, "fault-remediation", true)
+					allLogs := currentLogs + previousLogs
+
+					if containsStaleTokenRecovery(allLogs) {
+						t.Logf("Pod %s logs confirm stale token recovery path was taken", pod.Name)
+					} else {
+						t.Logf("Pod %s logs (recovery message not found — "+
+							"check that the fix logs when deleting a stale token)", pod.Name)
+					}
+					break
+				}
+			}
+		}
+
+		return ctx
+	})
+
+	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+		restConfig := client.RESTConfig()
+
+		// Delete any leftover stale token, then force a fresh rollout.
+		// This mirrors the Setup cleanup so the cluster is left healthy
+		// regardless of whether the test passed or failed.
+		t.Log("Teardown: Cleaning up stale token and restarting fault-remediation")
+		helpers.DeleteResumeToken(ctx, t, restConfig, mongoPod, "fault-remediation")
+
+		err = helpers.RestartDeployment(ctx, t, client, "fault-remediation", helpers.NVSentinelNamespace)
+		if err != nil {
+			t.Logf("Warning: teardown restart failed: %v", err)
+		}
+
+		return ctx
+	})
+
+	testEnv.Test(t, feature.Feature())
+}
+
+// containsStaleTokenRecovery checks whether logs contain evidence that the
+// stale token recovery code path was executed. Update these indicators to
+// match the log messages emitted by the fix.
+func containsStaleTokenRecovery(logs string) bool {
+	if len(logs) == 0 {
+		return false
+	}
+	indicators := []string{
+		"unrecoverable",
+		"deleting token",
+		"starting fresh",
+		"oplog history lost",
+		"ChangeStreamHistoryLost",
+		"InvalidResumeToken",
+		"resume token is unrecoverable",
+	}
+	lower := strings.ToLower(logs)
+	for _, indicator := range indicators {
+		if strings.Contains(lower, strings.ToLower(indicator)) {
+			return true
+		}
+	}
+	return false
+}
+
+// fetchContainerLogs returns log output from a container in a pod.
+// Set previous=true to get logs from the previous container instance (after a crash).
+// Returns an empty string if logs are not available.
+func fetchContainerLogs(
+	ctx context.Context, clientset *kubernetes.Clientset,
+	podName, containerName string, previous bool,
+) string {
+	req := clientset.CoreV1().Pods(helpers.NVSentinelNamespace).GetLogs(podName, &v1.PodLogOptions{
+		Container: containerName,
+		Previous:  previous,
+	})
+
+	stream, err := req.Stream(ctx)
+	if err != nil {
+		return ""
+	}
+	defer stream.Close()
+
+	logBytes, err := io.ReadAll(stream)
+	if err != nil {
+		return ""
+	}
+
+	return string(logBytes)
+}
+
+// triggerDeploymentRestart updates the pod template annotation to trigger a rollout,
+// but does NOT wait for the rollout to complete (unlike RestartDeployment).
+func triggerDeploymentRestart(
+	ctx context.Context, t *testing.T, client klient.Client, name, namespace string,
+) error {
+	t.Helper()
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		deployment := &appsv1.Deployment{}
+		if err := client.Resources().Get(ctx, name, namespace, deployment); err != nil {
+			return fmt.Errorf("failed to get deployment %s/%s: %w", namespace, name, err)
+		}
+
+		if deployment.Spec.Template.Annotations == nil {
+			deployment.Spec.Template.Annotations = make(map[string]string)
+		}
+		deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+
+		return client.Resources().Update(ctx, deployment)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to trigger rollout restart for %s/%s: %w", namespace, name, err)
+	}
+
+	t.Logf("Triggered rollout restart for %s/%s (not waiting for completion)", namespace, name)
+	return nil
+}
