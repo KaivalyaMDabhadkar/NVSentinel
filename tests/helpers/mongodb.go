@@ -74,14 +74,10 @@ func GetMongoDBPrimaryPodName(
 	return ""
 }
 
-// buildMongoshCommand constructs a mongosh command that authenticates via
-// SCRAM-SHA-256 against the headless service hostname. TLS flags are only
-// added when the cert files exist inside the pod (they are absent when
-// DISABLE_TLS=1 is set in CI).
-//
-// The password is read from the MONGODB_ROOT_PASSWORD env var that the bitnami
-// chart injects into the MongoDB pod, so it is never embedded in the command
-// string or printed in test logs.
+// buildMongoshCommand constructs a mongosh command against the headless service
+// hostname. TLS and auth flags are auto-detected at exec time inside the pod:
+//   - TLS is enabled only when /certs/mongodb.pem exists (absent with DISABLE_TLS=1)
+//   - Auth is enabled only when MONGODB_ROOT_PASSWORD is set (absent with auth.enabled=false)
 //
 // IMPORTANT: All JavaScript passed to jsEval MUST use double quotes for strings
 // (not single quotes), because the --eval argument is wrapped in single quotes
@@ -89,21 +85,22 @@ func GetMongoDBPrimaryPodName(
 func buildMongoshCommand(mongoPod, jsEval string) []string {
 	host := fmt.Sprintf("%s.mongodb-headless.%s.svc.cluster.local", mongoPod, NVSentinelNamespace)
 
-	// Use TLS if certs are mounted, otherwise connect without TLS.
-	// The shell test -f check runs inside the pod at exec time.
+	//nolint:lll // shell one-liner is clearer without artificial line breaks
 	return []string{
 		"/bin/sh", "-c",
 		fmt.Sprintf(
-			`if [ -f /certs/mongodb.pem ]; then `+
-				`TLS_ARGS="--tls --tlsCAFile /certs/mongodb-ca-cert --tlsCertificateKeyFile /certs/mongodb.pem"; `+
-				`else TLS_ARGS=""; fi; `+
+			`TLS_ARGS=""; AUTH_ARGS=""; `+
+				`if [ -f /certs/mongodb.pem ]; then `+
+				`TLS_ARGS="--tls --tlsCAFile /certs/mongodb-ca-cert `+
+				`--tlsCertificateKeyFile /certs/mongodb.pem"; fi; `+
+				`if [ -n "$MONGODB_ROOT_PASSWORD" ]; then `+
+				`AUTH_ARGS="--username root --password $MONGODB_ROOT_PASSWORD `+
+				`--authenticationDatabase admin `+
+				`--authenticationMechanism SCRAM-SHA-256"; fi; `+
 				`mongosh --quiet `+
 				`--host %s `+
 				`$TLS_ARGS `+
-				`--username root `+
-				`--password "$MONGODB_ROOT_PASSWORD" `+
-				`--authenticationDatabase admin `+
-				`--authenticationMechanism SCRAM-SHA-256 `+
+				`$AUTH_ARGS `+
 				`--eval '%s'`,
 			host, jsEval,
 		),

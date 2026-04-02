@@ -20,8 +20,6 @@ package tests
 import (
 	"context"
 	"fmt"
-	"io"
-	"strings"
 	"testing"
 	"time"
 
@@ -30,8 +28,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
-	v1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/util/retry"
 	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
@@ -129,42 +125,6 @@ func TestStaleResumeTokenRecovery(t *testing.T) {
 			"the original stale token should have been deleted during recovery")
 		t.Logf("Resume token after recovery: %s", tokenDoc)
 
-		// Step 4: Verify the pod logs confirm the recovery path was taken.
-		t.Log("Step 4: Checking pod logs for recovery evidence")
-		clientset, err := kubernetes.NewForConfig(restConfig)
-		require.NoError(t, err)
-
-		var podList v1.PodList
-		err = client.Resources(helpers.NVSentinelNamespace).List(ctx, &podList)
-		require.NoError(t, err)
-
-		for i := range podList.Items {
-			pod := &podList.Items[i]
-			if !strings.HasPrefix(pod.Name, "fault-remediation-") {
-				continue
-			}
-
-			if pod.Status.Phase != v1.PodRunning {
-				continue
-			}
-
-			for _, cs := range pod.Status.ContainerStatuses {
-				if cs.Name == "fault-remediation" && cs.Ready {
-					currentLogs := fetchContainerLogs(ctx, clientset, pod.Name, "fault-remediation", false)
-					previousLogs := fetchContainerLogs(ctx, clientset, pod.Name, "fault-remediation", true)
-					allLogs := currentLogs + previousLogs
-
-					if containsStaleTokenRecovery(allLogs) {
-						t.Logf("Pod %s logs confirm stale token recovery path was taken", pod.Name)
-					} else {
-						t.Logf("Pod %s logs do not contain stale token recovery evidence", pod.Name)
-					}
-
-					break
-				}
-			}
-		}
-
 		return ctx
 	})
 
@@ -188,58 +148,6 @@ func TestStaleResumeTokenRecovery(t *testing.T) {
 	})
 
 	testEnv.Test(t, feature.Feature())
-}
-
-// containsStaleTokenRecovery checks whether logs contain evidence that the
-// stale token recovery code path was executed.
-func containsStaleTokenRecovery(logs string) bool {
-	if len(logs) == 0 {
-		return false
-	}
-
-	indicators := []string{
-		"unrecoverable",
-		"deleting token",
-		"starting fresh",
-		"oplog history lost",
-		"ChangeStreamHistoryLost",
-		"InvalidResumeToken",
-		"resume token is unrecoverable",
-	}
-	lower := strings.ToLower(logs)
-
-	for _, indicator := range indicators {
-		if strings.Contains(lower, strings.ToLower(indicator)) {
-			return true
-		}
-	}
-
-	return false
-}
-
-// fetchContainerLogs returns log output from a container in a pod.
-// Set previous=true to get logs from the previous container instance (after a crash).
-func fetchContainerLogs(
-	ctx context.Context, clientset *kubernetes.Clientset,
-	podName, containerName string, previous bool,
-) string {
-	req := clientset.CoreV1().Pods(helpers.NVSentinelNamespace).GetLogs(podName, &v1.PodLogOptions{
-		Container: containerName,
-		Previous:  previous,
-	})
-
-	stream, err := req.Stream(ctx)
-	if err != nil {
-		return ""
-	}
-	defer stream.Close()
-
-	logBytes, err := io.ReadAll(stream)
-	if err != nil {
-		return ""
-	}
-
-	return string(logBytes)
 }
 
 // triggerDeploymentRestart updates the pod template annotation to trigger a rollout,
