@@ -39,6 +39,12 @@ import (
 )
 
 // THIS TEST MUST RUN LAST IN THE SUITE — it modifies the MongoDB ResumeTokens collection.
+//
+// NOTE: This test directly manipulates MongoDB via mongosh (see helpers/mongodb.go).
+// This pattern is specific to testing resume token recovery and should NOT be copied
+// for other tests. Normal E2E tests should interact with MongoDB indirectly through
+// the application's APIs (health events via simple-health-client, node state via the
+// Kubernetes API, etc.).
 
 // TestStaleResumeTokenRecovery verifies that fault-remediation recovers from a
 // stale resume token without manual intervention.
@@ -102,46 +108,15 @@ func TestStaleResumeTokenRecovery(t *testing.T) {
 		require.NotContains(t, tokenDoc, "NOT_FOUND", "stale token should have been inserted")
 		t.Logf("Stale resume token inserted: %s", tokenDoc)
 
-		// Step 2: Restart fault-remediation — the fix should detect the bad token,
+		// Step 2: Restart fault-remediation — should detect the bad token,
 		// delete it, and open a fresh change stream. The pod should become ready.
-		//
-		// We use a tight 2-minute timeout instead of the default 10-minute
-		// EventuallyWaitTimeout. Normal recovery takes ~20-30s. If the fix is
-		// broken, the pod crash-loops and this fails fast rather than blocking
-		// the full CI suite.
-		//
-		// The rollout check verifies ALL four replica counters equal the desired
-		// count. With RollingUpdate, a stuck rollout has Replicas=2 (old ready +
-		// new crash-looping) while a completed rollout has Replicas=1. Checking
-		// only ReadyReplicas would false-pass because the OLD pod stays ready.
+		// We use a tight 2-minute timeout to fail fast on crash loops.
 		t.Log("Step 2: Restarting fault-remediation (expecting recovery within 2 minutes)")
 		err = triggerDeploymentRestart(ctx, t, client, "fault-remediation", helpers.NVSentinelNamespace)
 		require.NoError(t, err)
 
-		recoveryTimeout := 2 * time.Minute
-		require.Eventually(t, func() bool {
-			var deployment appsv1.Deployment
-			if err := client.Resources().Get(ctx, "fault-remediation", helpers.NVSentinelNamespace, &deployment); err != nil {
-				return false
-			}
-			desired := int32(1)
-			if deployment.Spec.Replicas != nil {
-				desired = *deployment.Spec.Replicas
-			}
-			ready := deployment.Status.ReadyReplicas == desired
-			updated := deployment.Status.UpdatedReplicas == desired
-			available := deployment.Status.AvailableReplicas == desired
-			totalCorrect := deployment.Status.Replicas == desired
-			observed := deployment.Status.ObservedGeneration >= deployment.Generation
-
-			t.Logf("Rollout status: replicas=%d updated=%d ready=%d available=%d (want %d, gen %d/%d)",
-				deployment.Status.Replicas, deployment.Status.UpdatedReplicas,
-				deployment.Status.ReadyReplicas, deployment.Status.AvailableReplicas,
-				desired, deployment.Status.ObservedGeneration, deployment.Generation)
-
-			return ready && updated && available && totalCorrect && observed
-		}, recoveryTimeout, 5*time.Second,
-			"fault-remediation did not recover from stale resume token within %v", recoveryTimeout)
+		helpers.WaitForDeploymentRolloutWithTimeout(ctx, t, client,
+			"fault-remediation", helpers.NVSentinelNamespace, 2*time.Minute)
 		t.Log("Deployment rollout completed — fault-remediation recovered successfully")
 
 		// Step 3: Verify the stale token was cleaned up from MongoDB.
@@ -168,9 +143,11 @@ func TestStaleResumeTokenRecovery(t *testing.T) {
 			if !strings.HasPrefix(pod.Name, "fault-remediation-") {
 				continue
 			}
+
 			if pod.Status.Phase != v1.PodRunning {
 				continue
 			}
+
 			for _, cs := range pod.Status.ContainerStatuses {
 				if cs.Name == "fault-remediation" && cs.Ready {
 					currentLogs := fetchContainerLogs(ctx, clientset, pod.Name, "fault-remediation", false)
@@ -182,6 +159,7 @@ func TestStaleResumeTokenRecovery(t *testing.T) {
 					} else {
 						t.Logf("Pod %s logs do not contain stale token recovery evidence", pod.Name)
 					}
+
 					break
 				}
 			}
@@ -213,12 +191,12 @@ func TestStaleResumeTokenRecovery(t *testing.T) {
 }
 
 // containsStaleTokenRecovery checks whether logs contain evidence that the
-// stale token recovery code path was executed. Update these indicators to
-// match the log messages emitted by the fix.
+// stale token recovery code path was executed.
 func containsStaleTokenRecovery(logs string) bool {
 	if len(logs) == 0 {
 		return false
 	}
+
 	indicators := []string{
 		"unrecoverable",
 		"deleting token",
@@ -229,17 +207,18 @@ func containsStaleTokenRecovery(logs string) bool {
 		"resume token is unrecoverable",
 	}
 	lower := strings.ToLower(logs)
+
 	for _, indicator := range indicators {
 		if strings.Contains(lower, strings.ToLower(indicator)) {
 			return true
 		}
 	}
+
 	return false
 }
 
 // fetchContainerLogs returns log output from a container in a pod.
 // Set previous=true to get logs from the previous container instance (after a crash).
-// Returns an empty string if logs are not available.
 func fetchContainerLogs(
 	ctx context.Context, clientset *kubernetes.Clientset,
 	podName, containerName string, previous bool,

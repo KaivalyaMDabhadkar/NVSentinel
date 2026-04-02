@@ -12,6 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package helpers provides test utilities for the NVSentinel E2E test suite.
+//
+// IMPORTANT — MongoDB direct-access helpers:
+// The helpers in this file (ExecMongosh, InsertStaleResumeToken, DeleteResumeToken, etc.)
+// exec mongosh directly inside the MongoDB pod to manipulate resume tokens. This approach
+// is specific to the stale-resume-token recovery test (TestStaleResumeTokenRecovery) and
+// should NOT be used as a general pattern for other tests. Normal E2E tests should interact
+// with MongoDB indirectly through the application's APIs (e.g., sending health events via
+// the simple-health-client, checking node labels/annotations via the Kubernetes API).
+// Direct MongoDB manipulation bypasses the application layer and can create state that is
+// inconsistent with what the application expects.
 package helpers
 
 import (
@@ -64,8 +75,9 @@ func GetMongoDBPrimaryPodName(
 }
 
 // buildMongoshCommand constructs a mongosh command that authenticates via
-// SCRAM-SHA-256 with TLS against the headless service hostname (which matches
-// the TLS certificate SAN), matching the standard manual connection method.
+// SCRAM-SHA-256 against the headless service hostname. TLS flags are only
+// added when the cert files exist inside the pod (they are absent when
+// DISABLE_TLS=1 is set in CI).
 //
 // The password is read from the MONGODB_ROOT_PASSWORD env var that the bitnami
 // chart injects into the MongoDB pod, so it is never embedded in the command
@@ -77,14 +89,17 @@ func GetMongoDBPrimaryPodName(
 func buildMongoshCommand(mongoPod, jsEval string) []string {
 	host := fmt.Sprintf("%s.mongodb-headless.%s.svc.cluster.local", mongoPod, NVSentinelNamespace)
 
+	// Use TLS if certs are mounted, otherwise connect without TLS.
+	// The shell test -f check runs inside the pod at exec time.
 	return []string{
 		"/bin/sh", "-c",
 		fmt.Sprintf(
-			`mongosh --quiet `+
+			`if [ -f /certs/mongodb.pem ]; then `+
+				`TLS_ARGS="--tls --tlsCAFile /certs/mongodb-ca-cert --tlsCertificateKeyFile /certs/mongodb.pem"; `+
+				`else TLS_ARGS=""; fi; `+
+				`mongosh --quiet `+
 				`--host %s `+
-				`--tls `+
-				`--tlsCAFile /certs/mongodb-ca-cert `+
-				`--tlsCertificateKeyFile /certs/mongodb.pem `+
+				`$TLS_ARGS `+
 				`--username root `+
 				`--password "$MONGODB_ROOT_PASSWORD" `+
 				`--authenticationDatabase admin `+
