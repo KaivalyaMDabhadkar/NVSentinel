@@ -26,6 +26,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
@@ -37,6 +39,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/tracing"
+)
+
+var resumeTokenRecoveries = promauto.NewCounterVec(
+	prometheus.CounterOpts{
+		Name: "change_stream_resume_token_recoveries_total",
+		Help: "Total number of times a stale or invalid resume token was detected and deleted, " +
+			"causing the change stream to restart from the current position.",
+	},
+	[]string{"client", "phase"},
 )
 
 // Event represents a database-agnostic event that abstracts away provider-specific types
@@ -339,6 +350,7 @@ func recoverFromStaleResumeToken(
 ) (*mongo.ChangeStream, error) {
 	slog.Warn("Resume token is unrecoverable, deleting token and starting fresh",
 		"client", clientName)
+	resumeTokenRecoveries.WithLabelValues(clientName, "initialization").Inc()
 
 	if _, err := tokenColl.DeleteOne(ctx, bson.M{"clientName": clientName}); err != nil {
 		slog.Error("Failed to delete resume token", "client", clientName, "error", err)
@@ -451,6 +463,8 @@ func (w *ChangeStreamWatcher) handleChangeStreamError(csErr error) {
 }
 
 func (w *ChangeStreamWatcher) deleteStaleResumeToken() {
+	resumeTokenRecoveries.WithLabelValues(w.clientName, "runtime").Inc()
+
 	//nolint:gosec // G118 - parent context is already cancelled when we reach this path
 	deleteCtx, deleteCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer deleteCancel()
