@@ -214,6 +214,10 @@ func (m *MockHealthEventStore) UpdateHealthEventsByQuery(ctx context.Context, qu
 	return nil
 }
 
+func (m *MockHealthEventStore) UpdateSpanID(ctx context.Context, id string, serviceName string, spanID string) error {
+	return nil
+}
+
 var (
 	ctrlRuntimeClient client.Client
 	testClient        *kubernetes.Clientset

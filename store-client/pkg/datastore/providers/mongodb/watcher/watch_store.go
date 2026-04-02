@@ -33,7 +33,10 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/readconcern"
 	"go.mongodb.org/mongo-driver/mongo/readpref"
 	"go.mongodb.org/mongo-driver/mongo/writeconcern"
+	"go.opentelemetry.io/contrib/instrumentation/go.mongodb.org/mongo-driver/mongo/otelmongo"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+
+	"github.com/nvidia/nvsentinel/commons/pkg/tracing"
 )
 
 // Event represents a database-agnostic event that abstracts away provider-specific types
@@ -711,7 +714,10 @@ func constructMongoClientOptions(
 
 	clientOpts := options.Client().
 		ApplyURI(mongoConfig.URI).
-		SetServerSelectionTimeout(serverSelectionTimeout)
+		SetServerSelectionTimeout(serverSelectionTimeout).
+		SetMonitor(otelmongo.NewMonitor(
+			otelmongo.WithTracerProvider(tracing.GetChildOnlyTracerProvider()),
+		))
 
 	// Set AppName for MongoDB connection tracking if provided
 	if mongoConfig.AppName != "" {
