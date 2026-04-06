@@ -41,6 +41,7 @@ import (
 	"github.com/nvidia/nvsentinel/fault-remediation/pkg/remediation"
 	nvstoreclient "github.com/nvidia/nvsentinel/store-client/pkg/client"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
+	"github.com/nvidia/nvsentinel/store-client/pkg/query"
 	"github.com/nvidia/nvsentinel/store-client/pkg/utils"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -623,6 +624,103 @@ func (r *FaultRemediationReconciler) SetupWithManager(ctx context.Context, mgr c
 		Complete(r)
 
 	return watcherDone, err
+}
+
+// HandleColdStart queries for health events that are ready for remediation but were missed
+// because the change stream was restarted from a fresh position (e.g., after stale token
+// recovery). This covers the gap where ND finished draining a node while FR was down.
+//
+// When multiple matching events exist for the same node (e.g., old superseded events),
+// only the latest event per node is processed to avoid re-processing stale history.
+func (r *FaultRemediationReconciler) HandleColdStart(ctx context.Context) {
+	slog.Info("Handling cold start: checking for unremediated events")
+
+	q := query.New().Build(
+		query.Or(
+			// Case 1: Quarantined + drained but not yet remediated
+			query.And(
+				query.In("healtheventstatus.nodequarantined",
+					[]interface{}{string(model.Quarantined), string(model.AlreadyQuarantined)}),
+				query.In("healtheventstatus.userpodsevictionstatus.status",
+					[]interface{}{string(model.StatusSucceeded), string(model.AlreadyDrained)}),
+				query.Eq("healtheventstatus.faultRemediated", nil),
+			),
+			// Case 2: Cancelled/unquarantined events (need cleanup)
+			query.In("healtheventstatus.nodequarantined",
+				[]interface{}{string(model.UnQuarantined), string(model.Cancelled)}),
+		),
+	)
+
+	coldStartEvents, err := r.healthEventStore.FindHealthEventsByQuery(ctx, q)
+	if err != nil {
+		slog.Error("Cold start query failed", "error", err)
+		return
+	}
+
+	if len(coldStartEvents) == 0 {
+		slog.Info("Cold start: no unremediated events found")
+		return
+	}
+
+	latestByNode := deduplicateLatestPerNode(coldStartEvents)
+
+	slog.Info("Cold start: processing latest event per node",
+		"matchedEvents", len(coldStartEvents), "uniqueNodes", len(latestByNode))
+
+	r.reconcileColdStartEvents(ctx, latestByNode)
+}
+
+// deduplicateLatestPerNode keeps only the most recent event per node name.
+func deduplicateLatestPerNode(events []datastore.HealthEventWithStatus) map[string]datastore.HealthEventWithStatus {
+	latestByNode := make(map[string]datastore.HealthEventWithStatus)
+
+	for _, he := range events {
+		parsed, parseErr := eventutil.ParseHealthEventFromEvent(he.RawEvent)
+		if parseErr != nil {
+			slog.Error("Cold start: failed to parse event, skipping", "error", parseErr)
+			continue
+		}
+
+		if parsed.HealthEvent == nil {
+			continue
+		}
+
+		nodeName := parsed.HealthEvent.GetNodeName()
+		if nodeName == "" {
+			continue
+		}
+
+		existing, exists := latestByNode[nodeName]
+		if !exists || he.CreatedAt.After(existing.CreatedAt) {
+			latestByNode[nodeName] = he
+		}
+	}
+
+	return latestByNode
+}
+
+func (r *FaultRemediationReconciler) reconcileColdStartEvents(
+	ctx context.Context, latestByNode map[string]datastore.HealthEventWithStatus,
+) {
+	processed := 0
+
+	for nodeName, he := range latestByNode {
+		rawEvent := he.RawEvent
+		if len(rawEvent) == 0 {
+			slog.Error("Cold start: RawEvent is empty, skipping", "node", nodeName)
+			continue
+		}
+
+		evt := datastore.EventWithToken{Event: rawEvent}
+
+		if _, reconcileErr := r.Reconcile(ctx, &evt); reconcileErr != nil {
+			slog.Error("Cold start: failed to reconcile event", "node", nodeName, "error", reconcileErr)
+		} else {
+			processed++
+		}
+	}
+
+	slog.Info("Cold start processing completed", "processed", processed)
 }
 
 // AdaptEvents transforms a channel of EventWithToken into a channel of controller-runtime
