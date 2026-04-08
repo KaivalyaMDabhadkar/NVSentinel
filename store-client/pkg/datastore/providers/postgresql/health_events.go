@@ -839,10 +839,8 @@ func (p *PostgreSQLHealthEventStore) FindLatestEventForNode(
 // PostgreSQL: converts builder to SQL and uses native query
 func (p *PostgreSQLHealthEventStore) FindHealthEventsByQuery(ctx context.Context,
 	builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
-	// Convert query builder to SQL
 	whereClause, args := builder.ToSQL()
 
-	// Build the full query - include id column for PostgreSQL document identification
 	//nolint:gosec // G202 false positive - using parameterized query with placeholders
 	query := `
 		SELECT id, document
@@ -850,6 +848,31 @@ func (p *PostgreSQLHealthEventStore) FindHealthEventsByQuery(ctx context.Context
 		WHERE ` + whereClause + `
 	`
 
+	return p.queryHealthEventsWithID(ctx, query, args...)
+}
+
+// FindLatestHealthEventPerNodeByQuery returns the most recent matching event per node
+// using PostgreSQL's DISTINCT ON to efficiently deduplicate at the database level.
+func (p *PostgreSQLHealthEventStore) FindLatestHealthEventPerNodeByQuery(ctx context.Context,
+	builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
+	whereClause, args := builder.ToSQL()
+
+	//nolint:gosec // G202 false positive - using parameterized query with placeholders
+	query := `
+		SELECT DISTINCT ON (node_name) id, document
+		FROM health_events
+		WHERE ` + whereClause + `
+		ORDER BY node_name, created_at DESC
+	`
+
+	return p.queryHealthEventsWithID(ctx, query, args...)
+}
+
+// queryHealthEventsWithID executes a query that returns (id, document) rows
+// and converts them into HealthEventWithStatus slices with RawEvent populated.
+func (p *PostgreSQLHealthEventStore) queryHealthEventsWithID(
+	ctx context.Context, query string, args ...interface{},
+) ([]datastore.HealthEventWithStatus, error) {
 	rows, err := p.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query health events: %w", err)
@@ -873,16 +896,14 @@ func (p *PostgreSQLHealthEventStore) FindHealthEventsByQuery(ctx context.Context
 			return nil, fmt.Errorf("failed to unmarshal health event: %w", err)
 		}
 
-		// Populate RawEvent for cold-start support
 		var rawEvent map[string]interface{}
 		if err := json.Unmarshal(documentJSON, &rawEvent); err != nil {
 			return nil, fmt.Errorf("failed to unmarshal raw event: %w", err)
 		}
 
-		// Add PostgreSQL id to RawEvent for document identification
 		rawEvent["id"] = documentID
-
 		event.RawEvent = rawEvent
+
 		events = append(events, event)
 	}
 

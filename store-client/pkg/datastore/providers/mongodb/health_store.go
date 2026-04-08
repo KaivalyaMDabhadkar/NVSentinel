@@ -343,6 +343,80 @@ func (h *MongoHealthEventStore) UpdateHealthEventsByQuery(ctx context.Context,
 	return nil
 }
 
+// FindLatestHealthEventPerNodeByQuery returns the most recent matching event per node
+// using a MongoDB aggregation pipeline: $match → $sort → $group → $replaceRoot.
+func (h *MongoHealthEventStore) FindLatestHealthEventPerNodeByQuery(ctx context.Context,
+	builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
+	filter := builder.ToMongo()
+
+	pipeline := []bson.M{
+		{"$match": filter},
+		{"$sort": bson.M{"createdAt": -1}},
+		{"$group": bson.M{
+			"_id": "$healthevent.nodename",
+			"doc": bson.M{"$first": "$$ROOT"},
+		}},
+		{"$replaceRoot": bson.M{"newRoot": "$doc"}},
+	}
+
+	cursor, err := h.databaseClient.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, datastore.NewQueryError(
+			datastore.ProviderMongoDB,
+			"failed to aggregate latest health events per node",
+			err,
+		)
+	}
+	defer cursor.Close(ctx)
+
+	var events []datastore.HealthEventWithStatus
+
+	for cursor.Next(ctx) {
+		var rawDoc map[string]interface{}
+		if err := cursor.Decode(&rawDoc); err != nil {
+			return nil, datastore.NewQueryError(
+				datastore.ProviderMongoDB,
+				"failed to decode aggregation result",
+				err,
+			)
+		}
+
+		var event datastore.HealthEventWithStatus
+
+		bsonBytes, err := bson.Marshal(rawDoc)
+		if err != nil {
+			return nil, datastore.NewQueryError(
+				datastore.ProviderMongoDB,
+				"failed to marshal aggregation result to BSON",
+				err,
+			)
+		}
+
+		if err := bson.Unmarshal(bsonBytes, &event); err != nil {
+			return nil, datastore.NewQueryError(
+				datastore.ProviderMongoDB,
+				"failed to unmarshal BSON to health event",
+				err,
+			)
+		}
+
+		event.RawEvent = rawDoc
+		events = append(events, event)
+	}
+
+	if err := cursor.Err(); err != nil {
+		return nil, datastore.NewQueryError(
+			datastore.ProviderMongoDB,
+			"cursor error while iterating aggregation results",
+			err,
+		)
+	}
+
+	normalizeHealthEvents(events)
+
+	return events, nil
+}
+
 // normalizeHealthEvents converts bson.M types to map[string]interface{} in HealthEvent fields
 // This ensures consistency across database providers (MongoDB-specific types -> generic maps)
 func normalizeHealthEvents(events []datastore.HealthEventWithStatus) {

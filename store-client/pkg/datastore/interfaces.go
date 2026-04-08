@@ -87,6 +87,11 @@ type HealthEventStore interface {
 	// Node drain specific operations
 	CheckIfNodeAlreadyDrained(ctx context.Context, nodeName string) (bool, error)
 	FindLatestEventForNode(ctx context.Context, nodeName string) (*HealthEventWithStatus, error)
+
+	// Cold-start support: returns the latest matching event per node.
+	// MongoDB: aggregation pipeline with $match/$sort/$group/$replaceRoot
+	// PostgreSQL: DISTINCT ON (node_name) ... ORDER BY node_name, created_at DESC
+	FindLatestHealthEventPerNodeByQuery(ctx context.Context, builder QueryBuilder) ([]HealthEventWithStatus, error)
 }
 
 // QueryBuilder interface for database-agnostic queries

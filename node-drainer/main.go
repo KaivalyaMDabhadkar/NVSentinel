@@ -257,28 +257,24 @@ func startEventWatcher(ctx context.Context, components *initializer.Components, 
 	}()
 }
 
-// handleColdStart re-processes events that were in-progress or quarantined during a restart
+// handleColdStart re-processes events that were in-progress or quarantined during a restart.
+// Uses FindLatestHealthEventPerNodeByQuery to return at most one event per node,
+// which bounds memory usage to O(nodes) instead of O(total events).
 func handleColdStart(ctx context.Context, components *initializer.Components) error {
-	slog.Info("Querying for events requiring processing")
+	slog.Info("Querying for latest event per node requiring processing")
 
-	// Query for events that need processing:
-	// 1. Events with StatusInProgress (actively being processed when we went down)
-	// 2. Events that are Quarantined but haven't started processing yet (status is empty or NotStarted)
-	// This handles cases where node-drainer was restarted after quarantine but before processing started
-
-	// Build database-agnostic query using query builder
 	q := query.New().Build(
 		query.Or(
-			// Case 1: Events that were in-progress
+			// Events that were in-progress
 			query.Eq("healtheventstatus.userpodsevictionstatus.status", string(model.StatusInProgress)),
 
-			// Case 2: Quarantined events that haven't been processed yet
+			// Quarantined events that haven't been processed yet
 			query.And(
 				query.Eq("healtheventstatus.nodequarantined", string(model.Quarantined)),
 				query.In("healtheventstatus.userpodsevictionstatus.status", []interface{}{"", string(model.StatusNotStarted)}),
 			),
 
-			// Case 3: AlreadyQuarantined events that haven't been processed yet
+			// AlreadyQuarantined events that haven't been processed yet
 			query.And(
 				query.Eq("healtheventstatus.nodequarantined", string(model.AlreadyQuarantined)),
 				query.In("healtheventstatus.userpodsevictionstatus.status", []interface{}{"", string(model.StatusNotStarted)}),
@@ -286,46 +282,43 @@ func handleColdStart(ctx context.Context, components *initializer.Components) er
 		),
 	)
 
-	// Get health event store (database-agnostic)
 	healthStore := components.DataStore.HealthEventStore()
 
-	// Execute query (works with both MongoDB and PostgreSQL)
-	healthEvents, err := healthStore.FindHealthEventsByQuery(ctx, q)
+	healthEvents, err := healthStore.FindLatestHealthEventPerNodeByQuery(ctx, q)
 	if err != nil {
 		return fmt.Errorf("failed to query events for cold start: %w", err)
 	}
 
 	slog.Info("Found events to re-process", "count", len(healthEvents))
 
-	// Re-process each event
 	for _, he := range healthEvents {
-		// Use the RawEvent from the database query which includes _id
-		// This is critical for status updates to work properly
 		event := he.RawEvent
 		if len(event) == 0 {
 			slog.Error("RawEvent is empty, skipping cold start event")
+
 			continue
 		}
 
-		// Parse the event to extract node name
 		parsedEvent, err := eventutil.ParseHealthEventFromEvent(event)
 		if err != nil {
 			slog.Error("Failed to parse health event from cold start event", "error", err)
+
 			continue
 		}
 
 		if parsedEvent.HealthEvent == nil {
 			slog.Error("Health event is nil in cold start event")
+
 			continue
 		}
 
 		nodeName := parsedEvent.HealthEvent.GetNodeName()
 		if nodeName == "" {
 			slog.Error("Node name is empty in cold start event")
+
 			continue
 		}
 
-		// Create adapter to bridge interface differences
 		dbAdapter := &dataStoreAdapter{DatabaseClient: components.DatabaseClient}
 
 		if err := components.QueueManager.EnqueueEventGeneric(ctx, nodeName, event, dbAdapter, healthStore); err != nil {

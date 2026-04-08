@@ -132,6 +132,14 @@ func (m *MockHealthEventStore) FindHealthEventsByStatus(ctx context.Context, sta
 	return args.Get(0).([]datastore.HealthEventWithStatus), args.Error(1)
 }
 
+func (m *MockHealthEventStore) FindLatestHealthEventPerNodeByQuery(ctx context.Context, builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
+	args := m.Called(ctx, builder)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]datastore.HealthEventWithStatus), args.Error(1)
+}
+
 func (m *MockHealthEventStore) UpdateNodeQuarantineStatus(ctx context.Context, eventID string, status datastore.Status) error {
 	args := m.Called(ctx, eventID, status)
 	return args.Error(0)

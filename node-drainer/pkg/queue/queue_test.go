@@ -395,3 +395,7 @@ func (m mockCursor) Err() error {
 type MockHealthEventStore struct {
 	datastore.HealthEventStore
 }
+
+func (m *MockHealthEventStore) FindLatestHealthEventPerNodeByQuery(_ context.Context, _ datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
+	return nil, nil
+}

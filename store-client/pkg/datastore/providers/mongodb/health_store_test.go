@@ -300,6 +300,66 @@ func TestMongoHealthEventStore_FindLatestEventForNode(t *testing.T) {
 	})
 }
 
+// mockQueryBuilder is a minimal QueryBuilder for tests.
+type mockQueryBuilder struct{}
+
+func (mockQueryBuilder) ToMongo() map[string]interface{} {
+	return map[string]interface{}{"status": "active"}
+}
+
+func (mockQueryBuilder) ToSQL() (string, []interface{}) { return "", nil }
+
+func TestMongoHealthEventStore_FindLatestHealthEventPerNodeByQuery(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("successful aggregation", func(t *testing.T) {
+		mockDB := new(MockDatabaseClient)
+		mockCursor := new(MockCursor)
+		store := &MongoHealthEventStore{databaseClient: mockDB}
+
+		mockDB.On("Aggregate", ctx, mock.AnythingOfType("[]primitive.M")).Return(mockCursor, nil)
+		mockCursor.On("Close", ctx).Return(nil)
+
+		callCount := 0
+		mockCursor.On("Next", ctx).Return(true).Times(1)
+		mockCursor.On("Next", ctx).Return(false).Once()
+		mockCursor.On("Decode", mock.AnythingOfType("*map[string]interface {}")).Return(nil).Run(func(args mock.Arguments) {
+			callCount++
+			doc := args.Get(0).(*map[string]interface{})
+			*doc = map[string]interface{}{
+				"_id": "event-1",
+				"healthevent": map[string]interface{}{
+					"nodename": "node-a",
+				},
+			}
+		})
+		mockCursor.On("Err").Return(nil)
+
+		result, err := store.FindLatestHealthEventPerNodeByQuery(ctx, mockQueryBuilder{})
+		assert.NoError(t, err)
+		assert.Len(t, result, 1)
+		assert.Equal(t, "event-1", result[0].RawEvent["_id"])
+
+		mockDB.AssertExpectations(t)
+		mockCursor.AssertExpectations(t)
+	})
+
+	t.Run("aggregate error", func(t *testing.T) {
+		mockDB := new(MockDatabaseClient)
+		store := &MongoHealthEventStore{databaseClient: mockDB}
+
+		mockDB.On("Aggregate", ctx, mock.AnythingOfType("[]primitive.M")).
+			Return((*MockCursor)(nil), errors.New("db error"))
+
+		result, err := store.FindLatestHealthEventPerNodeByQuery(ctx, mockQueryBuilder{})
+		assert.Error(t, err)
+		assert.Nil(t, result)
+		assert.Contains(t, err.Error(), "failed to aggregate latest health events per node")
+
+		mockDB.AssertExpectations(t)
+	})
+}
+
 func TestNormalizeValue(t *testing.T) {
 	tests := []struct {
 		name     string

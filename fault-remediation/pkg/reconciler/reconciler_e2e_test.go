@@ -153,10 +153,11 @@ func (m *MockChangeStreamWatcher) GetCallCounts() (int, int, int, int) {
 
 // MockHealthEventStore provides a mock implementation of datastore.HealthEventStore for testing
 type MockHealthEventStore struct {
-	UpdateHealthEventStatusFn    func(ctx context.Context, id string, status datastore.HealthEventStatus) error
-	FindHealthEventsByQueryFn    func(ctx context.Context, builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error)
-	updateCalled                 int
-	findHealthEventsByQueryCalls int
+	UpdateHealthEventStatusFn             func(ctx context.Context, id string, status datastore.HealthEventStatus) error
+	FindHealthEventsByQueryFn             func(ctx context.Context, builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error)
+	FindLatestHealthEventPerNodeByQueryFn func(ctx context.Context, builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error)
+	updateCalled                          int
+	findHealthEventsByQueryCalls          int
 }
 
 // UpdateHealthEventStatus updates a health event status (mock implementation)
@@ -215,6 +216,13 @@ func (m *MockHealthEventStore) FindHealthEventsByQuery(ctx context.Context, buil
 		return m.FindHealthEventsByQueryFn(ctx, builder)
 	}
 
+	return nil, nil
+}
+
+func (m *MockHealthEventStore) FindLatestHealthEventPerNodeByQuery(ctx context.Context, builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
+	if m.FindLatestHealthEventPerNodeByQueryFn != nil {
+		return m.FindLatestHealthEventPerNodeByQueryFn(ctx, builder)
+	}
 	return nil, nil
 }
 
@@ -1907,12 +1915,8 @@ func makeColdStartHealthEvent(
 
 // TestHandleColdStart_RemediationFlow tests the full cold start remediation flow:
 //  1. A node was quarantined and drained while FR was down
-//  2. HandleColdStart picks up the missed event from the database
+//  2. HandleColdStart picks up the missed event via FindLatestHealthEventPerNodeByQuery
 //  3. FR creates a maintenance CR for the node
-//  4. The node's remediation state annotation is set
-//
-// This simulates the real scenario where FR's resume token expires during downtime,
-// ND finishes draining, and FR needs to catch up on restart.
 func TestHandleColdStart_RemediationFlow(t *testing.T) {
 	mockStore.updateCalled = 0
 
@@ -1921,7 +1925,6 @@ func TestHandleColdStart_RemediationFlow(t *testing.T) {
 
 	nodeName := testutils.GenerateTestNodeName("cold-start-remediation")
 
-	// Simulate the node state after FQ quarantined + ND drained it while FR was down
 	createTestNode(ctx, nodeName, nil, map[string]string{
 		statemanager.NVSentinelStateLabelKey: string(statemanager.DrainSucceededLabelValue),
 	})
@@ -1935,17 +1938,16 @@ func TestHandleColdStart_RemediationFlow(t *testing.T) {
 	defer func() {
 		cleanupNodeAnnotations(ctx, t, nodeName)
 		_ = testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
-		mockStore.FindHealthEventsByQueryFn = nil
+		mockStore.FindLatestHealthEventPerNodeByQueryFn = nil
 	}()
 
-	// Simulate: the event is quarantined + drained but FR missed it (was down)
 	missedEvent := makeColdStartHealthEvent(
 		"cold-start-event-1", nodeName,
 		model.Quarantined, model.StatusSucceeded,
 		protos.RecommendedAction_RESTART_BM, time.Now(),
 	)
 
-	mockStore.FindHealthEventsByQueryFn = func(_ context.Context, _ datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
+	mockStore.FindLatestHealthEventPerNodeByQueryFn = func(_ context.Context, _ datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
 		return []datastore.HealthEventWithStatus{missedEvent}, nil
 	}
 
@@ -1973,13 +1975,12 @@ func TestHandleColdStart_RemediationFlow(t *testing.T) {
 	crName := state.EquivalenceGroups["restart"].MaintenanceCR
 	t.Logf("Maintenance CR created via cold start: %s", crName)
 
-	// Cleanup CR
 	_ = testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
 }
 
 // TestHandleColdStart_CancellationFlow tests that cold start processes cancellation events:
 //  1. A node was quarantined and FR created a CR for it
-//  2. While FR was down, the event was cancelled (e.g., healthy event received)
+//  2. While FR was down, the event was cancelled
 //  3. HandleColdStart picks up the cancellation and clears remediation state
 func TestHandleColdStart_CancellationFlow(t *testing.T) {
 	mockStore.updateCalled = 0
@@ -2000,7 +2001,7 @@ func TestHandleColdStart_CancellationFlow(t *testing.T) {
 
 	defer func() {
 		_ = testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
-		mockStore.FindHealthEventsByQueryFn = nil
+		mockStore.FindLatestHealthEventPerNodeByQueryFn = nil
 	}()
 
 	// Step 1: Send a quarantine event through the normal change stream path
@@ -2037,7 +2038,7 @@ func TestHandleColdStart_CancellationFlow(t *testing.T) {
 		protos.RecommendedAction_RESTART_BM, time.Now(),
 	)
 
-	mockStore.FindHealthEventsByQueryFn = func(_ context.Context, _ datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
+	mockStore.FindLatestHealthEventPerNodeByQueryFn = func(_ context.Context, _ datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
 		return []datastore.HealthEventWithStatus{cancelledEvent}, nil
 	}
 
@@ -2053,68 +2054,5 @@ func TestHandleColdStart_CancellationFlow(t *testing.T) {
 	assert.False(t, hasAnnotation,
 		"Cold start should clear remediation annotation for cancelled events")
 
-	// Cleanup CR
 	_ = testDynamic.Resource(gvr).Delete(ctx, crName, metav1.DeleteOptions{})
-}
-
-// TestHandleColdStart_DeduplicatesLatestPerNode tests that when multiple events exist
-// for the same node, only the latest one is processed.
-func TestHandleColdStart_DeduplicatesLatestPerNode(t *testing.T) {
-	mockStore.updateCalled = 0
-
-	ctx, cancel := context.WithTimeout(testContext, 30*time.Second)
-	defer cancel()
-
-	nodeName := testutils.GenerateTestNodeName("cold-start-dedup")
-	createTestNode(ctx, nodeName, nil, map[string]string{
-		statemanager.NVSentinelStateLabelKey: string(statemanager.DrainSucceededLabelValue),
-	})
-
-	gvr := schema.GroupVersionResource{
-		Group:    "janitor.dgxc.nvidia.com",
-		Version:  "v1alpha1",
-		Resource: "rebootnodes",
-	}
-
-	defer func() {
-		cleanupNodeAnnotations(ctx, t, nodeName)
-		_ = testClient.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
-		mockStore.FindHealthEventsByQueryFn = nil
-	}()
-
-	now := time.Now()
-
-	// Old event (should be skipped) and new event (should be processed) for the same node
-	oldEvent := makeColdStartHealthEvent(
-		"old-event-1", nodeName,
-		model.Quarantined, model.StatusSucceeded,
-		protos.RecommendedAction_RESTART_BM, now.Add(-24*time.Hour),
-	)
-	newEvent := makeColdStartHealthEvent(
-		"new-event-1", nodeName,
-		model.Quarantined, model.StatusSucceeded,
-		protos.RecommendedAction_RESTART_BM, now,
-	)
-
-	mockStore.FindHealthEventsByQueryFn = func(_ context.Context, _ datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
-		return []datastore.HealthEventWithStatus{oldEvent, newEvent}, nil
-	}
-
-	beforeCount := getHistogramCount(t, metrics.EventHandlingDuration)
-
-	reconciler.HandleColdStart(ctx)
-
-	afterCount := getHistogramCount(t, metrics.EventHandlingDuration)
-
-	// Only 1 event should be processed (latest), not 2
-	assert.Equal(t, beforeCount+1, afterCount,
-		"HandleColdStart should process only the latest event per node")
-
-	// Verify CR was created
-	state, _, err := reconciler.annotationManager.GetRemediationState(ctx, nodeName)
-	require.NoError(t, err)
-
-	if grp, ok := state.EquivalenceGroups["restart"]; ok {
-		_ = testDynamic.Resource(gvr).Delete(ctx, grp.MaintenanceCR, metav1.DeleteOptions{})
-	}
 }

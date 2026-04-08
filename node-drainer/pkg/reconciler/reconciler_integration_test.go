@@ -138,6 +138,11 @@ func (mockStore *mockHealthEventStore) FindHealthEventsByQuery(_ context.Context
 	return mockStore.healthEvents, mockStore.err
 }
 
+func (mockStore *mockHealthEventStore) FindLatestHealthEventPerNodeByQuery(_ context.Context,
+	_ datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
+	return nil, nil
+}
+
 func (m *mockDatabaseConfig) GetConnectionURI() string {
 	return m.connectionURI
 }
