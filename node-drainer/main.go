@@ -35,6 +35,7 @@ import (
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/initializer"
 	"github.com/nvidia/nvsentinel/store-client/pkg/client"
 	"github.com/nvidia/nvsentinel/store-client/pkg/query"
+	"github.com/nvidia/nvsentinel/store-client/pkg/utils"
 )
 
 var (
@@ -291,6 +292,8 @@ func handleColdStart(ctx context.Context, components *initializer.Components) er
 
 	slog.Info("Found events to re-process", "count", len(healthEvents))
 
+	dbAdapter := &dataStoreAdapter{DatabaseClient: components.DatabaseClient}
+
 	for _, he := range healthEvents {
 		event := he.RawEvent
 		if len(event) == 0 {
@@ -319,9 +322,15 @@ func handleColdStart(ctx context.Context, components *initializer.Components) er
 			continue
 		}
 
-		dbAdapter := &dataStoreAdapter{DatabaseClient: components.DatabaseClient}
+		documentID, err := utils.ExtractDocumentIDNative(event)
+		if err != nil {
+			slog.Error("Failed to extract document ID from cold start event", "error", err)
+			continue
+		}
 
-		if err := components.QueueManager.EnqueueEventGeneric(ctx, nodeName, event, dbAdapter, healthStore); err != nil {
+		err = components.QueueManager.EnqueueEventGeneric(
+			ctx, nodeName, event, dbAdapter, healthStore, documentID)
+		if err != nil {
 			slog.Error("Failed to enqueue cold start event", "error", err, "nodeName", nodeName)
 		} else {
 			slog.Info("Re-queued event from cold start", "nodeName", nodeName)
