@@ -17,6 +17,7 @@ package mongodb
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -343,78 +344,93 @@ func (h *MongoHealthEventStore) UpdateHealthEventsByQuery(ctx context.Context,
 	return nil
 }
 
-// FindLatestHealthEventPerNodeByQuery returns the most recent matching event per node
-// using a MongoDB aggregation pipeline: $match → $sort → $group → $replaceRoot.
-func (h *MongoHealthEventStore) FindLatestHealthEventPerNodeByQuery(ctx context.Context,
-	builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
-	filter := builder.ToMongo()
-
-	pipeline := []bson.M{
-		{"$match": filter},
-		{"$sort": bson.M{"createdAt": -1}},
-		{"$group": bson.M{
-			"_id": "$healthevent.nodename",
-			"doc": bson.M{"$first": "$$ROOT"},
-		}},
-		{"$replaceRoot": bson.M{"newRoot": "$doc"}},
+// decodeRawDocToHealthEvent decodes a raw BSON map into a HealthEventWithStatus,
+// preserving the original map in RawEvent.
+func decodeRawDocToHealthEvent(rawDoc map[string]interface{}) (datastore.HealthEventWithStatus, error) {
+	bsonBytes, err := bson.Marshal(rawDoc)
+	if err != nil {
+		return datastore.HealthEventWithStatus{}, datastore.NewQueryError(
+			datastore.ProviderMongoDB, "failed to marshal document to BSON", err)
 	}
 
-	cursor, err := h.databaseClient.Aggregate(ctx, pipeline)
+	var event datastore.HealthEventWithStatus
+	if err := bson.Unmarshal(bsonBytes, &event); err != nil {
+		return datastore.HealthEventWithStatus{}, datastore.NewQueryError(
+			datastore.ProviderMongoDB, "failed to unmarshal BSON to health event", err)
+	}
+
+	event.RawEvent = rawDoc
+
+	return event, nil
+}
+
+// FindHealthEventsByQueryBatched iterates matching health events in bounded batches.
+// fn is called once per batch of up to batchSize events. Return a non-nil error from
+// fn to stop iteration early. Memory is bounded to O(batchSize) at any point.
+func (h *MongoHealthEventStore) FindHealthEventsByQueryBatched(ctx context.Context,
+	builder datastore.QueryBuilder, batchSize int,
+	fn func([]datastore.HealthEventWithStatus) error) error {
+	filter := builder.ToMongo()
+
+	cursor, err := h.databaseClient.Find(ctx, filter, nil)
 	if err != nil {
-		return nil, datastore.NewQueryError(
+		return datastore.NewQueryError(
 			datastore.ProviderMongoDB,
-			"failed to aggregate latest health events per node",
+			"failed to find health events for batched query",
 			err,
 		)
 	}
 	defer cursor.Close(ctx)
 
-	var events []datastore.HealthEventWithStatus
+	batch := make([]datastore.HealthEventWithStatus, 0, batchSize)
 
 	for cursor.Next(ctx) {
 		var rawDoc map[string]interface{}
 		if err := cursor.Decode(&rawDoc); err != nil {
-			return nil, datastore.NewQueryError(
-				datastore.ProviderMongoDB,
-				"failed to decode aggregation result",
-				err,
-			)
+			slog.Error("Skipping undecodable document in batched query",
+				"error", err)
+
+			continue
 		}
 
-		var event datastore.HealthEventWithStatus
-
-		bsonBytes, err := bson.Marshal(rawDoc)
+		event, err := decodeRawDocToHealthEvent(rawDoc)
 		if err != nil {
-			return nil, datastore.NewQueryError(
-				datastore.ProviderMongoDB,
-				"failed to marshal aggregation result to BSON",
-				err,
-			)
+			slog.Error("Skipping document that failed struct conversion in batched query",
+				"error", err)
+
+			continue
 		}
 
-		if err := bson.Unmarshal(bsonBytes, &event); err != nil {
-			return nil, datastore.NewQueryError(
-				datastore.ProviderMongoDB,
-				"failed to unmarshal BSON to health event",
-				err,
-			)
-		}
+		batch = append(batch, event)
 
-		event.RawEvent = rawDoc
-		events = append(events, event)
+		if len(batch) >= batchSize {
+			normalizeHealthEvents(batch)
+
+			if err := fn(batch); err != nil {
+				return err
+			}
+
+			batch = make([]datastore.HealthEventWithStatus, 0, batchSize)
+		}
 	}
 
 	if err := cursor.Err(); err != nil {
-		return nil, datastore.NewQueryError(
+		return datastore.NewQueryError(
 			datastore.ProviderMongoDB,
-			"cursor error while iterating aggregation results",
+			"cursor error while iterating batched query",
 			err,
 		)
 	}
 
-	normalizeHealthEvents(events)
+	if len(batch) > 0 {
+		normalizeHealthEvents(batch)
 
-	return events, nil
+		if err := fn(batch); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // normalizeHealthEvents converts bson.M types to map[string]interface{} in HealthEvent fields

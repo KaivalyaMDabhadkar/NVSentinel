@@ -394,6 +394,6 @@ type MockHealthEventStore struct {
 	datastore.HealthEventStore
 }
 
-func (m *MockHealthEventStore) FindLatestHealthEventPerNodeByQuery(_ context.Context, _ datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
-	return nil, nil
+func (m *MockHealthEventStore) FindHealthEventsByQueryBatched(_ context.Context, _ datastore.QueryBuilder, _ int, _ func([]datastore.HealthEventWithStatus) error) error {
+	return nil
 }

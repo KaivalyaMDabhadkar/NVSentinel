@@ -46,6 +46,8 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+const coldStartBatchSize = 1000
+
 type ReconcilerConfig struct {
 	DataStoreConfig    datastore.DataStoreConfig
 	TokenConfig        nvstoreclient.TokenConfig
@@ -68,6 +70,7 @@ type FaultRemediationReconciler struct {
 	Config            ReconcilerConfig
 	annotationManager annotation.NodeAnnotationManagerInterface
 	dryRun            bool
+	coldStartCh       chan event.TypedGenericEvent[*datastore.EventWithToken]
 }
 
 // NewFaultRemediationReconciler creates a new FaultRemediationReconciler with the provided dependencies.
@@ -600,36 +603,33 @@ func (r *FaultRemediationReconciler) CloseAll(ctx context.Context) error {
 func (r *FaultRemediationReconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager) (<-chan struct{}, error) {
 	r.Watcher.Start(ctx)
 
-	reconciler := builder.TypedControllerManagedBy[*datastore.EventWithToken](mgr)
 	typedCh, watcherDone := AdaptEvents(ctx, r.Watcher.Events())
 
-	src := source.TypedChannel(
-		typedCh,
-		handler.TypedFuncs[*datastore.EventWithToken, *datastore.EventWithToken]{
-			GenericFunc: func(
-				ctx context.Context,
-				e event.TypedGenericEvent[*datastore.EventWithToken],
-				q workqueue.TypedRateLimitingInterface[*datastore.EventWithToken],
-			) {
-				q.Add(e.Object)
-			},
-		},
-	)
+	r.coldStartCh = make(chan event.TypedGenericEvent[*datastore.EventWithToken], coldStartBatchSize)
 
-	err := reconciler.
+	enqueueHandler := handler.TypedFuncs[*datastore.EventWithToken, *datastore.EventWithToken]{
+		GenericFunc: func(
+			ctx context.Context,
+			e event.TypedGenericEvent[*datastore.EventWithToken],
+			q workqueue.TypedRateLimitingInterface[*datastore.EventWithToken],
+		) {
+			q.Add(e.Object)
+		},
+	}
+
+	err := builder.TypedControllerManagedBy[*datastore.EventWithToken](mgr).
 		Named("fault-remediation-controller").
-		WatchesRawSource(
-			src,
-		).
+		WatchesRawSource(source.TypedChannel(typedCh, enqueueHandler)).
+		WatchesRawSource(source.TypedChannel(r.coldStartCh, enqueueHandler)).
 		Complete(r)
 
 	return watcherDone, err
 }
 
-// HandleColdStart queries for the latest health event per node that needs
-// remediation or cancellation cleanup. It uses FindLatestHealthEventPerNodeByQuery
-// which returns at most one event per node (DB-level dedup), bounding memory to
-// O(nodes) instead of O(total events).
+// HandleColdStart queries for health events that need remediation or cancellation
+// cleanup after a restart. Events are enqueued into the controller-runtime workqueue
+// via the cold start channel so they get full requeue/retry semantics — the same
+// processing path as live change stream events.
 func (r *FaultRemediationReconciler) HandleColdStart(ctx context.Context) {
 	slog.Info("Handling cold start: checking for unremediated events")
 
@@ -649,36 +649,33 @@ func (r *FaultRemediationReconciler) HandleColdStart(ctx context.Context) {
 		),
 	)
 
-	events, err := r.healthEventStore.FindLatestHealthEventPerNodeByQuery(ctx, q)
+	enqueued := 0
+
+	err := r.healthEventStore.FindHealthEventsByQueryBatched(ctx, q, coldStartBatchSize,
+		func(batch []datastore.HealthEventWithStatus) error {
+			for _, he := range batch {
+				if len(he.RawEvent) == 0 {
+					continue
+				}
+
+				evt := datastore.EventWithToken{Event: he.RawEvent}
+
+				select {
+				case r.coldStartCh <- event.TypedGenericEvent[*datastore.EventWithToken]{Object: &evt}:
+					enqueued++
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+
+			return nil
+		})
 	if err != nil {
 		slog.Error("Cold start query failed", "error", err)
 		return
 	}
 
-	if len(events) == 0 {
-		slog.Info("Cold start: no unremediated events found")
-		return
-	}
-
-	slog.Info("Cold start: processing events", "count", len(events))
-
-	processed := 0
-
-	for _, he := range events {
-		if len(he.RawEvent) == 0 {
-			continue
-		}
-
-		evt := datastore.EventWithToken{Event: he.RawEvent}
-
-		if _, reconcileErr := r.Reconcile(ctx, &evt); reconcileErr != nil {
-			slog.Error("Cold start: failed to reconcile", "error", reconcileErr)
-		} else {
-			processed++
-		}
-	}
-
-	slog.Info("Cold start processing completed", "processed", processed)
+	slog.Info("Cold start: enqueued events for processing", "count", enqueued)
 }
 
 // AdaptEvents transforms a channel of EventWithToken into a channel of controller-runtime

@@ -88,10 +88,14 @@ type HealthEventStore interface {
 	CheckIfNodeAlreadyDrained(ctx context.Context, nodeName string) (bool, error)
 	FindLatestEventForNode(ctx context.Context, nodeName string) (*HealthEventWithStatus, error)
 
-	// Cold-start support: returns the latest matching event per node.
-	// MongoDB: aggregation pipeline with $match/$sort/$group/$replaceRoot
-	// PostgreSQL: DISTINCT ON (node_name) ... ORDER BY node_name, created_at DESC
-	FindLatestHealthEventPerNodeByQuery(ctx context.Context, builder QueryBuilder) ([]HealthEventWithStatus, error)
+	// Cold-start support: iterates matching events in bounded batches.
+	// fn is called once per batch; return a non-nil error from fn to stop iteration.
+	// MongoDB: cursor-based batch iteration
+	// PostgreSQL: LIMIT/OFFSET pagination
+	FindHealthEventsByQueryBatched(
+		ctx context.Context, builder QueryBuilder, batchSize int,
+		fn func([]HealthEventWithStatus) error,
+	) error
 }
 
 // QueryBuilder interface for database-agnostic queries

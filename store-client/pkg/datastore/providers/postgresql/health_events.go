@@ -860,21 +860,39 @@ func (p *PostgreSQLHealthEventStore) FindHealthEventsByQuery(ctx context.Context
 	return p.queryHealthEventsWithID(ctx, query, args...)
 }
 
-// FindLatestHealthEventPerNodeByQuery returns the most recent matching event per node
-// using PostgreSQL's DISTINCT ON to efficiently deduplicate at the database level.
-func (p *PostgreSQLHealthEventStore) FindLatestHealthEventPerNodeByQuery(ctx context.Context,
-	builder datastore.QueryBuilder) ([]datastore.HealthEventWithStatus, error) {
+// FindHealthEventsByQueryBatched iterates matching health events in bounded batches.
+// fn is called once per batch of up to batchSize events. Return a non-nil error from
+// fn to stop iteration early. Uses LIMIT/OFFSET pagination to bound memory.
+func (p *PostgreSQLHealthEventStore) FindHealthEventsByQueryBatched(ctx context.Context,
+	builder datastore.QueryBuilder, batchSize int,
+	fn func([]datastore.HealthEventWithStatus) error) error {
 	whereClause, args := builder.ToSQL()
 
-	//nolint:gosec // G202 false positive - using parameterized query with placeholders
-	query := `
-		SELECT DISTINCT ON (node_name) id, document
-		FROM health_events
-		WHERE ` + whereClause + `
-		ORDER BY node_name, created_at DESC
-	`
+	for offset := 0; ; offset += batchSize {
+		//nolint:gosec // G202 false positive - batchSize/offset are integers, not user input
+		q := fmt.Sprintf(
+			"SELECT id, document FROM health_events WHERE %s ORDER BY created_at DESC LIMIT %d OFFSET %d",
+			whereClause, batchSize, offset)
 
-	return p.queryHealthEventsWithID(ctx, query, args...)
+		batch, err := p.queryHealthEventsWithID(ctx, q, args...)
+		if err != nil {
+			return fmt.Errorf("failed to query health events batch at offset %d: %w", offset, err)
+		}
+
+		if len(batch) == 0 {
+			break
+		}
+
+		if err := fn(batch); err != nil {
+			return err
+		}
+
+		if len(batch) < batchSize {
+			break
+		}
+	}
+
+	return nil
 }
 
 // queryHealthEventsWithID executes a query that returns (id, document) rows

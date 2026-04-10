@@ -148,7 +148,7 @@ func TestHealthEventStoreInterfaceCompliance(t *testing.T) {
 			"UpdateSpanID",
 			"CheckIfNodeAlreadyDrained",
 			"FindLatestEventForNode",
-			"FindLatestHealthEventPerNodeByQuery",
+			"FindHealthEventsByQueryBatched",
 		}
 
 		for _, methodName := range expectedMethods {

@@ -34,6 +34,7 @@ import (
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
 	"github.com/nvidia/nvsentinel/node-drainer/pkg/initializer"
 	"github.com/nvidia/nvsentinel/store-client/pkg/client"
+	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 	"github.com/nvidia/nvsentinel/store-client/pkg/query"
 	"github.com/nvidia/nvsentinel/store-client/pkg/utils"
 )
@@ -258,11 +259,14 @@ func startEventWatcher(ctx context.Context, components *initializer.Components, 
 	}()
 }
 
+const coldStartBatchSize = 1000
+
 // handleColdStart re-processes events that were in-progress or quarantined during a restart.
-// Uses FindLatestHealthEventPerNodeByQuery to return at most one event per node,
-// which bounds memory usage to O(nodes) instead of O(total events).
+// Events are fetched in bounded batches via FindHealthEventsByQueryBatched to prevent
+// unbounded memory usage. All matching events are loaded (not just latest per node)
+// because a single node can have multiple concurrent partial drains.
 func handleColdStart(ctx context.Context, components *initializer.Components) error {
-	slog.Info("Querying for latest event per node requiring processing")
+	slog.Info("Querying for events requiring processing")
 
 	q := query.New().Build(
 		query.Or(
@@ -284,57 +288,59 @@ func handleColdStart(ctx context.Context, components *initializer.Components) er
 	)
 
 	healthStore := components.DataStore.HealthEventStore()
-
-	healthEvents, err := healthStore.FindLatestHealthEventPerNodeByQuery(ctx, q)
-	if err != nil {
-		return fmt.Errorf("failed to query events for cold start: %w", err)
-	}
-
-	slog.Info("Found events to re-process", "count", len(healthEvents))
-
 	dbAdapter := &dataStoreAdapter{DatabaseClient: components.DatabaseClient}
 
-	for _, he := range healthEvents {
-		event := he.RawEvent
-		if len(event) == 0 {
-			slog.Error("RawEvent is empty, skipping cold start event")
+	err := healthStore.FindHealthEventsByQueryBatched(ctx, q, coldStartBatchSize,
+		func(batch []datastore.HealthEventWithStatus) error {
+			slog.Info("Processing cold start batch", "count", len(batch))
 
-			continue
-		}
+			for _, he := range batch {
+				event := he.RawEvent
+				if len(event) == 0 {
+					slog.Error("RawEvent is empty, skipping cold start event")
 
-		parsedEvent, err := eventutil.ParseHealthEventFromEvent(event)
-		if err != nil {
-			slog.Error("Failed to parse health event from cold start event", "error", err)
+					continue
+				}
 
-			continue
-		}
+				parsedEvent, err := eventutil.ParseHealthEventFromEvent(event)
+				if err != nil {
+					slog.Error("Failed to parse health event from cold start event", "error", err)
 
-		if parsedEvent.HealthEvent == nil {
-			slog.Error("Health event is nil in cold start event")
+					continue
+				}
 
-			continue
-		}
+				if parsedEvent.HealthEvent == nil {
+					slog.Error("Health event is nil in cold start event")
 
-		nodeName := parsedEvent.HealthEvent.GetNodeName()
-		if nodeName == "" {
-			slog.Error("Node name is empty in cold start event")
+					continue
+				}
 
-			continue
-		}
+				nodeName := parsedEvent.HealthEvent.GetNodeName()
+				if nodeName == "" {
+					slog.Error("Node name is empty in cold start event")
 
-		documentID, err := utils.ExtractDocumentIDNative(event)
-		if err != nil {
-			slog.Error("Failed to extract document ID from cold start event", "error", err)
-			continue
-		}
+					continue
+				}
 
-		err = components.QueueManager.EnqueueEventGeneric(
-			ctx, nodeName, event, dbAdapter, healthStore, documentID)
-		if err != nil {
-			slog.Error("Failed to enqueue cold start event", "error", err, "nodeName", nodeName)
-		} else {
-			slog.Info("Re-queued event from cold start", "nodeName", nodeName)
-		}
+				documentID, err := utils.ExtractDocumentIDNative(event)
+				if err != nil {
+					slog.Error("Failed to extract document ID from cold start event", "error", err)
+
+					continue
+				}
+
+				if enqueueErr := components.QueueManager.EnqueueEventGeneric(
+					ctx, nodeName, event, dbAdapter, healthStore, documentID); enqueueErr != nil {
+					slog.Error("Failed to enqueue cold start event", "error", enqueueErr, "nodeName", nodeName)
+				} else {
+					slog.Info("Re-queued event from cold start", "nodeName", nodeName)
+				}
+			}
+
+			return nil
+		})
+	if err != nil {
+		return fmt.Errorf("failed to process cold start events: %w", err)
 	}
 
 	slog.Info("Cold start processing completed")
