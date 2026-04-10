@@ -553,7 +553,7 @@ func (r *FaultRemediationReconciler) parseHealthEvent(eventWithToken datastore.E
 
 		_ = safeMarkProcessed(context.Background(), watcherInstance, eventWithToken.ResumeToken, "unknown")
 
-		return result, fmt.Errorf("error updating resume token: %w", err)
+		return result, fmt.Errorf("error parsing health event: %w", err)
 	}
 
 	// Extract document ID and wrap into HealthEventDoc
