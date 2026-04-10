@@ -266,11 +266,8 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 		return ctrl.Result{}, fmt.Errorf("failed to clear remediation state for node: %w", err)
 	}
 
-	if err := watcherInstance.MarkProcessed(context.Background(), resumeToken); err != nil {
-		metrics.ProcessingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
-		slog.Error("Error updating resume token", "error", err)
-
-		return ctrl.Result{}, fmt.Errorf("failed to mark event as processed: %w", err)
+	if err := safeMarkProcessed(context.Background(), watcherInstance, resumeToken, nodeName); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -341,11 +338,8 @@ func (r *FaultRemediationReconciler) trySkipEvent(
 		return ctrl.Result{}, nil, false
 	}
 
-	if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
-		metrics.ProcessingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
-		slog.Error("Error updating resume token", "error", err)
-
-		return ctrl.Result{}, fmt.Errorf("error updating resume token: %w", err), true
+	if err := safeMarkProcessed(ctx, watcherInstance, eventWithToken.ResumeToken, nodeName); err != nil {
+		return ctrl.Result{}, err, true
 	}
 
 	return ctrl.Result{}, nil, true
@@ -364,11 +358,8 @@ func (r *FaultRemediationReconciler) handleExistingCRSkip(
 
 	metrics.EventsProcessed.WithLabelValues(metrics.CRStatusSkipped, nodeName).Inc()
 
-	if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
-		metrics.ProcessingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
-		slog.Error("Error updating resume token", "error", err)
-
-		return ctrl.Result{}, fmt.Errorf("error updating resume token: %w", err)
+	if err := safeMarkProcessed(ctx, watcherInstance, eventWithToken.ResumeToken, nodeName); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -412,6 +403,26 @@ func (r *FaultRemediationReconciler) runLogCollectorAndRemediate(
 	return ctrl.Result{}, nil
 }
 
+// safeMarkProcessed advances the resume token for live stream events.
+// Cold-start events carry an empty ResumeToken; calling MarkProcessed
+// with an empty token would incorrectly advance the checkpoint to the
+// current change-stream cursor position, potentially skipping live
+// events that haven't been processed yet.
+func safeMarkProcessed(ctx context.Context, w datastore.ChangeStreamWatcher, token []byte, node string) error {
+	if len(token) == 0 {
+		return nil
+	}
+
+	if err := w.MarkProcessed(ctx, token); err != nil {
+		metrics.ProcessingErrors.WithLabelValues("mark_processed_error", node).Inc()
+		slog.Error("Error updating resume token", "error", err)
+
+		return fmt.Errorf("failed to mark event as processed: %w", err)
+	}
+
+	return nil
+}
+
 // markProcessedOrError marks the event processed and returns (Result{}, nil) or (zero, err).
 func (r *FaultRemediationReconciler) markProcessedOrError(
 	ctx context.Context,
@@ -419,11 +430,8 @@ func (r *FaultRemediationReconciler) markProcessedOrError(
 	eventWithToken datastore.EventWithToken,
 	nodeName string,
 ) (ctrl.Result, error) {
-	if err := watcherInstance.MarkProcessed(ctx, eventWithToken.ResumeToken); err != nil {
-		metrics.ProcessingErrors.WithLabelValues("mark_processed_error", nodeName).Inc()
-		slog.Error("Error updating resume token", "error", err)
-
-		return ctrl.Result{}, fmt.Errorf("error updating resume token: %w", err)
+	if err := safeMarkProcessed(ctx, watcherInstance, eventWithToken.ResumeToken, nodeName); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -543,10 +551,7 @@ func (r *FaultRemediationReconciler) parseHealthEvent(eventWithToken datastore.E
 		metrics.ProcessingErrors.WithLabelValues(errorLabel, "unknown").Inc()
 		slog.Error("Error parsing health event", "error", err)
 
-		if markErr := watcherInstance.MarkProcessed(context.Background(), eventWithToken.ResumeToken); markErr != nil {
-			metrics.ProcessingErrors.WithLabelValues("mark_processed_error", "unknown").Inc()
-			slog.Error("Error updating resume token", "error", markErr)
-		}
+		_ = safeMarkProcessed(context.Background(), watcherInstance, eventWithToken.ResumeToken, "unknown")
 
 		return result, fmt.Errorf("error updating resume token: %w", err)
 	}
@@ -557,10 +562,7 @@ func (r *FaultRemediationReconciler) parseHealthEvent(eventWithToken datastore.E
 		metrics.ProcessingErrors.WithLabelValues("extract_id_error", "unknown").Inc()
 		slog.Error("Error extracting document ID", "error", err)
 
-		if markErr := watcherInstance.MarkProcessed(context.Background(), eventWithToken.ResumeToken); markErr != nil {
-			metrics.ProcessingErrors.WithLabelValues("mark_processed_error", "unknown").Inc()
-			slog.Error("Error updating resume token", "error", markErr)
-		}
+		_ = safeMarkProcessed(context.Background(), watcherInstance, eventWithToken.ResumeToken, "unknown")
 
 		return result, fmt.Errorf("error extracting document ID: %w", err)
 	}
