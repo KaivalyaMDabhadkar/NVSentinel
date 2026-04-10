@@ -643,7 +643,7 @@ func (r *FaultRemediationReconciler) HandleColdStart(ctx context.Context) {
 					[]interface{}{string(model.Quarantined), string(model.AlreadyQuarantined)}),
 				query.In("healtheventstatus.userpodsevictionstatus.status",
 					[]interface{}{string(model.StatusSucceeded), string(model.AlreadyDrained)}),
-				query.Eq("healtheventstatus.faultRemediated", nil),
+				query.Eq("healtheventstatus.faultremediated", nil),
 			),
 			// Cancelled/unquarantined events (need cleanup)
 			query.In("healtheventstatus.nodequarantined",
