@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
@@ -37,6 +38,19 @@ type PostgreSQLHealthEventStore struct {
 // NewPostgreSQLHealthEventStore creates a new PostgreSQL health event store
 func NewPostgreSQLHealthEventStore(db *sql.DB) *PostgreSQLHealthEventStore {
 	return &PostgreSQLHealthEventStore{db: db}
+}
+
+// timestampToTime converts a protobuf Timestamp to *time.Time for use as a
+// database/sql parameter. database/sql cannot serialize timestamppb.Timestamp
+// directly (it doesn't implement driver.Valuer).
+func timestampToTime(t *timestamppb.Timestamp) *time.Time {
+	if t == nil {
+		return nil
+	}
+
+	goTime := t.AsTime().UTC()
+
+	return &goTime
 }
 
 // formatTimestampAsProtobufJSON serializes t as the JSON object that encoding/json
@@ -309,12 +323,12 @@ func (p *PostgreSQLHealthEventStore) UpdateHealthEventStatus(
 		`
 		params = []interface{}{
 			statusStr,
-			status.QuarantineFinishTimestamp,
+			timestampToTime(status.QuarantineFinishTimestamp),
 			string(status.UserPodsEvictionStatus.Status),
 			status.UserPodsEvictionStatus.Message,
-			status.DrainFinishTimestamp,
+			timestampToTime(status.DrainFinishTimestamp),
 			status.FaultRemediated,
-			status.LastRemediationTimestamp,
+			timestampToTime(status.LastRemediationTimestamp),
 			id,
 			lastRemediationJSON,
 		}
@@ -351,12 +365,12 @@ func (p *PostgreSQLHealthEventStore) UpdateHealthEventStatus(
 			WHERE id = $7::uuid
 		`
 		params = []interface{}{
-			status.QuarantineFinishTimestamp,
+			timestampToTime(status.QuarantineFinishTimestamp),
 			string(status.UserPodsEvictionStatus.Status),
 			status.UserPodsEvictionStatus.Message,
-			status.DrainFinishTimestamp,
+			timestampToTime(status.DrainFinishTimestamp),
 			status.FaultRemediated,
-			status.LastRemediationTimestamp,
+			timestampToTime(status.LastRemediationTimestamp),
 			id,
 			lastRemediationJSON,
 		}
@@ -383,7 +397,7 @@ func (p *PostgreSQLHealthEventStore) UpdateHealthEventStatus(
 		`
 		params = []interface{}{
 			status.FaultRemediated,
-			status.LastRemediationTimestamp,
+			timestampToTime(status.LastRemediationTimestamp),
 			lastRemediationJSON,
 			id,
 		}
