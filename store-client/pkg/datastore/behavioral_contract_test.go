@@ -137,8 +137,8 @@ func (m *MockHealthEventStore) FindHealthEventsByQueryBatched(ctx context.Contex
 	return args.Error(0)
 }
 
-func (m *MockHealthEventStore) UpdateNodeQuarantineStatus(ctx context.Context, eventID string, status datastore.Status) error {
-	args := m.Called(ctx, eventID, status)
+func (m *MockHealthEventStore) UpdateNodeQuarantineStatus(ctx context.Context, eventID string, status datastore.Status, spanID string) error {
+	args := m.Called(ctx, eventID, status, spanID)
 	return args.Error(0)
 }
 

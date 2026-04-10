@@ -23,7 +23,7 @@ Preflight runs as a Deployment with a mutating admission webhook:
 
 1. **Namespace opt-in**: Label namespaces with `nvsentinel.nvidia.com/preflight=enabled`
 2. **Pod admission**: When a GPU pod is created in a labeled namespace, the webhook intercepts the request. Optionally, an `objectSelector` can further restrict which pods are intercepted based on pod labels
-3. **Init container injection**: The webhook prepends diagnostic init containers to the pod spec
+3. **Init container injection**: The webhook injects diagnostic init containers into the pod spec (appended after existing init containers by default; set `initContainerPlacement: prepend` to insert before)
 4. **Checks run**: Init containers execute sequentially before the main workload starts
 5. **Health reporting**: Each check reports results as health events via the Platform Connector (gRPC over Unix domain socket)
 6. **Pass/fail**: If all checks pass (exit code 0), the main containers start normally. If any check fails, the pod stays in `Init:Error` and a health event triggers quarantine
@@ -62,8 +62,7 @@ Key configuration areas:
 
 | Area | Description |
 |------|-------------|
-| `preflight.initContainers` | Which checks to inject, their images, env vars, and resource limits |
-| `preflight.dcgm` | DCGM hostengine endpoint, diagnostic level, processing strategy |
+| `preflight.initContainers` | Which checks to inject, their images, env vars, and resource limits. DCGM config (`DCGM_HOSTENGINE_ADDR`, `DCGM_DIAG_LEVEL`) is defined as env vars on the `preflight-dcgm-diag` container |
 | `preflight.gangDiscovery` | Scheduler-specific gang identification (Volcano, Run:ai, native K8s) |
 | `preflight.gangCoordination` | Multi-node coordination timeouts, NCCL topology, extra mounts |
 | `preflight.webhook` | TLS, failure policy, cert provider |
@@ -76,4 +75,5 @@ For detailed configuration including per-check env vars, fabric-specific NCCL se
 
 - [Preflight configuration guide](./configuration/preflight.md) — full Helm values reference
 - [ADR-026: Preflight checks](./designs/026-preflight-checks.md) — architecture and design rationale
+- [ADR-035: Inline DCGM config](./designs/035-preflight-inline-dcgm-config.md) — design rationale for inline env var configuration
 - [GPU Health Monitor](./gpu-health-monitor.md) — continuous runtime GPU monitoring (complementary to preflight)

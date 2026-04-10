@@ -8,7 +8,7 @@ For architecture, tradeoffs, and metrics design, see [ADR-026: Preflight checks]
 
 - Helm subchart is off by default; enable with `global.preflight.enabled` (see below).
 - cert-manager (or OpenShift service CA) for webhook TLS—same expectation as the rest of the NVSentinel chart.
-- DCGM reachable from injected init containers (typically the NVIDIA GPU Operator's DCGM / hostengine service). The chart shares DCGM settings with the GPU health monitor where applicable (`global.dcgm`).
+- DCGM reachable from injected init containers (typically the NVIDIA GPU Operator's DCGM / hostengine service). Configure the endpoint via `DCGM_HOSTENGINE_ADDR` on the `preflight-dcgm-diag` init container.
 - Multi-node / gang checks (e.g. `preflight-nccl-allreduce`): enable gang coordination and configure gang discovery for your scheduler (see below).
 
 ## Enable preflight
@@ -21,7 +21,7 @@ global:
     enabled: true
 ```
 
-2. Configure the preflight subchart under the top-level `preflight:` key (values merge into `distros/kubernetes/nvsentinel/charts/preflight/values.yaml`). At minimum, review `initContainers`, `webhook.failurePolicy`, and DCGM connectivity.
+2. Configure the preflight subchart under the top-level `preflight:` key (values merge into `distros/kubernetes/nvsentinel/charts/preflight/values.yaml`). At minimum, review `initContainers` (including DCGM and NCCL env vars) and `webhook.failurePolicy`.
 
 3. Label namespaces where injection should apply:
 
@@ -30,6 +30,42 @@ kubectl label namespace <namespace> nvsentinel.nvidia.com/preflight=enabled
 ```
 
 The chart default `namespaceSelector` matches that label.
+
+## Init container placement
+
+By default the webhook **appends** preflight init containers after any existing init containers in the pod spec. This ensures provider-injected setup containers (e.g., GCP TCPXO daemon) complete before preflight checks run.
+
+Set `initContainerPlacement` to change this behavior:
+
+```yaml
+# "append" (default): add after existing init containers
+# "prepend": add before existing init containers
+initContainerPlacement: "prepend"
+```
+
+Use `prepend` when preflight checks must run before other init containers — for example, to gate workload setup on GPU health validation.
+
+## Per-pod check selection
+
+By default, all init containers with `defaultEnabled: true` (or omitted, which defaults to true) are injected into every GPU pod. To select a subset of checks for a specific pod, annotate it:
+
+```yaml
+metadata:
+  annotations:
+    nvsentinel.nvidia.com/preflight-checks: "preflight-dcgm-diag,preflight-nccl-loopback"
+```
+
+Only the named containers are injected, in the order they appear in the annotation. Duplicate or unknown container names reject admission with an error.
+
+An empty value disables all checks:
+
+```yaml
+nvsentinel.nvidia.com/preflight-checks: ""
+```
+
+When the annotation is absent, `defaultEnabled` on each init container controls whether it runs. For gang-aware checks (`nccl-allreduce`), all pods in the gang must have the same annotation value — mismatches are detected and fail fast before torchrun launches.
+
+See [ADR-034](../designs/034-preflight-check-selection.md) for design details.
 
 ## Init containers (check configuration)
 
@@ -40,8 +76,8 @@ The webhook automatically injects these env vars into every init container (you 
 | Env var | Source | Purpose |
 |---------|--------|---------|
 | `NODE_NAME` | Downward API (`spec.nodeName`) | Kubernetes node name for health events |
-| `PLATFORM_CONNECTOR_SOCKET` | Chart `dcgm.connectorSocket` | Unix socket for the platform-connector gRPC endpoint |
-| `PROCESSING_STRATEGY` | Chart `dcgm.processingStrategy` | `EXECUTE_REMEDIATION` or `STORE_ONLY` — controls downstream action |
+| `PLATFORM_CONNECTOR_SOCKET` | Chart `connectorSocket` | Unix socket for the platform-connector gRPC endpoint |
+| `PROCESSING_STRATEGY` | Chart `processingStrategy` | `EXECUTE_REMEDIATION` or `STORE_ONLY` — controls downstream action |
 
 For gang-aware containers the webhook also injects `GANG_ID`, `GANG_CONFIG_DIR`, `GANG_TIMEOUT_SECONDS`, and `POD_NAME`.
 
@@ -49,22 +85,27 @@ For gang-aware containers the webhook also injects `GANG_ID`, `GANG_CONFIG_DIR`,
 
 Runs DCGM diagnostics against every GPU allocated to the pod via the remote hostengine.
 
-The webhook auto-injects `DCGM_DIAG_LEVEL` and `DCGM_HOSTENGINE_ADDR` from the chart-level `dcgm` block. Override per-container if needed.
-
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `DCGM_DIAG_LEVEL` | `2` (from chart `dcgm.diagLevel`) | Diagnostic depth: 1 = short (approx 30 s, software deployment checks), 2 = medium (approx 2 min, adds PCIe and basic GPU stress), 3 = long (approx 15 min, adds Diagnostic plugin stress), 4 = xlong (1-2 hr, extended stress) |
+| `DCGM_DIAG_LEVEL` | `2` | Diagnostic depth: 1 = short (approx 30 s, software deployment checks), 2 = medium (approx 2 min, adds PCIe and basic GPU stress), 3 = long (approx 15 min, adds Diagnostic plugin stress), 4 = xlong (1-2 hr, extended stress) |
 | `DCGM_HOSTENGINE_ADDR` | `nvidia-dcgm.gpu-operator.svc:5555` | DCGM hostengine gRPC endpoint |
 
-Chart-level DCGM settings (apply to dcgm-diag):
+Example values override:
 
 ```yaml
-dcgm:
-  service:
-    endpoint: "nvidia-dcgm.gpu-operator.svc"
-    port: 5555
-  diagLevel: 2
-  processingStrategy: "EXECUTE_REMEDIATION"
+initContainers:
+  - name: preflight-dcgm-diag
+    image:
+      repository: ghcr.io/nvidia/nvsentinel/preflight-dcgm-diag
+      tag: ""
+    env:
+      - name: DCGM_HOSTENGINE_ADDR
+        value: "nvidia-dcgm.gpu-operator.svc:5555"
+      - name: DCGM_DIAG_LEVEL
+        value: "2"
+    volumeMounts:
+      - name: nvsentinel-socket
+        mountPath: /var/run
 ```
 
 ### preflight-nccl-loopback
@@ -259,6 +300,7 @@ For DRA / device claims mirrored into init containers, see [ADR-026 §DRA Integr
 | Area | Location |
 |------|-----------|
 | Webhook TLS, failure policy, cert provider | `preflight.webhook` |
+| Init container placement (append/prepend) | `preflight.initContainerPlacement` |
 | Injected init container images and env | `preflight.initContainers` |
 | GPU / network resource names | `preflight.gpuResourceNames`, `preflight.networkResourceNames` |
 | Copy NCCL / fabric env and mounts from user containers | `preflight.ncclEnvPatterns`, `preflight.volumeMountPatterns` |
@@ -303,6 +345,7 @@ Tilt development often trims init containers to DCGM-only; see `distros/kubernet
 ## Related documentation
 
 - [ADR-026: Preflight checks](../designs/026-preflight-checks.md)
+- [ADR-035: Inline DCGM config](../designs/035-preflight-inline-dcgm-config.md) — design rationale for inline env var configuration
 - [gRPC / TLS authentication](../designs/030-grpc-tls-authentication.md) (mentions preflight among webhooks)
 - [Helm chart README](../../distros/kubernetes/README.md)
 - E2E test entry point: `tests/preflight_test.go` (build tag `amd64_group`)
