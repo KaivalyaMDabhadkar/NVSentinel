@@ -880,7 +880,7 @@ func (p *PostgreSQLHealthEventStore) FindHealthEventsByQueryBatched(ctx context.
 	for offset := 0; ; offset += batchSize {
 		//nolint:gosec // G202 false positive - batchSize/offset are integers, not user input
 		q := fmt.Sprintf(
-			"SELECT id, document FROM health_events WHERE %s ORDER BY created_at DESC, id DESC LIMIT %d OFFSET %d",
+			"SELECT id, document FROM health_events WHERE %s ORDER BY id LIMIT %d OFFSET %d",
 			whereClause, batchSize, offset)
 
 		batch, err := p.queryHealthEventsWithID(ctx, q, args...)
