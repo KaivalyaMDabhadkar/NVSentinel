@@ -10,7 +10,7 @@
 4. [Management NIC Exclusion, NIC Role Classification, and Uncabled Port Detection](#4-management-nic-exclusion-and-uncabled-port-detection)
 5. [Device Discovery and Parsing](#5-device-discovery-and-parsing)
 6. [State Change and Flap Detection](#6-state-change-and-flap-detection)
-7. [PCI Configuration Space Health Check](#7-pci-configuration-space-health-check)
+7. [Device Disappearance Handling](#7-device-disappearance-handling)
 8. [SR-IOV Virtual Function Handling](#8-sr-iov-virtual-function-handling)
 9. [RoCE State Monitoring](#9-roce-state-monitoring)
 10. [Supported Hardware](#10-supported-hardware)
@@ -314,11 +314,25 @@ cat /sys/class/infiniband/mlx5_0/ports/1/phys_state
 
 ## 4. Management NIC Exclusion and Uncabled Port Detection
 
-This section describes three zero-configuration mechanisms that replace the previous `gpu_port_config` / `AtLeastPorts` / `AtLeastRate` approach. These mechanisms require no per-GPU-type configuration and work automatically across DGX, HGX, OEM servers, and cloud VMs.
+This section describes three zero-configuration mechanisms that replace the previous `gpu_port_config` / `AtLeastPorts` / `AtLeastRate` approach. These mechanisms require no per-GPU-type configuration and work automatically across DGX, HGX, Grace-based superchips (GB200/GH200), OEM servers, and cloud VMs.
 
 - **Section 4.1**: NUMA-based management NIC exclusion (exclude NICs on non-GPU NUMA nodes)
-- **Section 4.2**: PCIe tree walk classification (distinguish compute NICs from storage NICs)
+- **Section 4.2**: Topo-based NIC role classification (distinguish compute NICs from storage NICs)
 - **Section 4.3**: Role-based card homogeneity (detect uncabled ports and failures within each role group)
+
+The classification of each NIC uses a **two-level decision**:
+
+1. **Level 1 — Management gate (NUMA locality, Section 4.1)**: Is the NIC on a CPU socket that hosts GPUs? If not, exclude it.
+2. **Level 2 — Compute vs Storage (topo matrix, Section 4.2)**: For NICs that pass Level 1, consult the `nvidia-smi topo -m` GPU↔NIC relationship to determine if the NIC is part of the compute fabric (shares a PCIe switch with a GPU) or a storage/general NIC.
+
+These two levels answer **different questions** with **complementary signals**:
+
+- NUMA locality is independent of PCIe. It works on x86 (where NVIDIA conventionally places management NICs on non-GPU sockets) and on Grace (where GPU NUMA reporting is still available via the kernel, even though GPUs connect via NVLink-C2C rather than PCIe).
+- The topo matrix is the authoritative source of PCIe proximity between GPUs and NICs, maintained by the NVIDIA driver. It cleanly distinguishes Compute (PIX/PXB) from Storage (NODE/PHB) on platforms where GPUs and NICs are both on PCIe.
+
+When Level 2 cannot find a PIX/PXB or NODE/PHB relationship — as happens on Grace/GB200 where GPUs aren't on PCIe at all and every NIC↔GPU cell shows SYS — the NIC falls through to **Storage** (the safe default: monitored). This preserves monitoring coverage on platforms where the PCIe-proximity signal does not apply.
+
+> **Hard dependency on metadata**: Both levels require GPU and NIC topology data published by the metadata collector (`/var/lib/nvsentinel/gpu_metadata.json`). The NIC Health Monitor **fails to start** if this file is missing, unreadable, or missing the required fields. There is no silent-fallback mode. See [Section 12.1](#121-state-monitoring-configuration).
 
 ### 4.1 Management NIC Exclusion (NUMA-Based)
 
@@ -330,71 +344,104 @@ DGX systems (e.g., DGX A100) have Mellanox ConnectX management NICs that appear 
 
 Management NICs on DGX systems are placed on CPU sockets that have **no compute GPUs**. The monitor exploits this by checking whether each NIC's NUMA node has a compute GPU on it:
 
-1. Read compute GPU PCI addresses from `/var/lib/nvsentinel/gpu_metadata.json` (provided by the metadata collector)
-2. For each GPU PCI address, read `/sys/bus/pci/devices/<pci>/numa_node` → build `gpu_numa_set`
-3. For each `mlx5_*` NIC, read `/sys/class/infiniband/<dev>/device/numa_node`
-4. If `nic_numa ∉ gpu_numa_set` → **exclude** (management NIC on separate socket)
+1. Read the `gpu_numa_set` field (pre-computed set of NUMA nodes that host at least one compute GPU) from `/var/lib/nvsentinel/gpu_metadata.json` (provided by the metadata collector)
+2. For each `mlx5_*` NIC discovered in `/sys/class/infiniband/`, read `/sys/class/infiniband/<dev>/device/numa_node`
+3. If `nic_numa ∉ gpu_numa_set` → **exclude** (management NIC on separate socket)
 
-**Fallback**: If the metadata file is unavailable, the NUMA filter is skipped and all `mlx5_*` PF NICs are monitored. A warning is logged.
+**Hard requirement**: If `gpu_metadata.json` is unavailable, unreadable, or missing the `gpu_numa_set` field, the NIC Health Monitor fails to start with a clear error. The previous "skip the NUMA filter and monitor everything" behavior has been removed — silent over-monitoring would cause incorrect REPLACE_VM remediations on management NIC failures.
 
-**Edge case**: If `numa_node = -1` (unknown, common in VMs), the NIC is **included** (safe direction — over-monitor rather than miss a failure).
+**Edge case**: If `numa_node = -1` (unknown, common in VMs), the NIC is **included** (safe direction — over-monitor rather than miss a failure). This matches the current production behavior.
 
 #### 4.1.3 Field Validation
 
-| Cluster                  | Management NICs                                                           | NUMA Check Result | Correct? |
-|--------------------------|---------------------------------------------------------------------------|-------------------|----------|
-| **A100 RoCE** (4-socket) | `mlx5_0` (NUMA 0), `mlx5_13` (NUMA 6) — no compute GPU on those NUMAs     | Excluded          | Yes      |
-| **L40** (2-socket)       | None visible (BMC is non-Mellanox, invisible in `/sys/class/infiniband/`) | Nothing excluded  | Yes      |
-| **H100 DGX** (2-socket)  | Storage/mgmt NICs share NUMA with GPUs — correctly kept for monitoring    | All monitored     | Yes      |
+| Cluster                          | Management NICs                                                                  | NUMA Check Result | Correct? |
+|----------------------------------|----------------------------------------------------------------------------------|-------------------|----------|
+| **A100 OCI RoCE** (4-socket AMD) | `mlx5_0` (NUMA 0), `mlx5_13` (NUMA 6) — no compute GPU on those NUMAs            | Excluded          | Yes      |
+| **L40 on-prem** (2-socket)       | None visible (BMC is non-Mellanox, invisible in `/sys/class/infiniband/`)        | Nothing excluded  | Yes      |
+| **L40S OCI** (2-socket Intel)    | None (all 6 Mellanox PFs share NUMA with GPUs)                                   | All monitored     | Yes      |
+| **H100 DGX** (2-socket)          | Storage/mgmt NICs share NUMA with GPUs — correctly kept for monitoring           | All monitored     | Yes      |
+| **H100 OCI** (2-socket Intel)    | None (all 18 Mellanox PFs share NUMA with GPUs)                                  | All monitored     | Yes      |
+| **GB200 NVL4** (Grace 2-socket)  | None (all 6 Mellanox PFs share NUMA with GPUs; management handled in Section 4.2 fallback) | All monitored     | Yes      |
 
 > **Design Note**: Storage NICs (e.g., H100 Slot1/Slot2 ConnectX-7 cards) share a NUMA node with compute GPUs. They are intentionally **not excluded** because storage NIC failures also impact workloads (I/O hangs, checkpoint failures). The NUMA check only excludes NICs on NUMA nodes with **zero** compute GPUs.
 
-### 4.2 NIC Role Classification (PCIe Tree Walk)
+### 4.2 NIC Role Classification (Topo Matrix)
 
 #### 4.2.1 The Problem
 
 DGX/HGX systems have both **compute fabric NICs** (OSFP ports on the GPU tray) and **storage NICs** (Slot1/Slot2 on the CPU motherboard). These are the same hardware (ConnectX-7) but serve different roles, may have different port counts, and run at different speeds. The card homogeneity check (Section 4.3) must compare NICs of the same role — compute against compute, storage against storage — to avoid false positives.
 
-#### 4.2.2 Detection Mechanism: Shared PCIe Switch Ancestor
+#### 4.2.2 Detection Mechanism: `nvidia-smi topo -m` Matrix Lookup
 
-Compute NICs share a **PCIe switch** with their paired GPU (PXB/PIX in `nvidia-smi topo`). Storage NICs do not — they connect through the CPU root port only (NODE in `nvidia-smi topo`). This topological difference is detectable from sysfs by comparing the real device paths:
+The metadata collector runs `nvidia-smi topo -m` on the node at startup, parses the GPU↔NIC relationship matrix, and publishes per-NIC role assignments to `/var/lib/nvsentinel/gpu_metadata.json` under the `nic_roles` field. The NIC Health Monitor reads this map at startup and uses it directly — no sysfs path walking, no PCIe-depth heuristics.
 
-1. Resolve GPU real path: `/sys/bus/pci/devices/<gpu_pci>` → e.g., `/sys/devices/pci0000:07/.../0000:0f:00.0`
-2. Resolve NIC real path: `/sys/class/infiniband/<dev>/device` → e.g., `/sys/devices/pci0000:07/.../0000:0c:00.0`
-3. Find the **longest common path prefix** (number of matching `/`-delimited components)
-4. If common depth > 4 → NIC shares a PCIe switch with a GPU → **Compute**
-5. If common depth ≤ 4 → NIC only shares the PCI domain root → **Storage**
+The mapping from NVIDIA topology levels (the `nvmlGpuTopologyLevel_t` enum, displayed as `nvidia-smi topo -m` abbreviations) to NIC roles is:
 
-The threshold of 4 corresponds to the PCI host bridge level: `["", "sys", "devices", "pciXXXX:XX"]`. Anything deeper means the NIC and GPU share at least one PCIe switch or root port.
+| NVML topology level     | `nvidia-smi topo` | Meaning                                          | NIC Role                                                                                   |
+|-------------------------|-------------------|--------------------------------------------------|--------------------------------------------------------------------------------------------|
+| `TOPOLOGY_SINGLE`       | **PIX**           | Single PCIe bridge between NIC and GPU           | **Compute** (shares a PCIe switch with a GPU — standard compute fabric NIC on DGX/HGX)     |
+| `TOPOLOGY_MULTIPLE`     | **PXB**           | Multiple PCIe bridges between NIC and GPU        | **Compute** (still within a shared PCIe switch hierarchy)                                  |
+| `TOPOLOGY_HOSTBRIDGE`   | **PHB**           | Shared PCIe host bridge (CPU root complex)       | **Storage** (same host bridge but no switch — behaves like NODE for compute fabric intent) |
+| `TOPOLOGY_NODE`         | **NODE**          | Same NUMA node, different PCIe host bridges      | **Storage** (on same CPU socket but no PCIe proximity — typical storage NIC layout)        |
+| `TOPOLOGY_SYSTEM`       | **SYS**           | Cross-NUMA (SMP interconnect like QPI/UPI)       | Falls through to NUMA-based classification (see Level 1 gate and fallback below)           |
+
+**Precedence when multiple relationships exist** (one NIC may have different relationships to different GPUs, e.g., PXB to GPU0 and SYS to GPU4):
+
+1. If any GPU has **PIX or PXB** to this NIC → **Compute**
+2. Else if any GPU has **NODE or PHB** to this NIC → **Storage**
+3. Else (all relationships are SYS) → **Fall through to Level 1 + default**:
+   - If NIC NUMA ∈ GPU NUMA set (the Level 1 gate passes) → **Storage** (safe default: monitored as a general attached NIC)
+   - Else → **Management** (excluded)
+
+The SYS fallback is important: it handles platforms like Grace/GB200 where GPUs are not on PCIe at all (they connect via NVLink-C2C), so **every** NIC↔GPU cell in the topo matrix is SYS. On such platforms, NUMA locality alone distinguishes monitored NICs (Storage) from truly detached NICs (Management).
 
 #### 4.2.3 Three-Tier Classification
 
-Combined with the NUMA check (Section 4.1), the monitor classifies each NIC into one of three roles:
+Combined with the NUMA gate from Section 4.1, the monitor assigns each NIC to one of three roles:
 
-| Role           | Detection                                                          | Monitoring Behavior                                            |
-|----------------|--------------------------------------------------------------------|----------------------------------------------------------------|
-| **Management** | NIC NUMA has no compute GPU                                        | Excluded from monitoring entirely                              |
-| **Compute**    | NIC shares PCIe switch ancestor with a GPU (common path depth > 4) | Monitored; compared against other compute NICs for homogeneity |
-| **Storage**    | NIC on GPU NUMA but no shared PCIe switch (common path depth ≤ 4)  | Monitored; compared against other storage NICs for homogeneity |
+| Role           | Detection                                                                                          | Monitoring Behavior                                            |
+|----------------|----------------------------------------------------------------------------------------------------|----------------------------------------------------------------|
+| **Management** | NIC NUMA has no compute GPU **or** all topo relationships are SYS and NIC NUMA is not a GPU NUMA   | Excluded from monitoring entirely                              |
+| **Compute**    | Any GPU has PIX or PXB relationship to this NIC                                                    | Monitored; compared against other compute NICs for homogeneity |
+| **Storage**    | Any GPU has NODE or PHB relationship **or** all relationships are SYS with NIC on a GPU NUMA       | Monitored; compared against other storage NICs for homogeneity |
 
-#### 4.2.4 Field Validation (H100 OCI Node)
+#### 4.2.4 Field Validation
 
-Verified against `nvidia-smi topo -m` output on an H100 OCI node with 8 GPUs, 18 PF NICs:
+Verified against real hardware on four distinct platforms. All produce identical classifications to the previous sysfs PCIe path-walk algorithm, confirming no behavioral regression.
 
-| NIC              | PCI Domain       | GPU in Same Domain? | Common Depth | Classification | nvidia-smi topo |
-|------------------|------------------|---------------------|--------------|----------------|-----------------|
-| mlx5_0, mlx5_1   | `pci0000:07`     | GPU0 (0000:0f:00.0) | 6            | **Compute**    | PXB to GPU0     |
-| **mlx5_2**       | **`pci0000:1e`** | **None**            | **3**        | **Storage**    | NODE to GPUs    |
-| mlx5_3, mlx5_4   | `pci0000:25`     | GPU1                | 6            | **Compute**    | PXB to GPU1     |
-| mlx5_5, mlx5_6   | `pci0000:3c`     | GPU2                | 6            | **Compute**    | PXB to GPU2     |
-| mlx5_7, mlx5_8   | `pci0000:53`     | GPU3                | 6            | **Compute**    | PXB to GPU3     |
-| mlx5_9, mlx5_10  | `pci0000:81`     | GPU4                | 6            | **Compute**    | PXB to GPU4     |
-| **mlx5_11**      | **`pci0000:99`** | **None**            | **3**        | **Storage**    | NODE to GPUs    |
-| mlx5_12, mlx5_13 | `pci0000:a0`     | GPU5                | 6            | **Compute**    | PXB to GPU5     |
-| mlx5_14, mlx5_15 | `pci0000:b8`     | GPU6                | 6            | **Compute**    | PXB to GPU6     |
-| mlx5_16, mlx5_17 | `pci0000:d0`     | GPU7                | 6            | **Compute**    | PXB to GPU7     |
+**A100 OCI RoCE (4-socket AMD EPYC, 8 GPUs, 18 PF NICs):**
 
-**18/18 PF NICs correctly classified. Perfect match with `nvidia-smi topo -m`.**
+| NIC Pattern         | Topo relationship      | Classification |
+|---------------------|------------------------|----------------|
+| `mlx5_0` (NUMA 0)   | All SYS, NUMA ∉ GPU set | **Management** |
+| `mlx5_13` (NUMA 6)  | All SYS, NUMA ∉ GPU set | **Management** |
+| `mlx5_1`–`mlx5_12`, `mlx5_14`–`mlx5_17` | PXB to paired GPUs | **Compute** (16 NICs) |
+
+Result: 2 Management + 16 Compute + 0 Storage. 18/18 match current algorithm.
+
+**H100 OCI (2-socket Intel Xeon Platinum 8480+, 8 GPUs, 18 PF NICs):**
+
+| NIC              | Topo relationship             | Classification |
+|------------------|-------------------------------|----------------|
+| `mlx5_2`         | NODE to all GPUs (no PXB)     | **Storage**    |
+| `mlx5_11`        | NODE to all GPUs (no PXB)     | **Storage**    |
+| Other 16         | PXB to one paired GPU         | **Compute**    |
+
+Result: 0 Management + 16 Compute + 2 Storage. Matches documented storage NIC layout on OCI H100.
+
+**L40S OCI (2-socket Intel, 4 PCIe GPUs, 6 PF NICs):**
+
+Every NIC shows NODE to some GPUs and SYS to others; no NIC has any PIX or PXB (L40S is PCIe-attached, not SXM — there are no shared PCIe switches). Level 2 precedence rule 2 applies: any NODE → Storage.
+
+Result: 0 Management + 0 Compute + 6 Storage. All NICs monitored in a single Storage homogeneity group.
+
+**GB200 NVL4 (2-socket Grace Neoverse-V2, 4 GPUs, 6 PF NICs: 4 ConnectX-7 IB + 2 BlueField-3 DPU):**
+
+Every NIC↔GPU cell is SYS (GPUs are on NVLink-C2C, not PCIe — no shared PCIe ancestor exists). All NIC NUMAs are in the GPU NUMA set. Level 2 precedence rule 3 applies: fall through to Level 1, NIC on GPU NUMA → Storage.
+
+Result: 0 Management + 0 Compute + 6 Storage. All NICs monitored in a single Storage homogeneity group. This matches the behavior of the previous sysfs algorithm, which also produced "all Storage" on GB200 due to the lack of shared PCIe ancestry.
+
+> **Future enhancement for Grace/GB200**: A finer-grained classifier that uses HCA type (MT4129 ConnectX-7 → Compute vs MT41692 BlueField-3 DPU → Management) plus link-layer and default-route detection could distinguish compute fabric IB NICs from DPU-attached management NICs on Grace. This is not part of the initial migration because it is not required to preserve current monitoring coverage; it is noted here for possible future work if operational experience shows a need.
 
 ### 4.3 Uncabled Port Detection (Role-Based Card Homogeneity)
 
@@ -871,12 +918,19 @@ SysClassNetPath = /sys/class/net
 SysClassInfinibandPath = /sys/class/infiniband
 
 #------------------------------------------------------------------------------
-# Management NIC Auto-Exclusion (NUMA-Based)
+# GPU Metadata (REQUIRED — hard dependency)
 #------------------------------------------------------------------------------
-# GPU metadata path for NUMA-based management NIC exclusion.
-# The monitor reads compute GPU PCI addresses from this file to determine
-# which NUMA nodes have GPUs. NICs on NUMA nodes with no compute GPU are
-# automatically excluded. If unavailable, all mlx5_* PFs are monitored.
+# Path to the GPU metadata JSON file produced by the metadata collector.
+# The NIC Health Monitor REQUIRES this file to be present and contain both:
+#   - gpu_numa_set      (set of NUMA nodes hosting compute GPUs, for Management exclusion)
+#   - nic_roles         (per-NIC role map "<device>": "compute"|"storage"|"management",
+#                        produced by the metadata collector parsing `nvidia-smi topo -m`)
+#
+# Startup behavior:
+#   - File missing, unreadable, or invalid JSON → FAIL TO START (fatal error logged)
+#   - Required fields missing (gpu_numa_set or nic_roles empty/absent) → FAIL TO START
+#   - This replaces the previous silent fallback to "monitor everything as compute",
+#     which produced incorrect REPLACE_VM remediations on management NIC failures.
 GpuMetadataPath = /var/lib/nvsentinel/gpu_metadata.json
 
 #------------------------------------------------------------------------------
@@ -890,7 +944,44 @@ AutoDetectSRIOVVFs = true
 # ExpectedDownDevicesRegex = ^mlx5_maintenance_.*$
 ```
 
-> **Note**: The previous `gpu_port_config` and `MonitorNetworkType` configuration options have been removed. Management NIC exclusion is now automatic via NUMA detection (see Section 4.1). Uncabled port detection uses the card homogeneity check (see Section 4.2). Both InfiniBand and Ethernet (RoCE) NICs are monitored equally — no link layer filtering is required.
+> **Note**: The previous `gpu_port_config` and `MonitorNetworkType` configuration options have been removed. Management NIC exclusion is automatic via NUMA detection (Section 4.1). NIC role classification uses the topo matrix published by the metadata collector (Section 4.2). Uncabled port detection uses the card homogeneity check (Section 4.3). Both InfiniBand and Ethernet (RoCE) NICs are monitored equally — no link layer filtering is required.
+
+### 12.2 Metadata Collector Requirements
+
+The NIC Health Monitor is a **hard consumer** of topology data produced by the NVSentinel metadata collector. The collector must run on every node before (or alongside) the NIC Health Monitor DaemonSet and must populate the following fields in `/var/lib/nvsentinel/gpu_metadata.json`:
+
+| Field             | Type                          | Source                                            | Used by                                   |
+|-------------------|-------------------------------|---------------------------------------------------|-------------------------------------------|
+| `gpus[].pci_address` | string[]                    | NVML / sysfs enumeration                          | Indirect (collector computes `gpu_numa_set`) |
+| `gpu_numa_set`    | int[]                         | NUMA node of each GPU's PCI device (from sysfs)   | Section 4.1 Management exclusion          |
+| `nic_roles`       | map\<string,string\>          | Parsed from `nvidia-smi topo -m` by the collector | Section 4.2 topo-based classification     |
+
+**`nic_roles` format**: Keys are InfiniBand device names (e.g., `mlx5_0`, `ibp3s0`). Values are one of `"compute"`, `"storage"`, `"management"`. The collector applies the two-level classification rules (Section 4 intro) to produce this map; the NIC Health Monitor consumes it verbatim as a map lookup.
+
+**Example `gpu_metadata.json` excerpt**:
+
+```json
+{
+  "version": "1.0",
+  "node_name": "gpu-node-42",
+  "gpus": [
+    {"pci_address": "0000:0f:00.0", "gpu_id": 0, "uuid": "...", "serial_number": "..."},
+    { "pci_address": "0000:15:00.0", "gpu_id": 1, "...": "..."}
+  ],
+  "gpu_numa_set": [1, 3, 5, 7],
+  "nic_roles": {
+    "mlx5_0": "management",
+    "mlx5_1": "compute",
+    "mlx5_2": "compute",
+    "...": "...",
+    "mlx5_13": "management"
+  }
+}
+```
+
+**Ordering guarantee**: The NIC Health Monitor DaemonSet pod manifest must declare a dependency (via init container, readiness gate, or pod startup ordering) such that the metadata collector completes its write before the NIC monitor starts. If this ordering is violated, the NIC monitor will fail at startup with a clear error pointing at the missing file.
+
+**Collector responsibility for `nvidia-smi topo -m` parsing**: The metadata collector is the single place where `nvidia-smi topo -m` output is parsed. The NIC Health Monitor never invokes `nvidia-smi` itself (it has no GPU driver runtime dependency), it only reads the resulting JSON. This keeps classification logic centralized and testable in the collector component.
 
 ---
 
