@@ -1,6 +1,8 @@
 module github.com/nvidia/nvsentinel/health-monitors/slurm-drain-monitor
 
-go 1.25.4
+go 1.26.0
+
+toolchain go1.26.2
 
 require (
 	github.com/go-logr/logr v1.4.3

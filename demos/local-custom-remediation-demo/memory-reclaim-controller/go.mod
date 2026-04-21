@@ -1,6 +1,8 @@
 module github.com/nvidia/nvsentinel/demos/local-custom-remediation-demo/memory-reclaim-controller
 
-go 1.25
+go 1.26.0
+
+toolchain go1.26.2
 
 require (
 	k8s.io/api v0.32.3

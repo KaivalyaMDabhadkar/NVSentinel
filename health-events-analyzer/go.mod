@@ -1,8 +1,8 @@
 module github.com/nvidia/nvsentinel/health-events-analyzer
 
-go 1.25.0
+go 1.26.0
 
-toolchain go1.25.3
+toolchain go1.26.2
 
 require (
 	github.com/hashicorp/go-multierror v1.1.1

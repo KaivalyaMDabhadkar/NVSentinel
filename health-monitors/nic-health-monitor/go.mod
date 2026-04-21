@@ -1,8 +1,8 @@
 module github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor
 
-go 1.25.0
+go 1.26.0
 
-toolchain go1.25.3
+toolchain go1.26.2
 
 require (
 	github.com/nvidia/nvsentinel/commons v0.0.0
