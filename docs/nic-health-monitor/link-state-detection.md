@@ -337,7 +337,7 @@ These steps use four **complementary signals**, each covering platforms where th
 
 Removing any one signal causes at least one platform to misclassify. Together they cover x86 SXM (DGX/HGX), x86 PCIe (L40S), Grace (GB200/GH200), Forge, and OEM/cloud platforms.
 
-> **Hard dependency on metadata**: The NIC Health Monitor requires the raw GPU↔NIC topology matrix (and the GPU list) published by the metadata collector in `/var/lib/nvsentinel/gpu_metadata.json`. The monitor **fails to start** if the file is missing or unreadable, or if `nic_topology` is absent/empty. There is no silent-fallback mode. See [Section 12.1](#121-state-monitoring-configuration).
+> **Hard dependency on metadata**: The NIC Health Monitor requires the raw GPU↔NIC topology matrix (and the GPU list) published by the metadata collector in `/var/lib/nvsentinel/gpu_metadata.json`. The monitor **fails to start** if the file is missing or unreadable, or if `nic_topology` is absent/empty. There is no silent-fallback mode. This is enforced at startup by `topology.LoadFromMetadata()`, which is called before any polling begins; failure returns an error that causes the process to exit. See [Section 12.1](#121-state-monitoring-configuration).
 >
 > **Responsibility split**: The metadata collector publishes raw facts: per-GPU NUMA nodes (from the `nvidia-smi topo -m` NUMA Affinity column) and the raw per-NIC topology-level matrix (one entry per GPU in `gpus[]` order). The NIC Health Monitor reads these together with per-NIC NUMA nodes (from its own sysfs access — the collector does not enumerate InfiniBand devices) and performs the compute/storage/management classification locally. The monitor never invokes `nvidia-smi` itself; the matrix and GPU NUMA are produced once by the collector and cached in JSON.
 
@@ -937,8 +937,8 @@ mlx5_1  1     2      0000:0000:0000:0000:0000:ffff:ac10:0120  172.16.1.32  v1   
 type IBPort struct {
     Device        string `json:"device,omitempty"`         // e.g., "mlx5_0"
     Port          uint   `json:"port,omitempty"`           // Port number
-    State         string `json:"state,omitempty"`          // e.g., "ACTIVE", "DOWN"
-    PhysicalState string `json:"physical_state,omitempty"` // e.g., "LinkUp", "Disabled"
+    State         string `json:"state,omitempty"`          // raw sysfs value, e.g., "4: ACTIVE", "1: DOWN"
+    PhysicalState string `json:"physical_state,omitempty"` // raw sysfs value, e.g., "5: LinkUp", "3: Disabled"
     LinkLayer     string `json:"link_layer,omitempty"`     // "InfiniBand" or "Ethernet"
 }
 
