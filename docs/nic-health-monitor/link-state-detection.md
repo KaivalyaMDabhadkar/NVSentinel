@@ -324,7 +324,7 @@ The classification of each NIC uses a **three-step decision** built from four co
 
 1. **Step 1 — Management gate (NUMA locality, Section 4.1)**: Is the NIC on a CPU socket that hosts GPUs? If not, exclude it.
 2. **Step 2 — Compute vs Storage (topo matrix + link layer, Section 4.2)**: For NICs that pass Step 1, consult the `nvidia-smi topo -m` GPU↔NIC relationship. If the topo matrix shows PCIe proximity (PIX/PXB), classify as Compute. Otherwise, use the NIC's **link layer** as a tiebreaker: InfiniBand NICs are Compute fabric; Ethernet NICs are Storage.
-3. **Step 3 — Default route exclusion (optional, Section 4.2)**: If the NIC carries the host's default IP route, classify as Management regardless of topo or link layer. This catches management NICs that share a NUMA node with GPUs (e.g., Forge L40S, GB200).
+3. **Step 3 — Default route exclusion (optional, Section 4.2)**: If the NIC carries the host's default IP route, classify as Management regardless of topo or link layer. This catches management NICs that share a NUMA node with GPUs (e.g., on-prem L40S, GB200).
 
 These steps use four **complementary signals**, each covering platforms where the others fail:
 
@@ -332,10 +332,10 @@ These steps use four **complementary signals**, each covering platforms where th
 |---------------------------------|-------------------------------------------------|---------------------------------------------------------------------------------------|
 | **NUMA locality**               | "Is this NIC near any GPU?"                     | A100 DGX (4-socket: mgmt NICs on non-GPU sockets)                                     |
 | **Topo matrix (PIX/PXB)**       | "Does this NIC share a PCIe switch with a GPU?" | H100 OCI, A100 OCI (SXM systems with PCIe switch pairing)                             |
-| **Link layer (IB vs Ethernet)** | "Is this NIC on the InfiniBand compute fabric?" | Forge L40S, GB200 (PCIe-only/Grace where topo can't distinguish compute from storage) |
-| **Default route**               | "Does this NIC carry host networking?"          | Forge L40S, GB200 (management NIC shares NUMA with GPUs)                              |
+| **Link layer (IB vs Ethernet)** | "Is this NIC on the InfiniBand compute fabric?" | On-prem L40S, GB200 (PCIe-only/Grace where topo can't distinguish compute from storage) |
+| **Default route**               | "Does this NIC carry host networking?"          | On-prem L40S, GB200 (management NIC shares NUMA with GPUs)                              |
 
-Removing any one signal causes at least one platform to misclassify. Together they cover x86 SXM (DGX/HGX), x86 PCIe (L40S), Grace (GB200/GH200), Forge, and OEM/cloud platforms.
+Removing any one signal causes at least one platform to misclassify. Together they cover x86 SXM (DGX/HGX), x86 PCIe (L40S), Grace (GB200/GH200), on-prem datacenter, and OEM/cloud platforms.
 
 > **Hard dependency on metadata**: The NIC Health Monitor requires the raw GPU↔NIC topology matrix (and the GPU list) published by the metadata collector in `/var/lib/nvsentinel/gpu_metadata.json`. The monitor **fails to start** if the file is missing or unreadable, or if `nic_topology` is absent/empty. There is no silent-fallback mode. This is enforced at startup by `topology.LoadFromMetadata()`, which is called before any polling begins; failure returns an error that causes the process to exit. See [Section 12.1](#121-state-monitoring-configuration).
 >
@@ -355,8 +355,6 @@ Management NICs on DGX systems are placed on CPU sockets that have **no compute 
 2. Build `gpu_numa_set` from the distinct `numa_node` values across all GPUs (ignoring -1 / unknown).
 3. For each `mlx5_*` NIC discovered in `/sys/class/infiniband/`, read `/sys/class/infiniband/<dev>/device/numa_node`.
 4. If `nic_numa ∉ gpu_numa_set` → **exclude** (management NIC on separate socket).
-
-**Hard requirement**: If `gpu_metadata.json` is unavailable, unreadable, or empty (no GPUs listed), the NIC Health Monitor fails to start with a clear error. The previous "skip the NUMA filter and monitor everything" behavior has been removed — silent over-monitoring would cause incorrect REPLACE_VM remediations on management NIC failures.
 
 **Edge case — GPU**: If `gpus[].numa_node = -1` (unknown, common in VMs or single-socket systems), that GPU is excluded from the `gpu_numa_set`. If *all* GPUs have -1, the set is empty and the NIC Health Monitor **fails to start** — without GPU NUMA information the NUMA gate cannot distinguish management NICs from compute NICs, and monitoring everything would risk false `REPLACE_VM` on management NIC failures.
 
@@ -422,7 +420,7 @@ classify_nic(nic):
     # Applied as a pre-check before Steps 1-2 when hostNetwork access is available.
     # If the NIC carries the host's default IP route → Management (excluded).
     # This catches management NICs that share NUMA with GPUs
-    # (e.g., mlx5_0 on Forge L40S, roceP6p3s0 on GB200).
+    # (e.g., mlx5_0 on on-prem L40S, roceP6p3s0 on GB200).
     # If not available, Steps 1-2 still produce correct results:
     # the management NIC is classified as Storage (monitored) which is
     # safe — if it fails, the node has lost connectivity anyway.
@@ -432,7 +430,7 @@ classify_nic(nic):
 
 1. **PIX/PXB → Compute**: The topo matrix authoritatively identifies NICs that share a PCIe switch with a GPU. This is the primary signal on SXM systems (DGX/HGX A100, H100).
 
-2. **InfiniBand → Compute**: On platforms where no NIC has PIX/PXB to a GPU (PCIe-only GPUs like L40S, or Grace where GPUs aren't on PCIe), the link layer distinguishes compute fabric NICs (InfiniBand) from storage/management NICs (Ethernet). This is the decisive signal on Forge L40S and GB200.
+2. **InfiniBand → Compute**: On platforms where no NIC has PIX/PXB to a GPU (PCIe-only GPUs like L40S, or Grace where GPUs aren't on PCIe), the link layer distinguishes compute fabric NICs (InfiniBand) from storage/management NICs (Ethernet). This is the decisive signal on on-prem L40S and GB200.
 
 3. **NODE/PHB → Storage**: NICs that share a NUMA node or host bridge with a GPU but don't share a PCIe switch and aren't InfiniBand. Typical storage NIC layout on H100 OCI (Slot1/Slot2 ConnectX-7 Ethernet cards).
 
@@ -454,7 +452,7 @@ Combined with the NUMA gate from Section 4.1, the monitor assigns each NIC to on
 
 #### 4.2.4 Field Validation
 
-Verified against real hardware on five distinct platforms covering x86 SXM (A100, H100), x86 PCIe (L40S OCI, Forge L40S), and Grace (GB200). The link-layer check improves classification on Forge and GB200 compared to the previous sysfs PCIe path-walk algorithm, while producing identical results on all other platforms.
+Verified against real hardware on five distinct platforms covering x86 SXM (A100, H100), x86 PCIe (L40S OCI, on-prem L40S), and Grace (GB200). The link-layer check improves classification on on-prem and GB200 compared to the previous sysfs PCIe path-walk algorithm, while producing identical results on all other platforms.
 
 **A100 OCI RoCE (4-socket AMD EPYC, 8 GPUs, 18 PF NICs):**
 
@@ -482,9 +480,9 @@ Every NIC shows NODE to some GPUs and SYS to others; no NIC has any PIX or PXB (
 
 Result: 0 Management + 0 Compute + 6 Storage. All NICs monitored in a single Storage homogeneity group. This is correct because OCI L40S uses RoCE for all cluster networking — there is no separate compute fabric link layer.
 
-**Forge L40S (2-socket Intel, 8 PCIe GPUs, 5 PF NICs: 1 Ethernet mgmt + 4 IB compute):**
+**On-prem L40S (2-socket Intel, 8 PCIe GPUs, 5 PF NICs: 1 Ethernet mgmt + 4 IB compute):**
 
-Forge is an NVIDIA data-center platform where GPU nodes have native InfiniBand for the compute fabric and a separate Ethernet NIC for pod networking. The topo matrix shows NODE to local GPUs for all 5 NICs (PCIe-only system, no shared switches). Without the link-layer check, all 5 would be classified as Storage (same group), corrupting the homogeneity check if port counts differ.
+On-prem datacenter nodes with PCIe GPUs and native InfiniBand for the compute fabric typically have a separate Ethernet NIC for pod networking. The topo matrix shows NODE to local GPUs for all 5 NICs (PCIe-only system, no shared switches). Without the link-layer check, all 5 would be classified as Storage (same group), corrupting the homogeneity check if port counts differ.
 
 With the link-layer check:
 
@@ -1023,17 +1021,7 @@ counterDetection:
 | `--processing-strategy`       | `EXECUTE_REMEDIATION`                        | Event processing strategy (`EXECUTE_REMEDIATION` or `STORE_ONLY`).                                                                                                                                                 |
 | `--node-name`                 | `${NODE_NAME}`                               | Node name stamped on every event. Falls back to the `NODE_NAME` env var; startup fails if unset.                                                                                                                   |
 
-**GPU metadata — a hard startup dependency**
-
-The monitor reads `/var/lib/nvsentinel/gpu_metadata.json` at startup and
-fails to start if any of the following hold:
-
-- The file is missing, unreadable, or contains invalid JSON.
-- `gpus[]` is empty (the monitor needs GPU NUMA nodes for the management-NIC exclusion gate).
-- `nic_topology` is empty (no raw matrix from `nvidia-smi topo -m` to classify against).
-
-The error points operators at the metadata-collector DaemonSet, which
-must complete its write before the NIC monitor starts.
+**GPU metadata** is a hard startup dependency — see [Section 4](#4-management-nic-exclusion-and-uncabled-port-detection) for the fail-fast conditions and [Section 12.2](#122-metadata-collector-requirements) for the required fields.
 
 **SR-IOV Virtual Function handling**
 
@@ -1076,8 +1064,6 @@ The NIC Health Monitor is a **hard consumer** of topology data produced by the N
 ```
 
 **Ordering guarantee**: The NIC Health Monitor DaemonSet pod manifest must declare a dependency (via init container, readiness gate, or pod startup ordering) such that the metadata collector completes its write before the NIC monitor starts. If this ordering is violated, the NIC monitor will fail at startup with a clear error pointing at the missing file.
-
-**Collector responsibility for `nvidia-smi topo -m` parsing**: The metadata collector is the single place where `nvidia-smi topo -m` output is parsed. The NIC Health Monitor never invokes `nvidia-smi` itself (it has no GPU driver runtime dependency), it only reads the resulting JSON. Interpretation of the matrix (the compute/storage/management classification, card grouping, etc.) is deliberately kept in the monitor so that collector changes are not required when the classification rules evolve.
 
 ---
 
