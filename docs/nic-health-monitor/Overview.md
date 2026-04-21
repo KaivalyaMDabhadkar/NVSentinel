@@ -257,24 +257,24 @@ The NIC Health Monitor emits healthy events (`IsHealthy=true`) in two scenarios 
 
 ## Quick Navigation
 
-| Topic                             | Document                                                            | Section     |
-|-----------------------------------|---------------------------------------------------------------------|-------------|
-| UP/DOWN state monitoring          | [Link State Detection](./link-state-detection.md)                   | Section 3   |
-| Device disappearance / PCI checks | [Link State Detection](./link-state-detection.md)                   | Section 7   |
-| Management NIC exclusion (NUMA)   | [Link State Detection](./link-state-detection.md)                   | Section 4.1 |
-| NIC role classification (topo-based) | [Link State Detection](./link-state-detection.md)                | Section 4.2 |
-| Metadata collector requirements   | [Link State Detection](./link-state-detection.md)                   | Section 12.2 |
-| Uncabled port detection           | [Link State Detection](./link-state-detection.md)                   | Section 4.3 |
-| SR-IOV VF handling                | [Link State Detection](./link-state-detection.md)                   | Section 8   |
-| BER/FEC theory                    | [Link Counter Detection](./link-counter-detection.md)               | Section 2   |
-| Counter thresholds                | [Link Counter Detection](./link-counter-detection.md)               | Section 4   |
-| Counter reset handling            | [Link Counter Detection](./link-counter-detection.md)               | Section 6   |
-| Admin reset recovery events       | [Link Counter Detection](./link-counter-detection.md)               | Section 6.4 |
-| Persistent state file             | [Link Counter Detection](./link-counter-detection.md)               | Section 6.6 |
-| Boot ID handling                  | [Link Counter Detection](./link-counter-detection.md)               | Section 6.5 |
-| Driver error patterns             | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Section 5   |
-| Repeat failure detection          | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Section 7   |
-| Health Events Analyzer rules      | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Appendix B  |
+| Topic                                | Document                                                            | Section      |
+|--------------------------------------|---------------------------------------------------------------------|--------------|
+| UP/DOWN state monitoring             | [Link State Detection](./link-state-detection.md)                   | Section 3    |
+| Device disappearance / PCI checks    | [Link State Detection](./link-state-detection.md)                   | Section 7    |
+| Management NIC exclusion (NUMA)      | [Link State Detection](./link-state-detection.md)                   | Section 4.1  |
+| NIC role classification (topo-based) | [Link State Detection](./link-state-detection.md)                   | Section 4.2  |
+| Metadata collector requirements      | [Link State Detection](./link-state-detection.md)                   | Section 12.2 |
+| Uncabled port detection              | [Link State Detection](./link-state-detection.md)                   | Section 4.3  |
+| SR-IOV VF handling                   | [Link State Detection](./link-state-detection.md)                   | Section 8    |
+| BER/FEC theory                       | [Link Counter Detection](./link-counter-detection.md)               | Section 2    |
+| Counter thresholds                   | [Link Counter Detection](./link-counter-detection.md)               | Section 4    |
+| Counter reset handling               | [Link Counter Detection](./link-counter-detection.md)               | Section 6    |
+| Admin reset recovery events          | [Link Counter Detection](./link-counter-detection.md)               | Section 6.4  |
+| Persistent state file                | [Link Counter Detection](./link-counter-detection.md)               | Section 6.6  |
+| Boot ID handling                     | [Link Counter Detection](./link-counter-detection.md)               | Section 6.5  |
+| Driver error patterns                | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Section 5    |
+| Repeat failure detection             | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Section 7    |
+| Health Events Analyzer rules         | [Syslog Detection & Correlation](./syslog-detection-correlation.md) | Appendix B   |
 
 ---
 
