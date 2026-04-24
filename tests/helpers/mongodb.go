@@ -64,8 +64,11 @@ var (
 	}
 )
 
-// GetMongoDBPrimaryPodName returns the name of a running MongoDB pod.
-// It auto-detects Bitnami vs Percona by trying both label selectors.
+// GetMongoDBPrimaryPodName returns the name of the writable primary MongoDB pod.
+// It auto-detects Bitnami vs Percona by trying both label selectors, then picks
+// the pod whose ordinal matches the configured primary (ordinal 0 for Bitnami,
+// highest-priority member for Percona based on replsetOverrides).
+// In a fresh 3-node replica set, ordinal 0 is the primary in both flavors.
 func GetMongoDBPrimaryPodName(
 	ctx context.Context, t *testing.T, client klient.Client,
 ) string {
@@ -78,16 +81,31 @@ func GetMongoDBPrimaryPodName(
 		})
 		require.NoError(t, err, "failed to list MongoDB pods with selector %s", flavor.LabelSelector)
 
-		for _, pod := range pods.Items {
-			if pod.Namespace != NVSentinelNamespace {
-				continue
-			}
+		var runningPods []v1.Pod
 
-			if pod.Status.Phase == v1.PodRunning {
-				t.Logf("Found running MongoDB pod: %s (flavor: %s)", pod.Name, flavor.ContainerName)
+		for _, pod := range pods.Items {
+			if pod.Namespace == NVSentinelNamespace && pod.Status.Phase == v1.PodRunning {
+				runningPods = append(runningPods, pod)
+			}
+		}
+
+		if len(runningPods) == 0 {
+			continue
+		}
+
+		// Prefer ordinal-0 pod (the configured primary in both Bitnami and
+		// Percona deployments with replsetOverrides giving it highest priority).
+		for _, pod := range runningPods {
+			if strings.HasSuffix(pod.Name, "-0") {
+				t.Logf("Found primary MongoDB pod: %s (flavor: %s)", pod.Name, flavor.ContainerName)
 				return pod.Name
 			}
 		}
+
+		// Fallback: return any running pod (shouldn't happen with 3-node RS).
+		t.Logf("Found running MongoDB pod (no -0 ordinal): %s (flavor: %s)", runningPods[0].Name, flavor.ContainerName)
+
+		return runningPods[0].Name
 	}
 
 	require.Fail(t, "no running MongoDB pod found in namespace %s", NVSentinelNamespace)
@@ -188,21 +206,23 @@ func buildPerconaMongoshCommand(host, user, pass, jsEval string) []string {
 
 // buildBitnamiMongoshCommand constructs a shell command for Bitnami mongodb pods.
 // TLS and auth flags are auto-detected from env vars and cert files inside the pod.
+// Auth credentials are passed via properly quoted variable references to prevent
+// word-splitting on passwords containing spaces or shell metacharacters.
 func buildBitnamiMongoshCommand(host, jsEval string) []string {
 	//nolint:lll // shell one-liner is clearer without artificial line breaks
 	script := fmt.Sprintf(
-		`TLS_ARGS=""; AUTH_ARGS=""; `+
+		`TLS_ARGS=""; `+
 			`if [ -f /certs/mongodb.pem ]; then `+
 			`TLS_ARGS="--tls --tlsCAFile /certs/mongodb-ca-cert `+
 			`--tlsCertificateKeyFile /certs/mongodb.pem"; fi; `+
-			`if [ -n "$MONGODB_ROOT_PASSWORD" ]; then `+
-			`AUTH_ARGS="--username root --password $MONGODB_ROOT_PASSWORD `+
-			`--authenticationDatabase admin `+
-			`--authenticationMechanism SCRAM-SHA-256"; fi; `+
+			`AUTH=""; `+
+			`if [ -n "$MONGODB_ROOT_PASSWORD" ]; then AUTH=1; fi; `+
 			`mongosh --quiet `+
 			`--host %s `+
 			`$TLS_ARGS `+
-			`$AUTH_ARGS `+
+			`${AUTH:+--username root --password "$MONGODB_ROOT_PASSWORD" `+
+			`--authenticationDatabase admin `+
+			`--authenticationMechanism SCRAM-SHA-256} `+
 			`--eval '%s'`,
 		host, jsEval,
 	)
