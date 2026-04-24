@@ -365,69 +365,54 @@ func dialWithRetry(ctx context.Context, target string, opts ...grpc.DialOption) 
 		perAttemptTimeout = 5 * time.Second
 	)
 
+	var lastErr error
+
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		slog.Info("Checking platform connector socket availability",
-			"attempt", attempt,
-			"maxRetries", maxRetries,
-			"target", target,
-		)
+		slog.Info("Connecting to platform connector",
+			"attempt", attempt, "maxRetries", maxRetries, "target", target)
 
-		if strings.HasPrefix(target, "unix://") {
-			socketPath := strings.TrimPrefix(target, "unix://")
-			if _, statErr := os.Stat(socketPath); statErr != nil {
-				slog.Warn("Platform connector socket file does not exist",
-					"attempt", attempt, "maxRetries", maxRetries, "error", statErr)
-
-				if attempt < maxRetries {
-					if err := backoffWait(ctx, attempt); err != nil {
-						return nil, err
-					}
-
-					continue
-				}
-
-				return nil, fmt.Errorf("platform connector socket file not found after retries: %w", statErr)
-			}
+		conn, err := tryDial(ctx, target, perAttemptTimeout, opts...)
+		if err == nil {
+			slog.Info("Successfully connected to platform connector", "attempt", attempt)
+			return conn, nil
 		}
 
-		conn, err := grpc.NewClient(target, opts...)
-		if err != nil {
-			slog.Warn("Error creating gRPC client", "attempt", attempt, "error", err)
+		lastErr = err
+		slog.Warn("Dial attempt failed", "attempt", attempt, "error", err)
 
-			if attempt < maxRetries {
-				if waitErr := backoffWait(ctx, attempt); waitErr != nil {
-					return nil, waitErr
-				}
-
-				continue
+		if attempt < maxRetries {
+			if waitErr := backoffWait(ctx, attempt); waitErr != nil {
+				return nil, waitErr
 			}
-
-			return nil, fmt.Errorf("failed to create gRPC client after retries: %w", err)
 		}
-
-		if err := waitUntilReady(ctx, conn, perAttemptTimeout); err != nil {
-			_ = conn.Close()
-
-			slog.Warn("gRPC client not ready before timeout",
-				"attempt", attempt, "error", err)
-
-			if attempt < maxRetries {
-				if waitErr := backoffWait(ctx, attempt); waitErr != nil {
-					return nil, waitErr
-				}
-
-				continue
-			}
-
-			return nil, fmt.Errorf("gRPC client not ready after retries: %w", err)
-		}
-
-		slog.Info("Successfully connected to platform connector", "attempt", attempt)
-
-		return conn, nil
 	}
 
-	return nil, fmt.Errorf("exhausted retries without creating gRPC client")
+	return nil, fmt.Errorf("failed to connect after %d retries: %w", maxRetries, lastErr)
+}
+
+// tryDial performs a single connection attempt: socket existence check,
+// client creation, and readiness wait.
+func tryDial(
+	ctx context.Context, target string, timeout time.Duration, opts ...grpc.DialOption,
+) (*grpc.ClientConn, error) {
+	if strings.HasPrefix(target, "unix://") {
+		socketPath := strings.TrimPrefix(target, "unix://")
+		if _, err := os.Stat(socketPath); err != nil {
+			return nil, fmt.Errorf("socket file not found: %w", err)
+		}
+	}
+
+	conn, err := grpc.NewClient(target, opts...)
+	if err != nil {
+		return nil, fmt.Errorf("gRPC NewClient: %w", err)
+	}
+
+	if err := waitUntilReady(ctx, conn, timeout); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("client not ready: %w", err)
+	}
+
+	return conn, nil
 }
 
 // backoffWait sleeps for attempt seconds, aborting early if ctx is cancelled.
