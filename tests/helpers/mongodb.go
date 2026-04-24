@@ -81,6 +81,7 @@ func GetMongoDBPrimaryPodName(
 			if pod.Namespace != NVSentinelNamespace {
 				continue
 			}
+
 			if pod.Status.Phase == v1.PodRunning {
 				t.Logf("Found running MongoDB pod: %s (flavor: %s)", pod.Name, flavor.ContainerName)
 				return pod.Name
@@ -89,6 +90,7 @@ func GetMongoDBPrimaryPodName(
 	}
 
 	require.Fail(t, "no running MongoDB pod found in namespace %s", NVSentinelNamespace)
+
 	return ""
 }
 
@@ -111,6 +113,7 @@ func detectMongoDBFlavor(ctx context.Context, t *testing.T, client klient.Client
 	}
 
 	t.Logf("Detected Bitnami MongoDB flavor for pod %s", podName)
+
 	return bitnamiFlavor
 }
 
@@ -128,6 +131,7 @@ func readPerconaCredentials(ctx context.Context, t *testing.T, restConfig *rest.
 
 	user := string(secret.Data["MONGODB_DATABASE_ADMIN_USER"])
 	pass := string(secret.Data["MONGODB_DATABASE_ADMIN_PASSWORD"])
+
 	require.NotEmpty(t, user, "MONGODB_DATABASE_ADMIN_USER not found in secret")
 	require.NotEmpty(t, pass, "MONGODB_DATABASE_ADMIN_PASSWORD not found in secret")
 
@@ -147,6 +151,7 @@ func buildMongoshCommand(mongoPod string, flavor mongoDBFlavor, perconaUser, per
 	host := fmt.Sprintf("%s.%s.%s.svc.cluster.local", mongoPod, flavor.ServiceName, NVSentinelNamespace)
 
 	var tlsDetect, authDetect string
+
 	if flavor.ContainerName == "mongod" {
 		authArgs := fmt.Sprintf(
 			`--username '%s' --password '%s' `+
