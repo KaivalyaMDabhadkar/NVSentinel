@@ -279,6 +279,7 @@ func (c *InfiniBandStateCheck) applyFirstPollSuppression(
 		"device", port.Device, "port", port.Port, "card", card)
 
 	evt.IsFatal = false
+	evt.RecommendedAction = pb.RecommendedAction_NONE
 }
 
 // logDiscoverySummaryIfChanged emits a one-line summary whenever the

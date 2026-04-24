@@ -107,10 +107,12 @@ func (m *NICHealthMonitor) runChecks(checkList []checks.Check, category string) 
 		if err := m.sendWithRetry(batch, 5, 2*time.Second); err != nil {
 			slog.Error("Failed to send health events",
 				"check", chk.Name(), "error", err)
+
+			continue
 		}
 
 		for _, evt := range events {
-			slog.Info("Sending health event",
+			slog.Info("Health event sent",
 				"check", evt.CheckName,
 				"is_fatal", evt.IsFatal,
 				"is_healthy", evt.IsHealthy,

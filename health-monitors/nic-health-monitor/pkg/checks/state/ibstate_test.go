@@ -475,12 +475,9 @@ func TestIBState_ExpectedDownCardSuppressedOnFirstPoll(t *testing.T) {
 
 	events, err := check.Run()
 	require.NoError(t, err)
+	require.NotEmpty(t, events, "expected-down suppression should downgrade, not drop, first-poll events")
 
 	for _, e := range events {
-		// The uncabled-port suppression path flips IsFatal to false but
-		// still emits the event (so the observer sees the state). The
-		// key invariant: no fatal event fires on the first poll for
-		// these mode-matching cards.
 		assert.False(t, e.IsFatal, "expected-down card should not fire fatal on first poll")
 	}
 }

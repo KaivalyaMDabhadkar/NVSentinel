@@ -211,6 +211,10 @@ func parseRuntimeConfig() (*runtimeConfig, error) {
 		return nil, fmt.Errorf("invalid state-polling-interval: %w", err)
 	}
 
+	if stateInterval <= 0 {
+		return nil, fmt.Errorf("state-polling-interval must be > 0, got %s", stateInterval)
+	}
+
 	portInt, err := strconv.Atoi(*metricsPort)
 	if err != nil {
 		return nil, fmt.Errorf("invalid metrics port: %w", err)
@@ -375,7 +379,10 @@ func dialWithRetry(ctx context.Context, target string, opts ...grpc.DialOption) 
 					"attempt", attempt, "maxRetries", maxRetries, "error", statErr)
 
 				if attempt < maxRetries {
-					time.Sleep(time.Duration(attempt) * time.Second)
+					if err := backoffWait(ctx, attempt); err != nil {
+						return nil, err
+					}
+
 					continue
 				}
 
@@ -388,7 +395,10 @@ func dialWithRetry(ctx context.Context, target string, opts ...grpc.DialOption) 
 			slog.Warn("Error creating gRPC client", "attempt", attempt, "error", err)
 
 			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * time.Second)
+				if waitErr := backoffWait(ctx, attempt); waitErr != nil {
+					return nil, waitErr
+				}
+
 				continue
 			}
 
@@ -402,7 +412,10 @@ func dialWithRetry(ctx context.Context, target string, opts ...grpc.DialOption) 
 				"attempt", attempt, "error", err)
 
 			if attempt < maxRetries {
-				time.Sleep(time.Duration(attempt) * time.Second)
+				if waitErr := backoffWait(ctx, attempt); waitErr != nil {
+					return nil, waitErr
+				}
+
 				continue
 			}
 
@@ -415,6 +428,19 @@ func dialWithRetry(ctx context.Context, target string, opts ...grpc.DialOption) 
 	}
 
 	return nil, fmt.Errorf("exhausted retries without creating gRPC client")
+}
+
+// backoffWait sleeps for attempt seconds, aborting early if ctx is cancelled.
+func backoffWait(ctx context.Context, attempt int) error {
+	t := time.NewTimer(time.Duration(attempt) * time.Second)
+	defer t.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
 }
 
 // waitUntilReady blocks until a gRPC connection reaches Ready state.
