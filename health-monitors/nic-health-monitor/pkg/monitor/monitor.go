@@ -69,9 +69,11 @@ func NewNICHealthMonitor(
 	return m
 }
 
-// RunStateChecks executes all state-category checks once.
-func (m *NICHealthMonitor) RunStateChecks() error {
-	return m.runChecks(m.stateChecks, "state")
+// RunStateChecks executes all state-category checks once. The context
+// is threaded into the gRPC send path so that in-flight RPCs and retry
+// sleeps are cancelled promptly on shutdown.
+func (m *NICHealthMonitor) RunStateChecks(ctx context.Context) error {
+	return m.runChecks(ctx, m.stateChecks, "state")
 }
 
 // StateInterval returns the state polling interval (used by main to
@@ -81,7 +83,7 @@ func (m *NICHealthMonitor) StateInterval() time.Duration { return m.stateInterva
 // runChecks executes the checks in a category and sends any resulting
 // events in a single batch. Check errors are logged and do not cancel
 // the remaining checks.
-func (m *NICHealthMonitor) runChecks(checkList []checks.Check, category string) error {
+func (m *NICHealthMonitor) runChecks(ctx context.Context, checkList []checks.Check, category string) error {
 	start := time.Now()
 
 	for _, chk := range checkList {
@@ -104,7 +106,7 @@ func (m *NICHealthMonitor) runChecks(checkList []checks.Check, category string) 
 
 		batch := &pb.HealthEvents{Version: 1, Events: events}
 
-		if err := m.sendWithRetry(batch, 5, 2*time.Second); err != nil {
+		if err := m.sendWithRetry(ctx, batch, 5, 2*time.Second); err != nil {
 			slog.Error("Failed to send health events",
 				"check", chk.Name(), "error", err)
 
@@ -140,9 +142,10 @@ func (m *NICHealthMonitor) runChecks(checkList []checks.Check, category string) 
 
 // sendWithRetry wraps the HealthEventOccurredV1 RPC in bounded exponential
 // backoff. Only transient errors (Unavailable, DeadlineExceeded, broken
-// connection) are retried.
+// connection) are retried. The context is used for the RPC calls so
+// shutdown can cancel in-flight sends.
 func (m *NICHealthMonitor) sendWithRetry(
-	batch *pb.HealthEvents, maxRetries int, retryDelay time.Duration,
+	ctx context.Context, batch *pb.HealthEvents, maxRetries int, retryDelay time.Duration,
 ) error {
 	backoff := wait.Backoff{
 		Steps:    maxRetries,
@@ -151,8 +154,8 @@ func (m *NICHealthMonitor) sendWithRetry(
 		Jitter:   0.1,
 	}
 
-	return wait.ExponentialBackoff(backoff, func() (bool, error) {
-		_, err := m.pcClient.HealthEventOccurredV1(context.Background(), batch)
+	return wait.ExponentialBackoffWithContext(ctx, backoff, func(ctx context.Context) (bool, error) {
+		_, err := m.pcClient.HealthEventOccurredV1(ctx, batch)
 		if err == nil {
 			return true, nil
 		}

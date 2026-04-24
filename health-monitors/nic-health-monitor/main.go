@@ -337,7 +337,7 @@ func parseProcessingStrategy(s string) (pb.ProcessingStrategy, error) {
 }
 
 // pollingLoop runs fn at interval until ctx is cancelled.
-func pollingLoop(ctx context.Context, name string, interval time.Duration, fn func() error) error {
+func pollingLoop(ctx context.Context, name string, interval time.Duration, fn func(context.Context) error) error {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -349,7 +349,7 @@ func pollingLoop(ctx context.Context, name string, interval time.Duration, fn fu
 			slog.Info("Polling loop stopped", "name", name)
 			return nil
 		case <-ticker.C:
-			if err := fn(); err != nil {
+			if err := fn(ctx); err != nil {
 				slog.Error("Poll cycle failed", "name", name, "error", err)
 			}
 		}

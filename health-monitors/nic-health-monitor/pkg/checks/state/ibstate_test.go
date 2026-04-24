@@ -479,5 +479,7 @@ func TestIBState_ExpectedDownCardSuppressedOnFirstPoll(t *testing.T) {
 
 	for _, e := range events {
 		assert.False(t, e.IsFatal, "expected-down card should not fire fatal on first poll")
+		assert.Equal(t, pb.RecommendedAction_NONE, e.RecommendedAction,
+			"suppressed event should clear RecommendedAction")
 	}
 }
