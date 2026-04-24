@@ -27,6 +27,7 @@ package helpers
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
@@ -150,46 +151,63 @@ func readPerconaCredentials(ctx context.Context, t *testing.T, restConfig *rest.
 func buildMongoshCommand(mongoPod string, flavor mongoDBFlavor, perconaUser, perconaPass, jsEval string) []string {
 	host := fmt.Sprintf("%s.%s.%s.svc.cluster.local", mongoPod, flavor.ServiceName, NVSentinelNamespace)
 
-	var tlsDetect, authDetect string
-
 	if flavor.ContainerName == "mongod" {
-		authArgs := fmt.Sprintf(
-			`--username '%s' --password '%s' `+
-				`--authenticationDatabase admin `+
-				`--authenticationMechanism SCRAM-SHA-256`,
-			perconaUser, perconaPass)
-		// Probe the server: try TLS first; if it fails, fall back to plain.
-		tlsDetect = fmt.Sprintf(
-			`if mongosh --quiet --host localhost --tls --tlsAllowInvalidCertificates %s `+
-				`--eval "db.runCommand({ping:1})" >/dev/null 2>&1; then `+
-				`TLS_ARGS="--tls --tlsAllowInvalidCertificates"; fi; `,
-			authArgs)
-		authDetect = fmt.Sprintf(`AUTH_ARGS="%s"; `, authArgs)
-	} else {
-		tlsDetect = `if [ -f /certs/mongodb.pem ]; then ` +
-			`TLS_ARGS="--tls --tlsCAFile /certs/mongodb-ca-cert ` +
-			`--tlsCertificateKeyFile /certs/mongodb.pem"; fi; `
-		authDetect = `if [ -n "$MONGODB_ROOT_PASSWORD" ]; then ` +
-			`AUTH_ARGS="--username root --password $MONGODB_ROOT_PASSWORD ` +
-			`--authenticationDatabase admin ` +
-			`--authenticationMechanism SCRAM-SHA-256"; fi; `
+		return buildPerconaMongoshCommand(host, perconaUser, perconaPass, jsEval)
 	}
+
+	return buildBitnamiMongoshCommand(host, jsEval)
+}
+
+// buildPerconaMongoshCommand constructs a shell command for Percona mongod pods.
+// Credentials are base64-encoded to safely pass through shell without metacharacter
+// issues (passwords may contain $, spaces, backticks, etc.). Variables are always
+// expanded inside double quotes to prevent word-splitting.
+func buildPerconaMongoshCommand(host, user, pass, jsEval string) []string {
+	userB64 := base64.StdEncoding.EncodeToString([]byte(user))
+	passB64 := base64.StdEncoding.EncodeToString([]byte(pass))
 
 	//nolint:lll // shell one-liner is clearer without artificial line breaks
-	return []string{
-		"/bin/sh", "-c",
-		fmt.Sprintf(
-			`TLS_ARGS=""; AUTH_ARGS=""; `+
-				tlsDetect+
-				authDetect+
-				`mongosh --quiet `+
-				`--host %s `+
-				`$TLS_ARGS `+
-				`$AUTH_ARGS `+
-				`--eval '%s'`,
-			host, jsEval,
-		),
-	}
+	script := fmt.Sprintf(
+		`PERCONA_USER="$(printf '%%s' '%s' | base64 -d)"; `+
+			`PERCONA_PASS="$(printf '%%s' '%s' | base64 -d)"; `+
+			`TLS_ARGS=""; `+
+			`if mongosh --quiet --host localhost --tls --tlsAllowInvalidCertificates `+
+			`--username "$PERCONA_USER" --password "$PERCONA_PASS" `+
+			`--authenticationDatabase admin --authenticationMechanism SCRAM-SHA-256 `+
+			`--eval "db.runCommand({ping:1})" >/dev/null 2>&1; then `+
+			`TLS_ARGS="--tls --tlsAllowInvalidCertificates"; fi; `+
+			`mongosh --quiet --host %s $TLS_ARGS `+
+			`--username "$PERCONA_USER" --password "$PERCONA_PASS" `+
+			`--authenticationDatabase admin --authenticationMechanism SCRAM-SHA-256 `+
+			`--eval '%s'`,
+		userB64, passB64, host, jsEval,
+	)
+
+	return []string{"/bin/sh", "-c", script}
+}
+
+// buildBitnamiMongoshCommand constructs a shell command for Bitnami mongodb pods.
+// TLS and auth flags are auto-detected from env vars and cert files inside the pod.
+func buildBitnamiMongoshCommand(host, jsEval string) []string {
+	//nolint:lll // shell one-liner is clearer without artificial line breaks
+	script := fmt.Sprintf(
+		`TLS_ARGS=""; AUTH_ARGS=""; `+
+			`if [ -f /certs/mongodb.pem ]; then `+
+			`TLS_ARGS="--tls --tlsCAFile /certs/mongodb-ca-cert `+
+			`--tlsCertificateKeyFile /certs/mongodb.pem"; fi; `+
+			`if [ -n "$MONGODB_ROOT_PASSWORD" ]; then `+
+			`AUTH_ARGS="--username root --password $MONGODB_ROOT_PASSWORD `+
+			`--authenticationDatabase admin `+
+			`--authenticationMechanism SCRAM-SHA-256"; fi; `+
+			`mongosh --quiet `+
+			`--host %s `+
+			`$TLS_ARGS `+
+			`$AUTH_ARGS `+
+			`--eval '%s'`,
+		host, jsEval,
+	)
+
+	return []string{"/bin/sh", "-c", script}
 }
 
 // ExecMongosh runs a JavaScript expression inside a MongoDB pod via mongosh.
