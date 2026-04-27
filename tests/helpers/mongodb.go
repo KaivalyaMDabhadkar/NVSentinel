@@ -160,8 +160,8 @@ func readPerconaCredentials(ctx context.Context, t *testing.T, restConfig *rest.
 // buildMongoshCommand constructs a mongosh command against the headless service
 // hostname. TLS and auth flags are auto-detected at exec time inside the pod:
 //   - Bitnami: TLS via /certs/mongodb.pem, auth via MONGODB_ROOT_PASSWORD (user: root)
-//   - Percona: TLS via --tlsAllowInvalidCertificates, auth via credentials read
-//     from the internal-mongodb-users Secret (not available as env vars in the pod)
+//   - Percona: mTLS via /etc/mongodb-ssl-internal/ certs (operator-managed), auth
+//     via credentials read from the internal-mongodb-users Secret
 //
 // IMPORTANT: All JavaScript passed to jsEval MUST use double quotes for strings
 // (not single quotes), because the --eval argument is wrapped in single quotes
@@ -180,6 +180,11 @@ func buildMongoshCommand(mongoPod string, flavor mongoDBFlavor, perconaUser, per
 // Credentials are base64-encoded to safely pass through shell without metacharacter
 // issues (passwords may contain $, spaces, backticks, etc.). Variables are always
 // expanded inside double quotes to prevent word-splitting.
+//
+// TLS: Percona requires mTLS (client must present a certificate). The operator
+// mounts internal certs at /etc/mongodb-ssl-internal/. We combine tls.crt and
+// tls.key into a PEM file for mongosh. If the cert dir is absent (TLS disabled),
+// we fall back to a plain connection.
 func buildPerconaMongoshCommand(host, user, pass, jsEval string) []string {
 	userB64 := base64.StdEncoding.EncodeToString([]byte(user))
 	passB64 := base64.StdEncoding.EncodeToString([]byte(pass))
@@ -189,11 +194,9 @@ func buildPerconaMongoshCommand(host, user, pass, jsEval string) []string {
 		`PERCONA_USER="$(printf '%%s' '%s' | base64 -d)"; `+
 			`PERCONA_PASS="$(printf '%%s' '%s' | base64 -d)"; `+
 			`TLS_ARGS=""; `+
-			`if mongosh --quiet --host localhost --tls --tlsAllowInvalidCertificates `+
-			`--username "$PERCONA_USER" --password "$PERCONA_PASS" `+
-			`--authenticationDatabase admin --authenticationMechanism SCRAM-SHA-256 `+
-			`--eval "db.runCommand({ping:1})" >/dev/null 2>&1; then `+
-			`TLS_ARGS="--tls --tlsAllowInvalidCertificates"; fi; `+
+			`if [ -f /etc/mongodb-ssl-internal/tls.crt ]; then `+
+			`cat /etc/mongodb-ssl-internal/tls.crt /etc/mongodb-ssl-internal/tls.key > /tmp/mongod-test.pem; `+
+			`TLS_ARGS="--tls --tlsCAFile /etc/mongodb-ssl-internal/ca.crt --tlsCertificateKeyFile /tmp/mongod-test.pem"; fi; `+
 			`mongosh --quiet --host %s $TLS_ARGS `+
 			`--username "$PERCONA_USER" --password "$PERCONA_PASS" `+
 			`--authenticationDatabase admin --authenticationMechanism SCRAM-SHA-256 `+
