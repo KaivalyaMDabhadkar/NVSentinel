@@ -132,7 +132,7 @@ func (c *EthernetStateCheck) Run() ([]*pb.HealthEvent, error) {
 		return nil, fmt.Errorf("device discovery failed: %w", err)
 	}
 
-	metrics.DevicesDiscovered.WithLabelValues(c.nodeName).Set(float64(len(result.Devices)))
+	metrics.DevicesDiscovered.WithLabelValues(c.nodeName, c.Name()).Set(float64(len(result.Devices)))
 
 	firstPoll := c.previousDevices == nil
 	baselineRun := firstPoll && c.emitHealthyBaselines
@@ -140,6 +140,7 @@ func (c *EthernetStateCheck) Run() ([]*pb.HealthEvent, error) {
 
 	c.collectDevicesAndPorts(result.Devices, st)
 	events := c.buildEventsForPoll(st, firstPoll, baselineRun)
+	c.logDiscoverySummaryIfChanged(st)
 
 	if firstPoll {
 		c.classifier.LogClassificationSummary()
@@ -299,8 +300,9 @@ func (c *EthernetStateCheck) healthyRecoveryEvent(
 }
 
 // unhealthyEvent returns the fatal event for a DOWN transition, or nil
-// when the unhealthy state is a transient non-DOWN (INIT, ARMED) or an
-// expected-down first-poll port.
+// when the unhealthy state is a transient non-DOWN (INIT, ARMED).
+// Expected-down first-poll ports are downgraded to non-fatal
+// so the platform sees the state without acting on it.
 func (c *EthernetStateCheck) unhealthyEvent(
 	pi ethPortInfo, prev portSnapshot,
 	firstPoll bool, expectedCards map[string]struct{}, portCard map[string]string,
@@ -312,16 +314,6 @@ func (c *EthernetStateCheck) unhealthyEvent(
 		)
 
 		return nil
-	}
-
-	if firstPoll {
-		card := portCard[pi.key]
-		if _, expected := expectedCards[card]; expected {
-			slog.Info("Suppressing first-poll fatal for expected-down RoCE port",
-				"device", pi.snap.Device, "port", pi.snap.Port, "card", card)
-
-			return nil
-		}
 	}
 
 	metrics.StateCheckErrors.WithLabelValues(
@@ -336,7 +328,32 @@ func (c *EthernetStateCheck) unhealthyEvent(
 		"prevPhysState", prev.PhysicalState, "newPhysState", pi.snap.PhysicalState,
 	)
 
+	if firstPoll {
+		card := portCard[pi.key]
+		if _, expected := expectedCards[card]; expected {
+			slog.Info("Suppressing first-poll fatal for expected-down RoCE port",
+				"device", pi.snap.Device, "port", pi.snap.Port, "card", card)
+
+			return c.portEvent(pi.snap.Device, pi.snap.Port, msg, false, false, pb.RecommendedAction_NONE)
+		}
+	}
+
 	return c.portEvent(pi.snap.Device, pi.snap.Port, msg, true, false, pb.RecommendedAction_REPLACE_VM)
+}
+
+// logDiscoverySummaryIfChanged emits a one-line summary whenever the
+// discovered set of devices/ports changes size.
+func (c *EthernetStateCheck) logDiscoverySummaryIfChanged(st *ethPollState) {
+	if len(st.currentDevices) == len(c.previousDevices) &&
+		len(st.currentPorts) == len(c.previousPorts) {
+		return
+	}
+
+	slog.Info("Ethernet discovery summary",
+		"check", c.Name(),
+		"devices", len(st.currentDevices),
+		"eth_ports", len(st.currentPorts),
+	)
 }
 
 // buildDownMessage composes the fatal event message, enriching it with

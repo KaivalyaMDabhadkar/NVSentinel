@@ -138,7 +138,7 @@ func (c *InfiniBandStateCheck) Run() ([]*pb.HealthEvent, error) {
 		return nil, fmt.Errorf("device discovery failed: %w", err)
 	}
 
-	metrics.DevicesDiscovered.WithLabelValues(c.nodeName).Set(float64(len(result.Devices)))
+	metrics.DevicesDiscovered.WithLabelValues(c.nodeName, c.Name()).Set(float64(len(result.Devices)))
 
 	firstPoll := c.previousDevices == nil
 	baselineRun := firstPoll && c.emitHealthyBaselines

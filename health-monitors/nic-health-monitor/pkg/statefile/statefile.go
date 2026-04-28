@@ -242,16 +242,23 @@ func (m *Manager) KnownDevices() []string {
 // Entries with a different LinkLayer (written by the sibling check) are
 // preserved. knownDevices is unioned with the persisted list so the
 // state checks do not clobber each other's device sets.
+// UpdatePortStates merges per-check port state into the shared map,
+// replacing any existing entries that match the provided LinkLayer(s).
+// Returns true if the state was modified (caller should Save).
 func (m *Manager) UpdatePortStates(
 	portStates map[string]PortStateSnapshot,
 	knownDevices []string,
 	layers ...string,
-) {
+) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.state.PortStates == nil {
 		m.state.PortStates = make(map[string]PortStateSnapshot, len(portStates))
+	}
+
+	if !m.portStatesChanged(portStates, layers) {
+		return false
 	}
 
 	for k, v := range m.state.PortStates {
@@ -279,6 +286,32 @@ func (m *Manager) UpdatePortStates(
 
 	sort.Strings(devices)
 	m.state.KnownDevices = devices
+
+	return true
+}
+
+// portStatesChanged reports whether the incoming port states differ from
+// the currently persisted entries for the given link layers.
+func (m *Manager) portStatesChanged(
+	incoming map[string]PortStateSnapshot, layers []string,
+) bool {
+	for k, old := range m.state.PortStates {
+		if !matchesLayer(old.LinkLayer, layers) {
+			continue
+		}
+
+		if newSnap, exists := incoming[k]; !exists || old != newSnap {
+			return true
+		}
+	}
+
+	for k := range incoming {
+		if _, exists := m.state.PortStates[k]; !exists {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Save writes the current state to disk atomically (tmp file + rename).

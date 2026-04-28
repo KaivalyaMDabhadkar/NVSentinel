@@ -254,7 +254,7 @@ const (
 **Physical State Substates**: `Sleep (1)`, `Polling (2)`, `Disabled (3)`, `Training (4)`, `LinkUp (5)`, `LinkErrorRecovery (6)`
 
 - **Polling (2)**: Transient state during link training. Every port passes through Polling when establishing a connection. Classified as **Non-Fatal** (`IsFatal=false`). If a port remains in Polling, it won't count as active in the card homogeneity check, so the card's active port count will fall below the peer mode and be caught as a Fatal anomaly (see Section 4.2).
-- **LinkErrorRecovery (6)**: Active error recovery in progress (FATAL)
+- **LinkErrorRecovery (6)**: Active error recovery in progress. Classified as **Non-Fatal** (`IsFatal=false`) because the HCA firmware is actively retrying. If recovery fails and the port remains unhealthy, the card homogeneity check (Section 4.3) escalates to Fatal by detecting fewer active ports than peers.
 
 ### 3.3 Diagnostic Commands
 
@@ -399,23 +399,24 @@ The mapping from NVIDIA topology levels (the `nvmlGpuTopologyLevel_t` enum, disp
 
 ```
 classify_nic(nic):
-    # Step 1: NUMA isolation gate
+    # Step 1: Default route exclusion
+    # Catches management NICs that share a NUMA node with GPUs
+    # (e.g., on-prem L40S, GB200). Runs first so the management NIC
+    # is excluded even if it has PCIe proximity to a GPU.
+    if device == default_route_device:
+        return Management
+
+    # Step 2: NUMA isolation gate
     if nic_numa not in gpu_numa_set:
         return Management
 
-    # Step 2: Role determination (topo + link layer)
+    # Step 3: Role determination (topo + link layer)
     topo = topo_matrix[nic]  # array of relationships, one per GPU
 
     if any GPU has PIX or PXB:
         return Compute
 
-    # Step 2: Default route exclusion (runs before topology classification)
-    # Reads /proc/net/route to find the default route interface, maps it
-    # to an IB device via sysfs, and excludes it as Management.
-    if device == default_route_device:
-        return Management
-
-    # Step 3: Topology-based classification
+    # Step 4: Topology-based classification
     if link_layer == "InfiniBand":
         return Compute
 
@@ -1138,9 +1139,15 @@ The key question: **"Will the workload fail because of this?"**
 | **NIC state = DOWN**               | **RecommendedAction_REPLACE_VM** | No network connectivity, workloads will timeout            |
 | **Device disappeared**             | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure                    |
 | **phys_state = Disabled**          | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible                   |
-| **phys_state = LinkErrorRecovery** | **RecommendedAction_REPLACE_VM** | Active link problems                                       |
 | **Uncabled port anomaly**          | **RecommendedAction_REPLACE_VM** | Card has fewer active ports than peers (homogeneity check) |
 | **Port flapping (3+ cycles)**      | **RecommendedAction_REPLACE_VM** | Intermittent hardware/cable instability                    |
+
+### Non-Fatal State Conditions (IsFatal = false)
+
+| Condition                          | Recommended Action               | Rationale                                                  |
+|------------------------------------|----------------------------------|------------------------------------------------------------|
+| **phys_state = LinkErrorRecovery** | **RecommendedAction_NONE**       | HCA firmware actively retrying; escalated to fatal by card homogeneity check if persistent |
+| **phys_state = Polling**           | **RecommendedAction_NONE**       | Transient link training; escalated to fatal by card homogeneity check if persistent |
 
 ### Fatal Counters (IsFatal = true)
 
@@ -1161,7 +1168,7 @@ For kernel log pattern details (fatal and non-fatal classifications, regex patte
 |----------------------------------|----------------------------------|-------------------------------------------------------|
 | `state = DOWN`                   | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/state`      |
 | `phys_state = Disabled`          | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` |
-| `phys_state = LinkErrorRecovery` | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` |
+| `phys_state = LinkErrorRecovery` | **RecommendedAction_NONE**       | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` (non-fatal; escalated by homogeneity check if persistent) |
 | Uncabled port anomaly            | **RecommendedAction_REPLACE_VM** | Card homogeneity check (PCI card grouping + mode)     |
 | Device disappeared               | **RecommendedAction_REPLACE_VM** | Device enumeration in `/sys/class/infiniband/`        |
 

@@ -26,7 +26,7 @@ var (
 	DevicesDiscovered = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "nic_health_monitor_devices_discovered",
 		Help: "Number of NIC devices discovered in sysfs",
-	}, []string{"node"})
+	}, []string{"node", "check"})
 
 	// HealthEventsSent counts health events sent to the platform connector.
 	HealthEventsSent = promauto.NewCounterVec(prometheus.CounterOpts{

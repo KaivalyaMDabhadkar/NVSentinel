@@ -182,10 +182,6 @@ func (b *baseStateCheck) detectDeviceDisappearance(current map[string]bool) []*p
 			checks.DeviceEntities(device),
 			true, false, pb.RecommendedAction_REPLACE_VM, b.processingStrategy,
 		))
-
-		// Remove so we don't re-emit on the next poll if
-		// previousDevices hasn't been replaced yet.
-		delete(b.previousDevices, device)
 	}
 
 	return events
@@ -225,8 +221,6 @@ func (b *baseStateCheck) detectPortDisappearance(
 			b.strategy.formatPortDisappearance(prev.Device, prev.Port),
 			true, false, pb.RecommendedAction_REPLACE_VM,
 		))
-
-		delete(b.previousPorts, key)
 	}
 
 	return events
@@ -256,7 +250,9 @@ func (b *baseStateCheck) persistState(
 		devices = append(devices, d)
 	}
 
-	b.state.UpdatePortStates(snapshots, devices, linkLayer)
+	if !b.state.UpdatePortStates(snapshots, devices, linkLayer) {
+		return
+	}
 
 	if err := b.state.Save(); err != nil {
 		slog.Warn("Failed to persist state to disk",

@@ -15,6 +15,10 @@
 package config
 
 import (
+	"fmt"
+	"regexp"
+	"strings"
+
 	"github.com/nvidia/nvsentinel/commons/pkg/configmanager"
 )
 
@@ -49,5 +53,32 @@ func LoadConfig(path string) (*Config, error) {
 		cfg.SysClassInfinibandPath = "/nvsentinel/sys/class/infiniband"
 	}
 
+	if err := validateRegexList(cfg.NicExclusionRegex); err != nil {
+		return nil, fmt.Errorf("invalid nicExclusionRegex: %w", err)
+	}
+
+	if err := validateRegexList(cfg.NicInclusionRegexOverride); err != nil {
+		return nil, fmt.Errorf("invalid nicInclusionRegexOverride: %w", err)
+	}
+
 	return cfg, nil
+}
+
+func validateRegexList(commaSeparated string) error {
+	if commaSeparated == "" {
+		return nil
+	}
+
+	for _, pat := range strings.Split(commaSeparated, ",") {
+		pat = strings.TrimSpace(pat)
+		if pat == "" {
+			continue
+		}
+
+		if _, err := regexp.Compile(pat); err != nil {
+			return fmt.Errorf("pattern %q: %w", pat, err)
+		}
+	}
+
+	return nil
 }
