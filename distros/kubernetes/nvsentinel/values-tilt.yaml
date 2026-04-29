@@ -93,6 +93,9 @@ global:
   slurmDrainMonitor:
     enabled: true
 
+  nicHealthMonitor:
+    enabled: true
+
   eventExporter:
     enabled: true
 
