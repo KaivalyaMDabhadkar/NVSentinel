@@ -2697,49 +2697,6 @@ func UpdateDaemonSetArgs(ctx context.Context, t *testing.T,
 	return originalArgs, nil
 }
 
-// RemoveNodeConditions patches the node status to remove the specified
-// condition types. Useful for cleaning up stale conditions between tests.
-func RemoveNodeConditions(ctx context.Context, t *testing.T,
-	client klient.Client, nodeName string, conditionTypes ...string,
-) {
-	t.Helper()
-
-	exclude := make(map[string]bool, len(conditionTypes))
-	for _, ct := range conditionTypes {
-		exclude[ct] = true
-	}
-
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		node, getErr := GetNodeByName(ctx, client, nodeName)
-		if getErr != nil {
-			return getErr
-		}
-
-		filtered := make([]v1.NodeCondition, 0, len(node.Status.Conditions))
-		removed := 0
-
-		for _, c := range node.Status.Conditions {
-			if exclude[string(c.Type)] {
-				removed++
-				continue
-			}
-
-			filtered = append(filtered, c)
-		}
-
-		if removed == 0 {
-			return nil
-		}
-
-		node.Status.Conditions = filtered
-
-		return client.Resources().UpdateStatus(ctx, node)
-	})
-	if err != nil {
-		t.Logf("Warning: failed to remove node conditions: %v", err)
-	}
-}
-
 // RestoreDaemonSetArgs restores the daemonset container args to the original state.
 // Use the originalArgs returned by UpdateDaemonSetArgs to rollback the changes.
 func RestoreDaemonSetArgs(ctx context.Context, t *testing.T, client klient.Client,
