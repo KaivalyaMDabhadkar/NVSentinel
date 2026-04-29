@@ -63,10 +63,10 @@ func SetUpNICHealthMonitor(ctx context.Context, t *testing.T,
 	testNodeName := findNICMonitorWorkerNode(ctx, t, client)
 	t.Logf("Using target node: %s", testNodeName)
 
-	// Remove any stale NIC conditions left from previous runs on this node.
+	// Clear stale NIC conditions by sending healthy events through the
+	// platform connector
 	t.Logf("Clearing stale NIC conditions from node %s", testNodeName)
-	RemoveNodeConditions(ctx, t, client, testNodeName,
-		"InfiniBandStateCheck", "EthernetStateCheck")
+	clearNICConditions(ctx, t, testNodeName)
 
 	configSnapshot, err := BackupConfigMap(ctx, client, NICHealthMonitorConfigMapName, NVSentinelNamespace)
 	require.NoError(t, err, "failed to backup NIC monitor ConfigMap")
@@ -150,9 +150,8 @@ func TearDownNICHealthMonitor(ctx context.Context, t *testing.T,
 		stubMeta := CreateNICTestMetadata(state.NodeName)
 		InjectMetadata(t, ctx, client, NVSentinelNamespace, state.NodeName, stubMeta)
 
-		t.Logf("Removing stale NIC conditions from node %s", state.NodeName)
-		RemoveNodeConditions(ctx, t, client, state.NodeName,
-			"InfiniBandStateCheck", "EthernetStateCheck")
+		t.Logf("Clearing stale NIC conditions from node %s", state.NodeName)
+		clearNICConditions(ctx, t, state.NodeName)
 
 		t.Logf("Removing ManagedByNVSentinel label from node %s", state.NodeName)
 
@@ -342,6 +341,25 @@ func runShellPodOnNode(t *testing.T, ctx context.Context,
 }
 
 func hostPathType(t corev1.HostPathType) *corev1.HostPathType { return &t }
+
+// clearNICConditions sends healthy events for both NIC check types
+// through the platform connector, clearing any stale conditions.
+func clearNICConditions(ctx context.Context, t *testing.T, nodeName string) {
+	t.Helper()
+
+	for _, checkName := range []string{"InfiniBandStateCheck", "EthernetStateCheck"} {
+		event := NewHealthEvent(nodeName).
+			WithAgent("nic-health-monitor").
+			WithCheckName(checkName).
+			WithHealthy(true).
+			WithFatal(false).
+			WithMessage("No Health Failures").
+			WithComponentClass("NIC")
+
+		event.EntitiesImpacted = []EntityImpacted{}
+		SendHealthEvent(ctx, t, event)
+	}
+}
 
 // deleteNICMonitorPodOnNode finds and deletes the NIC monitor pod on
 // the given node, regardless of its readiness state.

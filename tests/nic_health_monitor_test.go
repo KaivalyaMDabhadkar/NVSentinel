@@ -21,6 +21,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"tests/helpers"
 
@@ -398,11 +399,10 @@ func TestNICHealthMonitorVFSkip(t *testing.T) {
 		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
 			ibCheckName, "", "", corev1.ConditionFalse)
 
-		t.Log("Verifying no condition message mentions mlx5_9 or mlx5_10")
-		require.Eventually(t, func() bool {
+		t.Log("Observing for 10s that no condition message mentions mlx5_9 or mlx5_10")
+		require.Never(t, func() bool {
 			node, err := helpers.GetNodeByName(ctx, client, nodeName)
 			if err != nil {
-				t.Logf("Failed to get node: %v", err)
 				return false
 			}
 
@@ -410,12 +410,12 @@ func TestNICHealthMonitorVFSkip(t *testing.T) {
 				msg := condition.Message
 				if strings.Contains(msg, "mlx5_9") || strings.Contains(msg, "mlx5_10") {
 					t.Logf("FAIL: VF device found in condition message: %s", msg)
-					return false
+					return true
 				}
 			}
 
-			return true
-		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval,
+			return false
+		}, 10*time.Second, helpers.WaitInterval,
 			"VF devices should never appear in node conditions")
 
 		return ctx
