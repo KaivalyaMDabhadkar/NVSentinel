@@ -147,10 +147,12 @@ func TearDownNICHealthMonitor(ctx context.Context, t *testing.T,
 			"InfiniBandStateCheck", "EthernetStateCheck")
 	}
 
-	t.Logf("Removing ManagedByNVSentinel label from node %s", state.NodeName)
+	if state.NodeName != "" {
+		t.Logf("Removing ManagedByNVSentinel label from node %s", state.NodeName)
 
-	if err := RemoveNodeManagedByNVSentinelLabel(ctx, client, state.NodeName); err != nil {
-		t.Logf("Warning: failed to remove label: %v", err)
+		if err := RemoveNodeManagedByNVSentinelLabel(ctx, client, state.NodeName); err != nil {
+			t.Logf("Warning: failed to remove label: %v", err)
+		}
 	}
 }
 
@@ -416,7 +418,7 @@ func updateConfigMapSysfsPaths(t *testing.T, ctx context.Context, client klient.
 
 		configTOML := cm.Data["config.toml"]
 		if configTOML == "" {
-			t.Fatal("NIC health monitor ConfigMap missing config.toml key")
+			return fmt.Errorf("NIC health monitor ConfigMap missing config.toml key")
 		}
 
 		cm.Data["config.toml"] = replaceConfigPaths(configTOML)
