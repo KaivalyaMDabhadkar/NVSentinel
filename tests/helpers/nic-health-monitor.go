@@ -382,8 +382,10 @@ func runShellPodOnNode(t *testing.T, ctx context.Context,
 
 func hostPathType(t corev1.HostPathType) *corev1.HostPathType { return &t }
 
-// updateNICMonitorForFakeSysfs patches the DaemonSet args to point the
-// NIC monitor at the fake sysfs paths. Returns the original args.
+// updateNICMonitorForFakeSysfs patches the ConfigMap and DaemonSet args
+// to point the NIC monitor at the fake sysfs paths. Does NOT wait for
+// the full DaemonSet rollout — the caller explicitly deletes and
+// restarts the pod on the target node
 func updateNICMonitorForFakeSysfs(t *testing.T, ctx context.Context,
 	client klient.Client,
 ) []string {
@@ -397,7 +399,7 @@ func updateNICMonitorForFakeSysfs(t *testing.T, ctx context.Context,
 		"--checks":       "InfiniBandStateCheck,EthernetStateCheck",
 	}
 
-	originalArgs, err := UpdateDaemonSetArgs(ctx, t, client,
+	originalArgs, err := UpdateDaemonSetArgsNoWait(ctx, t, client,
 		NICHealthMonitorDaemonSetName, NICHealthMonitorContainerName, args)
 	require.NoError(t, err, "failed to update NIC health monitor DaemonSet args")
 

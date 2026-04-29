@@ -2698,6 +2698,44 @@ func UpdateDaemonSetArgs(ctx context.Context, t *testing.T,
 	return originalArgs, nil
 }
 
+// UpdateDaemonSetArgsNoWait is like UpdateDaemonSetArgs but does not
+// wait for the full DaemonSet rollout. Use when the caller will
+// restart specific pods manually.
+func UpdateDaemonSetArgsNoWait(ctx context.Context, t *testing.T,
+	client klient.Client, daemonsetName, containerName string,
+	args map[string]string,
+) ([]string, error) {
+	t.Helper()
+
+	t.Logf("Updating daemonset %s/%s with args %v (no rollout wait)",
+		NVSentinelNamespace, daemonsetName, args)
+
+	var originalArgs []string
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		daemonSet := &appsv1.DaemonSet{}
+		if err := client.Resources().Get(ctx, daemonsetName, NVSentinelNamespace, daemonSet); err != nil {
+			return err
+		}
+
+		for i := range daemonSet.Spec.Template.Spec.Containers {
+			if daemonSet.Spec.Template.Spec.Containers[i].Name == containerName {
+				originalArgs = make([]string, len(daemonSet.Spec.Template.Spec.Containers[i].Args))
+				copy(originalArgs, daemonSet.Spec.Template.Spec.Containers[i].Args)
+
+				setArgsOnContainer(t, &daemonSet.Spec.Template.Spec.Containers[i], args)
+
+				return client.Resources().Update(ctx, daemonSet)
+			}
+		}
+
+		return fmt.Errorf("container %q not found in daemonset %s/%s",
+			containerName, NVSentinelNamespace, daemonsetName)
+	})
+
+	return originalArgs, err
+}
+
 // RestoreDaemonSetArgs restores the daemonset container args to the original state.
 // Use the originalArgs returned by UpdateDaemonSetArgs to rollback the changes.
 func RestoreDaemonSetArgs(ctx context.Context, t *testing.T, client klient.Client,
