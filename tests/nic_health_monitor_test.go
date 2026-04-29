@@ -598,7 +598,7 @@ func TestNICHealthMonitorMultipleDownRecoveryCycles(t *testing.T) {
 			helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 				nodeName, "mlx5_0", "1", "1: DOWN", "3: Disabled")
 
-			helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
+			helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
 				ibCheckName, "Port mlx5_0 port 1", "", corev1.ConditionTrue)
 
 			t.Logf("--- Cycle %d: restoring mlx5_0 ---", cycle)
@@ -656,9 +656,9 @@ func TestNICHealthMonitorPhysStateDisabled(t *testing.T) {
 		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
 			ibCheckName, "", "", corev1.ConditionFalse)
 
-		t.Log("Setting mlx5_1 to DOWN with phys_state=Disabled")
+		t.Log("Setting mlx5_1 to ACTIVE with phys_state=Disabled")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
-			nodeName, "mlx5_1", "1", "1: DOWN", "3: Disabled")
+			nodeName, "mlx5_1", "1", "4: ACTIVE", "3: Disabled")
 
 		t.Log("Verifying IB condition shows unhealthy for mlx5_1")
 		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
