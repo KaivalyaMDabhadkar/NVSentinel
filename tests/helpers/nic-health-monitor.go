@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
@@ -135,8 +136,7 @@ func TearDownNICHealthMonitor(ctx context.Context, t *testing.T,
 	}
 
 	if state.OriginalArgs != nil {
-		RestoreDaemonSetArgs(ctx, t, client,
-			NICHealthMonitorDaemonSetName, NICHealthMonitorContainerName, state.OriginalArgs)
+		restoreNICDaemonSetArgsNoWait(ctx, t, client, state.OriginalArgs)
 	}
 
 	if state.NodeName != "" {
@@ -404,6 +404,39 @@ func updateNICMonitorForFakeSysfs(t *testing.T, ctx context.Context,
 	require.NoError(t, err, "failed to update NIC health monitor DaemonSet args")
 
 	return originalArgs
+}
+
+// restoreNICDaemonSetArgsNoWait restores the DaemonSet args without
+// waiting for the full rollout
+func restoreNICDaemonSetArgsNoWait(ctx context.Context, t *testing.T,
+	client klient.Client, originalArgs []string,
+) {
+	t.Helper()
+
+	t.Logf("Restoring args for daemonset %s/%s container %s (no rollout wait)",
+		NVSentinelNamespace, NICHealthMonitorDaemonSetName, NICHealthMonitorContainerName)
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		daemonSet := &appsv1.DaemonSet{}
+		if getErr := client.Resources().Get(ctx, NICHealthMonitorDaemonSetName,
+			NVSentinelNamespace, daemonSet); getErr != nil {
+			return getErr
+		}
+
+		for i := range daemonSet.Spec.Template.Spec.Containers {
+			if daemonSet.Spec.Template.Spec.Containers[i].Name == NICHealthMonitorContainerName {
+				daemonSet.Spec.Template.Spec.Containers[i].Args = make([]string, len(originalArgs))
+				copy(daemonSet.Spec.Template.Spec.Containers[i].Args, originalArgs)
+
+				return client.Resources().Update(ctx, daemonSet)
+			}
+		}
+
+		return fmt.Errorf("container %q not found", NICHealthMonitorContainerName)
+	})
+	if err != nil {
+		t.Logf("Warning: failed to restore DaemonSet args: %v", err)
+	}
 }
 
 // updateConfigMapSysfsPaths updates the NIC monitor ConfigMap to use
