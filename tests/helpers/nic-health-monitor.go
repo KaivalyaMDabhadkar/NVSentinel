@@ -17,6 +17,8 @@ package helpers
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -31,7 +33,7 @@ import (
 const (
 	NICHealthMonitorDaemonSetName = "nic-health-monitor"
 	NICHealthMonitorContainerName = "nic-health-monitor"
-	NICHealthMonitorConfigMapName = "nic-health-monitor-config"
+	NICHealthMonitorConfigMapName = "nic-health-monitor"
 
 	FakeSysfsIBPath  = "/var/lib/nvsentinel/fake-ib"
 	FakeSysfsNetPath = "/var/lib/nvsentinel/fake-net"
@@ -46,7 +48,7 @@ type NICTestState struct {
 	NodeName       string
 	PodName        string
 	OriginalArgs   []string
-	ConfigSnapshot *NICMonitorConfigMapSnapshot
+	ConfigSnapshot []byte
 }
 
 // SetUpNICHealthMonitor finds the NIC monitor DaemonSet pod, creates the
@@ -58,20 +60,16 @@ func SetUpNICHealthMonitor(ctx context.Context, t *testing.T,
 ) (string, *corev1.Pod, *NICTestState) {
 	t.Helper()
 
-	nicPod, err := GetDaemonSetPodOnWorkerNode(ctx, t, client,
-		NICHealthMonitorDaemonSetName, "nic-health-monitor")
-	require.NoError(t, err, "failed to get NIC health monitor pod on worker node")
-	require.NotNil(t, nicPod, "NIC health monitor pod should exist on worker node")
-
-	testNodeName := nicPod.Spec.NodeName
-	t.Logf("Using NIC health monitor pod: %s on node: %s", nicPod.Name, testNodeName)
+	testNodeName := findNICMonitorWorkerNode(ctx, t, client)
+	t.Logf("Using target node: %s", testNodeName)
 
 	// Remove any stale NIC conditions left from previous runs on this node.
 	t.Logf("Clearing stale NIC conditions from node %s", testNodeName)
-	removeNodeConditions(ctx, t, client, testNodeName,
+	RemoveNodeConditions(ctx, t, client, testNodeName,
 		"InfiniBandStateCheck", "EthernetStateCheck")
 
-	configSnapshot := BackupNICConfigMap(t, ctx, client)
+	configSnapshot, err := BackupConfigMap(ctx, client, NICHealthMonitorConfigMapName, NVSentinelNamespace)
+	require.NoError(t, err, "failed to backup NIC monitor ConfigMap")
 
 	CreateFakeSysfsTree(t, ctx, client, NVSentinelNamespace, testNodeName)
 
@@ -92,15 +90,13 @@ func SetUpNICHealthMonitor(ctx context.Context, t *testing.T,
 	t.Logf("Writing new boot_id %s to force baseline emission", newBootID)
 	MutateBootID(t, ctx, client, NVSentinelNamespace, testNodeName, newBootID)
 
+	// Delete any existing pod on the target node (may be crashing from
+	// a previous test's teardown rollout) and wait for a fresh ready pod.
 	t.Logf("Deleting NIC monitor pod on node %s to force config reload", testNodeName)
-	nicPod, err = GetDaemonSetPodOnWorkerNode(ctx, t, client,
-		NICHealthMonitorDaemonSetName, "nic-health-monitor", testNodeName)
-	require.NoError(t, err, "failed to find NIC monitor pod to restart")
-	err = DeletePod(ctx, t, client, NVSentinelNamespace, nicPod.Name, true)
-	require.NoError(t, err, "failed to delete NIC monitor pod")
+	deleteNICMonitorPodOnNode(ctx, t, client, testNodeName)
 
 	t.Logf("Waiting for replacement NIC monitor pod on node %s", testNodeName)
-	nicPod, err = GetDaemonSetPodOnWorkerNode(ctx, t, client,
+	nicPod, err := GetDaemonSetPodOnWorkerNode(ctx, t, client,
 		NICHealthMonitorDaemonSetName, "nic-health-monitor", testNodeName)
 	require.NoError(t, err, "failed to get replacement NIC health monitor pod on node %s", testNodeName)
 	t.Logf("NIC health monitor pod ready: %s on node: %s", nicPod.Name, nicPod.Spec.NodeName)
@@ -132,7 +128,13 @@ func TearDownNICHealthMonitor(ctx context.Context, t *testing.T,
 	}
 
 	if state.ConfigSnapshot != nil {
-		RestoreNICConfigMap(t, ctx, client, state.ConfigSnapshot)
+		t.Log("Restoring NIC monitor ConfigMap from backup")
+
+		err := createConfigMapFromBytes(ctx, client, state.ConfigSnapshot,
+			NICHealthMonitorConfigMapName, NVSentinelNamespace)
+		if err != nil {
+			t.Logf("Warning: failed to restore ConfigMap: %v", err)
+		}
 	}
 
 	if state.OriginalArgs != nil {
@@ -142,62 +144,21 @@ func TearDownNICHealthMonitor(ctx context.Context, t *testing.T,
 	if state.NodeName != "" {
 		CleanupFakeSysfs(t, ctx, client, NVSentinelNamespace, state.NodeName)
 
-		t.Logf("Removing stale NIC conditions from node %s", state.NodeName)
-		removeNodeConditions(ctx, t, client, state.NodeName,
-			"InfiniBandStateCheck", "EthernetStateCheck")
-	}
+		// Re-inject stub metadata so the pod that starts after the
+		// no-wait args restoration has valid metadata and doesn't
+		// CrashLoopBackOff, blocking subsequent tests.
+		stubMeta := CreateNICTestMetadata(state.NodeName)
+		InjectMetadata(t, ctx, client, NVSentinelNamespace, state.NodeName, stubMeta)
 
-	if state.NodeName != "" {
+		t.Logf("Removing stale NIC conditions from node %s", state.NodeName)
+		RemoveNodeConditions(ctx, t, client, state.NodeName,
+			"InfiniBandStateCheck", "EthernetStateCheck")
+
 		t.Logf("Removing ManagedByNVSentinel label from node %s", state.NodeName)
 
 		if err := RemoveNodeManagedByNVSentinelLabel(ctx, client, state.NodeName); err != nil {
 			t.Logf("Warning: failed to remove label: %v", err)
 		}
-	}
-}
-
-// removeNodeConditions patches the node status to remove the specified
-// condition types, preventing cross-test contamination from stale
-// conditions that the NIC monitor can no longer clear (because the fake
-// sysfs and config have been restored to defaults).
-func removeNodeConditions(ctx context.Context, t *testing.T,
-	client klient.Client, nodeName string, conditionTypes ...string,
-) {
-	t.Helper()
-
-	exclude := make(map[string]bool, len(conditionTypes))
-	for _, ct := range conditionTypes {
-		exclude[ct] = true
-	}
-
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		node, getErr := GetNodeByName(ctx, client, nodeName)
-		if getErr != nil {
-			return getErr
-		}
-
-		filtered := make([]corev1.NodeCondition, 0, len(node.Status.Conditions))
-		removed := 0
-
-		for _, c := range node.Status.Conditions {
-			if exclude[string(c.Type)] {
-				removed++
-				continue
-			}
-
-			filtered = append(filtered, c)
-		}
-
-		if removed == 0 {
-			return nil
-		}
-
-		node.Status.Conditions = filtered
-
-		return client.Resources().UpdateStatus(ctx, node)
-	})
-	if err != nil {
-		t.Logf("Warning: failed to remove node conditions: %v", err)
 	}
 }
 
@@ -382,6 +343,82 @@ func runShellPodOnNode(t *testing.T, ctx context.Context,
 
 func hostPathType(t corev1.HostPathType) *corev1.HostPathType { return &t }
 
+// deleteNICMonitorPodOnNode finds and deletes the NIC monitor pod on
+// the given node, regardless of its readiness state.
+func deleteNICMonitorPodOnNode(ctx context.Context, t *testing.T,
+	client klient.Client, nodeName string,
+) {
+	t.Helper()
+
+	pods := &corev1.PodList{}
+
+	err := client.Resources().List(ctx, pods, func(opts *metav1.ListOptions) {
+		opts.FieldSelector = fmt.Sprintf("metadata.namespace=%s,spec.nodeName=%s",
+			NVSentinelNamespace, nodeName)
+	})
+	if err != nil {
+		t.Logf("Warning: failed to list pods on %s: %v", nodeName, err)
+		return
+	}
+
+	for i := range pods.Items {
+		if strings.Contains(pods.Items[i].Name, "nic-health-monitor") {
+			t.Logf("Deleting pod %s on node %s", pods.Items[i].Name, nodeName)
+			_ = DeletePod(ctx, t, client, NVSentinelNamespace, pods.Items[i].Name, true)
+
+			return
+		}
+	}
+
+	t.Logf("No NIC monitor pod found on node %s to delete", nodeName)
+}
+
+// findNICMonitorWorkerNode finds the worker node running a NIC monitor
+// pod. Unlike GetDaemonSetPodOnWorkerNode, this does NOT require the
+// pod to be ready — the pod may be crashing due to missing metadata
+// from a previous test's teardown. We only need the node name; the
+// setup will inject metadata and restart the pod.
+func findNICMonitorWorkerNode(ctx context.Context, t *testing.T, client klient.Client) string {
+	t.Helper()
+
+	nodePattern := regexp.MustCompile(`^nvsentinel-worker`)
+
+	var nodeName string
+
+	require.Eventually(t, func() bool {
+		pods := &corev1.PodList{}
+		if err := client.Resources().List(ctx, pods, func(opts *metav1.ListOptions) {
+			opts.FieldSelector = fmt.Sprintf("metadata.namespace=%s", NVSentinelNamespace)
+		}); err != nil {
+			t.Logf("Failed to list pods: %v", err)
+			return false
+		}
+
+		for i := range pods.Items {
+			pod := &pods.Items[i]
+			if !strings.Contains(pod.Name, "nic-health-monitor") {
+				continue
+			}
+
+			if !nodePattern.MatchString(pod.Spec.NodeName) {
+				continue
+			}
+
+			nodeName = pod.Spec.NodeName
+			t.Logf("Found NIC monitor pod %s on worker node %s (phase=%s)",
+				pod.Name, pod.Spec.NodeName, pod.Status.Phase)
+
+			return true
+		}
+
+		t.Logf("No NIC monitor pod found on worker nodes yet")
+
+		return false
+	}, EventuallyWaitTimeout, WaitInterval, "should find NIC monitor pod on a worker node")
+
+	return nodeName
+}
+
 // updateNICMonitorForFakeSysfs patches the ConfigMap and DaemonSet args
 // to point the NIC monitor at the fake sysfs paths. Does NOT wait for
 // the full DaemonSet rollout — the caller explicitly deletes and
@@ -399,15 +436,16 @@ func updateNICMonitorForFakeSysfs(t *testing.T, ctx context.Context,
 		"--checks":       "InfiniBandStateCheck,EthernetStateCheck",
 	}
 
-	originalArgs, err := UpdateDaemonSetArgsNoWait(ctx, t, client,
-		NICHealthMonitorDaemonSetName, NICHealthMonitorContainerName, args)
+	originalArgs, err := UpdateDaemonSetArgs(ctx, t, client,
+		NICHealthMonitorDaemonSetName, NICHealthMonitorContainerName, args, false)
 	require.NoError(t, err, "failed to update NIC health monitor DaemonSet args")
 
 	return originalArgs
 }
 
-// restoreNICDaemonSetArgsNoWait restores the DaemonSet args without
-// waiting for the full rollout
+// restoreNICDaemonSetArgsNoWait replaces the DaemonSet container's
+// args slice with the original snapshot, without waiting for the
+// rollout.
 func restoreNICDaemonSetArgsNoWait(ctx context.Context, t *testing.T,
 	client klient.Client, originalArgs []string,
 ) {
@@ -530,76 +568,4 @@ func RestartNICMonitorPod(t *testing.T, ctx context.Context,
 	t.Logf("Restarted NIC monitor: new pod %s on node %s", newPod.Name, nodeName)
 
 	return newPod
-}
-
-// WaitForNICConditionHealthy waits for the given check name condition to
-// show ConditionFalse (healthy) on the node.
-func WaitForNICConditionHealthy(ctx context.Context, t *testing.T,
-	client klient.Client, nodeName, checkName string,
-) {
-	t.Helper()
-	WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
-		checkName, "", "", corev1.ConditionFalse)
-}
-
-// WaitForNICConditionUnhealthy waits for the given check name condition
-// to show ConditionTrue with a matching message substring.
-func WaitForNICConditionUnhealthy(ctx context.Context, t *testing.T,
-	client klient.Client, nodeName, checkName, expectedMessage string,
-) {
-	t.Helper()
-	WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
-		checkName, expectedMessage, "", corev1.ConditionTrue)
-}
-
-// NICMonitorConfigMapSnapshot stores the original ConfigMap data
-// for restoration during teardown.
-type NICMonitorConfigMapSnapshot struct {
-	Data map[string]string
-}
-
-// BackupNICConfigMap captures the current ConfigMap data.
-func BackupNICConfigMap(t *testing.T, ctx context.Context, client klient.Client) *NICMonitorConfigMapSnapshot {
-	t.Helper()
-
-	cm := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      NICHealthMonitorConfigMapName,
-			Namespace: NVSentinelNamespace,
-		},
-	}
-	err := client.Resources().Get(ctx, NICHealthMonitorConfigMapName, NVSentinelNamespace, cm)
-	require.NoError(t, err, "failed to get NIC health monitor ConfigMap")
-
-	dataCopy := make(map[string]string, len(cm.Data))
-	for k, v := range cm.Data {
-		dataCopy[k] = v
-	}
-
-	return &NICMonitorConfigMapSnapshot{Data: dataCopy}
-}
-
-// RestoreNICConfigMap restores the ConfigMap to its backed-up state.
-func RestoreNICConfigMap(t *testing.T, ctx context.Context,
-	client klient.Client, snapshot *NICMonitorConfigMapSnapshot,
-) {
-	t.Helper()
-
-	if snapshot == nil {
-		return
-	}
-
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		cm := &corev1.ConfigMap{}
-		if getErr := client.Resources().Get(ctx, NICHealthMonitorConfigMapName,
-			NVSentinelNamespace, cm); getErr != nil {
-			return getErr
-		}
-
-		cm.Data = snapshot.Data
-
-		return client.Resources().Update(ctx, cm)
-	})
-	require.NoError(t, err, "failed to restore NIC health monitor ConfigMap")
-	t.Log("Restored NIC health monitor ConfigMap to original state")
 }

@@ -2650,65 +2650,18 @@ func waitForDaemonSetRollout(ctx context.Context, t *testing.T, client klient.Cl
 
 // UpdateDaemonSetArgs updates the daemonset with the specified arguments and completes the rollout.
 // Returns the original args slice that can be used with RestoreDaemonSetArgs to rollback the changes.
+// UpdateDaemonSetArgs updates the args on a DaemonSet container and
+// returns the original args. When waitForRollout is true, blocks until
+// the full rollout completes. Pass false when the caller will restart
+// specific pods manually.
 func UpdateDaemonSetArgs(ctx context.Context, t *testing.T,
-	client klient.Client, daemonsetName string, containerName string,
-	args map[string]string) ([]string, error) {
-	t.Helper()
-
-	t.Logf("Updating daemonset %s/%s with args %v", NVSentinelNamespace, daemonsetName, args)
-
-	var originalArgs []string
-
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		daemonSet := &appsv1.DaemonSet{}
-		if err := client.Resources().Get(ctx, daemonsetName, NVSentinelNamespace, daemonSet); err != nil {
-			return err
-		}
-
-		containers := daemonSet.Spec.Template.Spec.Containers
-		containerFound := false
-
-		for i := range containers {
-			if containers[i].Name == containerName {
-				// Capture original args before modification
-				originalArgs = make([]string, len(containers[i].Args))
-				copy(originalArgs, containers[i].Args)
-
-				setArgsOnContainer(t, &containers[i], args)
-
-				containerFound = true
-
-				break
-			}
-		}
-
-		if !containerFound {
-			return fmt.Errorf("container %q not found in daemonset %s/%s", containerName, NVSentinelNamespace, daemonsetName)
-		}
-
-		return client.Resources().Update(ctx, daemonSet)
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	t.Logf("Waiting for daemonset %s/%s rollout to complete", NVSentinelNamespace, daemonsetName)
-	waitForDaemonSetRollout(ctx, t, client, daemonsetName)
-
-	return originalArgs, nil
-}
-
-// UpdateDaemonSetArgsNoWait is like UpdateDaemonSetArgs but does not
-// wait for the full DaemonSet rollout. Use when the caller will
-// restart specific pods manually.
-func UpdateDaemonSetArgsNoWait(ctx context.Context, t *testing.T,
 	client klient.Client, daemonsetName, containerName string,
-	args map[string]string,
+	args map[string]string, waitForRollout bool,
 ) ([]string, error) {
 	t.Helper()
 
-	t.Logf("Updating daemonset %s/%s with args %v (no rollout wait)",
-		NVSentinelNamespace, daemonsetName, args)
+	t.Logf("Updating daemonset %s/%s with args %v (wait=%v)",
+		NVSentinelNamespace, daemonsetName, args, waitForRollout)
 
 	var originalArgs []string
 
@@ -2732,8 +2685,59 @@ func UpdateDaemonSetArgsNoWait(ctx context.Context, t *testing.T,
 		return fmt.Errorf("container %q not found in daemonset %s/%s",
 			containerName, NVSentinelNamespace, daemonsetName)
 	})
+	if err != nil {
+		return nil, err
+	}
 
-	return originalArgs, err
+	if waitForRollout {
+		t.Logf("Waiting for daemonset %s/%s rollout to complete", NVSentinelNamespace, daemonsetName)
+		waitForDaemonSetRollout(ctx, t, client, daemonsetName)
+	}
+
+	return originalArgs, nil
+}
+
+// RemoveNodeConditions patches the node status to remove the specified
+// condition types. Useful for cleaning up stale conditions between tests.
+func RemoveNodeConditions(ctx context.Context, t *testing.T,
+	client klient.Client, nodeName string, conditionTypes ...string,
+) {
+	t.Helper()
+
+	exclude := make(map[string]bool, len(conditionTypes))
+	for _, ct := range conditionTypes {
+		exclude[ct] = true
+	}
+
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node, getErr := GetNodeByName(ctx, client, nodeName)
+		if getErr != nil {
+			return getErr
+		}
+
+		filtered := make([]v1.NodeCondition, 0, len(node.Status.Conditions))
+		removed := 0
+
+		for _, c := range node.Status.Conditions {
+			if exclude[string(c.Type)] {
+				removed++
+				continue
+			}
+
+			filtered = append(filtered, c)
+		}
+
+		if removed == 0 {
+			return nil
+		}
+
+		node.Status.Conditions = filtered
+
+		return client.Resources().UpdateStatus(ctx, node)
+	})
+	if err != nil {
+		t.Logf("Warning: failed to remove node conditions: %v", err)
+	}
 }
 
 // RestoreDaemonSetArgs restores the daemonset container args to the original state.

@@ -25,6 +25,7 @@ import (
 	"tests/helpers"
 
 	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
 )
@@ -68,7 +69,8 @@ func TestNICHealthMonitorRoCEStateDetection(t *testing.T) {
 		nodeName := ctx.Value(keyNICNodeName).(string)
 
 		t.Log("Verifying EthernetStateCheck condition is False (healthy) after first poll")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		return ctx
 	})
@@ -85,8 +87,8 @@ func TestNICHealthMonitorRoCEStateDetection(t *testing.T) {
 			nodeName, "mlx5_8", "1", "1: DOWN", "3: Disabled")
 
 		t.Log("Verifying EthernetStateCheck condition becomes True (unhealthy)")
-		helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-			ethCheckName, "RoCE port mlx5_8 port 1")
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "RoCE port mlx5_8 port 1", "", corev1.ConditionTrue)
 
 		return ctx
 	})
@@ -103,7 +105,8 @@ func TestNICHealthMonitorRoCEStateDetection(t *testing.T) {
 			nodeName, "mlx5_8", "1", "4: ACTIVE", "5: LinkUp")
 
 		t.Log("Verifying EthernetStateCheck condition returns to False (healthy)")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		return ctx
 	})
@@ -120,8 +123,8 @@ func TestNICHealthMonitorRoCEStateDetection(t *testing.T) {
 			nodeName, "mlx5_8")
 
 		t.Log("Verifying EthernetStateCheck condition shows device disappearance")
-		helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-			ethCheckName, "disappeared")
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "disappeared", "", corev1.ConditionTrue)
 
 		return ctx
 	})
@@ -167,15 +170,16 @@ func TestNICHealthMonitorIBStateDetection(t *testing.T) {
 		nodeName := ctx.Value(keyNICNodeName).(string)
 
 		t.Log("Verifying InfiniBandStateCheck baseline is healthy")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Mutating mlx5_0 port 1 to DOWN/Disabled")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 			nodeName, "mlx5_0", "1", "1: DOWN", "3: Disabled")
 
 		t.Log("Verifying InfiniBandStateCheck condition becomes True (unhealthy)")
-		helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-			ibCheckName, "Port mlx5_0 port 1")
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "Port mlx5_0 port 1", "", corev1.ConditionTrue)
 
 		return ctx
 	})
@@ -192,7 +196,8 @@ func TestNICHealthMonitorIBStateDetection(t *testing.T) {
 			nodeName, "mlx5_0", "1", "4: ACTIVE", "5: LinkUp")
 
 		t.Log("Verifying InfiniBandStateCheck condition returns to False (healthy)")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 
 		return ctx
 	})
@@ -239,15 +244,16 @@ func TestNICHealthMonitorPersistence(t *testing.T) {
 		podName := ctx.Value(keyNICPodName).(string)
 
 		t.Log("Verifying healthy baseline before triggering fault")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Mutating mlx5_8 port 1 to DOWN — creating a fault")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 			nodeName, "mlx5_8", "1", "1: DOWN", "3: Disabled")
 
 		t.Log("Waiting for EthernetStateCheck to detect the fault")
-		helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-			ethCheckName, "RoCE port mlx5_8 port 1")
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "RoCE port mlx5_8 port 1", "", corev1.ConditionTrue)
 
 		t.Log("Restoring mlx5_8 BEFORE restarting pod — recovery during restart window")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
@@ -260,7 +266,8 @@ func TestNICHealthMonitorPersistence(t *testing.T) {
 		ctx = context.WithValue(ctx, keyNICPodName, newPod.Name)
 
 		t.Log("Verifying recovery event — new pod reads persisted DOWN, sees ACTIVE, emits healthy")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		return ctx
 	})
@@ -307,18 +314,20 @@ func TestNICHealthMonitorBootIDChange(t *testing.T) {
 		podName := ctx.Value(keyNICPodName).(string)
 
 		t.Log("Verifying healthy EthernetStateCheck baseline on initial boot ID")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Mutating mlx5_8 to DOWN so condition flips to unhealthy")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 			nodeName, "mlx5_8", "1", "1: DOWN", "3: Disabled")
-		helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-			ethCheckName, "RoCE port mlx5_8 port 1")
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "RoCE port mlx5_8 port 1", "", corev1.ConditionTrue)
 
 		t.Log("Restoring mlx5_8 to ACTIVE")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 			nodeName, "mlx5_8", "1", "4: ACTIVE", "5: LinkUp")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Writing new boot_id to simulate host reboot")
 		helpers.MutateBootID(t, ctx, client, helpers.NVSentinelNamespace,
@@ -331,7 +340,8 @@ func TestNICHealthMonitorBootIDChange(t *testing.T) {
 		ctx = context.WithValue(ctx, keyNICPodName, newPod.Name)
 
 		t.Log("Verifying healthy baseline is re-emitted after boot-ID change")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		return ctx
 	})
@@ -377,14 +387,16 @@ func TestNICHealthMonitorVFSkip(t *testing.T) {
 		nodeName := ctx.Value(keyNICNodeName).(string)
 
 		t.Log("Verifying healthy baseline (VFs should not appear)")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Mutating VF mlx5_9 to DOWN — should NOT trigger a condition change")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 			nodeName, "mlx5_9", "1", "1: DOWN", "3: Disabled")
 
 		t.Log("Verifying InfiniBandStateCheck remains healthy (VF DOWN ignored)")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Verifying no condition message mentions mlx5_9 or mlx5_10")
 		require.Eventually(t, func() bool {
@@ -450,15 +462,16 @@ func TestNICHealthMonitorIBDeviceDisappearance(t *testing.T) {
 		nodeName := ctx.Value(keyNICNodeName).(string)
 
 		t.Log("Verifying IB healthy baseline")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Removing mlx5_1 (InfiniBand device) from fake sysfs")
 		helpers.DeleteSysfsDevice(t, ctx, client, helpers.NVSentinelNamespace,
 			nodeName, "mlx5_1")
 
 		t.Log("Verifying InfiniBandStateCheck detects device disappearance")
-		helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-			ibCheckName, "disappeared")
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "disappeared", "", corev1.ConditionTrue)
 
 		return ctx
 	})
@@ -504,8 +517,10 @@ func TestNICHealthMonitorMultiPortFault(t *testing.T) {
 		nodeName := ctx.Value(keyNICNodeName).(string)
 
 		t.Log("Verifying both check baselines are healthy")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Bringing down mlx5_8 (Ethernet) and mlx5_0 (IB) simultaneously")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
@@ -514,10 +529,10 @@ func TestNICHealthMonitorMultiPortFault(t *testing.T) {
 			nodeName, "mlx5_0", "1", "1: DOWN", "3: Disabled")
 
 		t.Log("Verifying both conditions are unhealthy")
-		helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-			ethCheckName, "RoCE port mlx5_8 port 1")
-		helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-			ibCheckName, "Port mlx5_0 port 1")
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "RoCE port mlx5_8 port 1", "", corev1.ConditionTrue)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "Port mlx5_0 port 1", "", corev1.ConditionTrue)
 
 		t.Log("Restoring both ports")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
@@ -526,8 +541,10 @@ func TestNICHealthMonitorMultiPortFault(t *testing.T) {
 			nodeName, "mlx5_0", "1", "4: ACTIVE", "5: LinkUp")
 
 		t.Log("Verifying both conditions return to healthy")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 
 		return ctx
 	})
@@ -573,7 +590,8 @@ func TestNICHealthMonitorMultipleDownRecoveryCycles(t *testing.T) {
 		nodeName := ctx.Value(keyNICNodeName).(string)
 
 		t.Log("Verifying healthy baseline")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 
 		for cycle := 1; cycle <= 3; cycle++ {
 			t.Logf("--- Cycle %d: bringing mlx5_0 DOWN ---", cycle)
@@ -581,13 +599,14 @@ func TestNICHealthMonitorMultipleDownRecoveryCycles(t *testing.T) {
 				nodeName, "mlx5_0", "1", "1: DOWN", "3: Disabled")
 
 			helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-				ibCheckName, "Port mlx5_0 port 1")
+				ibCheckName, "Port mlx5_0 port 1", "", corev1.ConditionTrue)
 
 			t.Logf("--- Cycle %d: restoring mlx5_0 ---", cycle)
 			helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 				nodeName, "mlx5_0", "1", "4: ACTIVE", "5: LinkUp")
 
-			helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+			helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 		}
 
 		return ctx
@@ -634,21 +653,23 @@ func TestNICHealthMonitorPhysStateDisabled(t *testing.T) {
 		nodeName := ctx.Value(keyNICNodeName).(string)
 
 		t.Log("Verifying healthy baseline")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Setting mlx5_1 to DOWN with phys_state=Disabled")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 			nodeName, "mlx5_1", "1", "1: DOWN", "3: Disabled")
 
 		t.Log("Verifying IB condition shows unhealthy for mlx5_1")
-		helpers.WaitForNICConditionUnhealthy(ctx, t, client, nodeName,
-			ibCheckName, "Port mlx5_1 port 1")
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "Port mlx5_1 port 1", "", corev1.ConditionTrue)
 
 		t.Log("Restoring mlx5_1")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 			nodeName, "mlx5_1", "1", "4: ACTIVE", "5: LinkUp")
 
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ibCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ibCheckName, "", "", corev1.ConditionFalse)
 
 		return ctx
 	})
@@ -693,7 +714,8 @@ func TestNICHealthMonitorConditionMessage(t *testing.T) {
 		nodeName := ctx.Value(keyNICNodeName).(string)
 
 		t.Log("Verifying healthy baseline")
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		t.Log("Bringing mlx5_8 DOWN")
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
@@ -727,7 +749,8 @@ func TestNICHealthMonitorConditionMessage(t *testing.T) {
 		helpers.MutateSysfsState(t, ctx, client, helpers.NVSentinelNamespace,
 			nodeName, "mlx5_8", "1", "4: ACTIVE", "5: LinkUp")
 
-		helpers.WaitForNICConditionHealthy(ctx, t, client, nodeName, ethCheckName)
+		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, nodeName,
+			ethCheckName, "", "", corev1.ConditionFalse)
 
 		return ctx
 	})
