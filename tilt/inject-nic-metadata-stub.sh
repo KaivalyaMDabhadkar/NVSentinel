@@ -23,15 +23,20 @@ set -euo pipefail
 
 NAMESPACE="nvsentinel"
 
-STUB_B64=$(echo -n '{"version":"1.0","timestamp":"2026-01-01T00:00:00Z","node_name":"stub","driver_version":"570.148.08","chassis_serial":null,"gpus":[{"gpu_id":0,"uuid":"GPU-stub-0","pci_address":"0001:00:00.0","serial_number":"0","device_name":"NVIDIA A100","nvlinks":[],"numa_node":0}],"nvswitches":[],"nic_topology":{"mlx5_0":["NODE"]}}' | base64 -w0)
+STUB_B64=$(printf '%s' '{"version":"1.0","timestamp":"2026-01-01T00:00:00Z","node_name":"stub","driver_version":"570.148.08","chassis_serial":null,"gpus":[{"gpu_id":0,"uuid":"GPU-stub-0","pci_address":"0001:00:00.0","serial_number":"0","device_name":"NVIDIA A100","nvlinks":[],"numa_node":0}],"nvswitches":[],"nic_topology":{"mlx5_0":["NODE"]}}' | base64 | tr -d '\n')
 
-nodes=$(kubectl get nodes -l nvsentinel.dgxc.nvidia.com/driver.installed=true \
-    --no-headers -o custom-columns=NAME:.metadata.name 2>/dev/null || true)
+if ! nodes=$(kubectl get nodes -l nvsentinel.dgxc.nvidia.com/driver.installed=true \
+    --no-headers -o custom-columns=NAME:.metadata.name 2>&1); then
+    echo "ERROR: kubectl failed: $nodes" >&2
+    exit 1
+fi
 
 if [ -z "$nodes" ]; then
     echo "No GPU worker nodes found, skipping metadata stub injection"
     exit 0
 fi
+
+failed=0
 
 for node in $nodes; do
     # Skip KWOK nodes — they simulate pods but have no real filesystem.
@@ -77,12 +82,19 @@ EOF
     rm -f "$tmpfile"
 
     echo "Waiting for inject pod to complete on $node"
-    kubectl wait --for=condition=Ready=false --for=jsonpath='{.status.phase}'=Succeeded \
-        pod/"$pod_name" -n "$NAMESPACE" --timeout=30s 2>/dev/null || \
-        kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
-        pod/"$pod_name" -n "$NAMESPACE" --timeout=30s 2>/dev/null || true
+    if ! kubectl wait --for=jsonpath='{.status.phase}'=Succeeded \
+        pod/"$pod_name" -n "$NAMESPACE" --timeout=60s 2>/dev/null; then
+        echo "ERROR: inject pod failed on $node" >&2
+        kubectl logs "$pod_name" -n "$NAMESPACE" 2>/dev/null || true
+        failed=1
+    fi
 
     kubectl delete pod "$pod_name" -n "$NAMESPACE" --ignore-not-found --wait=false 2>/dev/null || true
 done
+
+if [ "$failed" -ne 0 ]; then
+    echo "ERROR: metadata stub injection failed on one or more nodes" >&2
+    exit 1
+fi
 
 echo "Stub metadata injection complete"

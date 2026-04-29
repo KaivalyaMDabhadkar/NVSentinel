@@ -371,8 +371,7 @@ func runShellPodOnNode(t *testing.T, ctx context.Context,
 		}
 
 		if current.Status.Phase == corev1.PodFailed {
-			t.Errorf("%s pod %s failed", namePrefix, podName)
-			return false
+			require.Fail(t, fmt.Sprintf("%s pod %s failed", namePrefix, podName))
 		}
 
 		return false
