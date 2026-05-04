@@ -328,10 +328,10 @@ The classification of each NIC uses a **three-step decision** built from four co
 
 These steps use four **complementary signals**, each covering platforms where the others fail:
 
-| Signal                          | What it answers                                 | Platforms where it's the decisive signal                                              |
-|---------------------------------|-------------------------------------------------|---------------------------------------------------------------------------------------|
-| **NUMA locality**               | "Is this NIC near any GPU?"                     | A100 DGX (4-socket: mgmt NICs on non-GPU sockets)                                     |
-| **Topo matrix (PIX/PXB)**       | "Does this NIC share a PCIe switch with a GPU?" | H100 OCI, A100 OCI (SXM systems with PCIe switch pairing)                             |
+| Signal                          | What it answers                                 | Platforms where it's the decisive signal                                                |
+|---------------------------------|-------------------------------------------------|-----------------------------------------------------------------------------------------|
+| **NUMA locality**               | "Is this NIC near any GPU?"                     | A100 DGX (4-socket: mgmt NICs on non-GPU sockets)                                       |
+| **Topo matrix (PIX/PXB)**       | "Does this NIC share a PCIe switch with a GPU?" | H100 OCI, A100 OCI (SXM systems with PCIe switch pairing)                               |
 | **Link layer (IB vs Ethernet)** | "Is this NIC on the InfiniBand compute fabric?" | On-prem L40S, GB200 (PCIe-only/Grace where topo can't distinguish compute from storage) |
 | **Default route**               | "Does this NIC carry host networking?"          | On-prem L40S, GB200 (management NIC shares NUMA with GPUs)                              |
 
@@ -443,11 +443,11 @@ classify_nic(nic):
 
 Combined with the NUMA gate from Section 4.1, the monitor assigns each NIC to one of three roles:
 
-| Role           | Detection                                                                                                                                | Monitoring Behavior                                            |
-|----------------|------------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------|
+| Role           | Detection                                                                                                                     | Monitoring Behavior                                            |
+|----------------|-------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------|
 | **Management** | NIC NUMA has no compute GPU, **or** NIC carries the host's default route, **or** NIC is a BlueField DPU in the all-SYS branch | Excluded from monitoring entirely                              |
-| **Compute**    | Any GPU has PIX or PXB relationship to this NIC, **or** NIC link layer is InfiniBand (when no PIX/PXB exists)                            | Monitored; compared against other compute NICs for homogeneity |
-| **Storage**    | Ethernet NIC with NODE or PHB to a GPU, **or** Ethernet NIC in all-SYS fallback on GPU NUMA                                              | Monitored; compared against other storage NICs for homogeneity |
+| **Compute**    | Any GPU has PIX or PXB relationship to this NIC, **or** NIC link layer is InfiniBand (when no PIX/PXB exists)                 | Monitored; compared against other compute NICs for homogeneity |
+| **Storage**    | Ethernet NIC with NODE or PHB to a GPU, **or** Ethernet NIC in all-SYS fallback on GPU NUMA                                   | Monitored; compared against other storage NICs for homogeneity |
 
 > **Key design property**: On every validated platform, InfiniBand NICs and Ethernet NICs end up in **separate classification groups** (Compute vs Storage). This ensures the card homogeneity check (Section 4.3) never compares IB compute fabric NICs against Ethernet storage/management NICs, preventing false positives from hardware diversity (e.g., different port counts, different link speeds).
 
@@ -976,11 +976,12 @@ NICs and Ports are modeled as separate entity types to enable precise fault loca
 
 ### 12.1 State Monitoring Configuration
 
-Configuration is split between a YAML ConfigMap mounted at
-`/etc/nic-health-monitor/config.yaml` and command-line flags that govern
+Configuration is split between a ConfigMap mounted at
+`/etc/nic-health-monitor/config.toml` (rendered TOML, sourced from the
+Helm `values.yaml` shown below) and command-line flags that govern
 runtime paths and polling cadence. Both surfaces are documented below.
 
-**ConfigMap (YAML)** — covers sysfs mount points and device filtering:
+**Helm values (YAML)** — covers sysfs mount points and device filtering:
 
 ```yaml
 # Comma-separated regex patterns for NICs to exclude from discovery.
@@ -1008,19 +1009,18 @@ counterDetection:
 
 **Command-line flags** — cover runtime wiring that changes per deployment:
 
-| Flag                          | Default                                      | Purpose                                                                                                                                                                                                            |
-|-------------------------------|----------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `--checks`                    | `InfiniBandStateCheck,EthernetStateCheck`    | Comma-separated list of enabled checks. Unknown names are logged and skipped.                                                                                                                                      |
-| `--config`                    | `/etc/nic-health-monitor/config.yaml`        | Path to the YAML ConfigMap shown above.                                                                                                                                                                            |
-| `--metadata-path`             | `/var/lib/nvsentinel/gpu_metadata.json`      | Path to the GPU metadata file produced by the metadata collector (see Section 12.2).                                                                                                                               |
-| `--state-polling-interval`    | `1s`                                         | Cadence of the state check polling loop.                                                                                                                                                                           |
-| `--counter-polling-interval`  | `5s`                                         | Cadence of the counter check polling loop (ignored when no counter checks are enabled).                                                                                                                            |
-| `--platform-connector-socket` | `unix:///var/run/nvsentinel.sock`            | gRPC target for the platform connector that receives health events.                                                                                                                                                |
-| `--metrics-port`              | `2112`                                       | HTTP port that exposes `/metrics` (Prometheus) and `/healthz`.                                                                                                                                                     |
-| `--state-file`                | `/var/run/nic_health_monitor/state.json`     | Path to the persistent state file (hostPath-backed JSON). Seeds previous-poll port state across pod restarts and emits healthy baselines after host reboots. Missing or corrupt files are treated as a fresh boot. |
-| `--boot-id-path`              | `/nvsentinel/proc/sys/kernel/random/boot_id` | Path to the kernel boot ID file. Detects host reboots; state is cleared and healthy baselines emitted when the ID changes.                                                                                         |
-| `--processing-strategy`       | `EXECUTE_REMEDIATION`                        | Event processing strategy (`EXECUTE_REMEDIATION` or `STORE_ONLY`).                                                                                                                                                 |
-| `--node-name`                 | `${NODE_NAME}`                               | Node name stamped on every event. Falls back to the `NODE_NAME` env var; startup fails if unset.                                                                                                                   |
+| Flag                          | Default                                                                                       | Purpose                                                                                                                                                                                                            |
+|-------------------------------|-----------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `--checks`                    | `InfiniBandStateCheck,InfiniBandDegradationCheck,EthernetStateCheck,EthernetDegradationCheck` | Comma-separated list of enabled checks. Unknown names are logged and skipped.                                                                                                                                      |
+| `--config`                    | `/etc/nic-health-monitor/config.toml`                                                         | Path to the TOML ConfigMap shown above.                                                                                                                                                                            |
+| `--metadata-path`             | `/var/lib/nvsentinel/gpu_metadata.json`                                                       | Path to the GPU metadata file produced by the metadata collector (see Section 12.2).                                                                                                                               |
+| `--state-polling-interval`    | `1s`                                                                                          | Polling interval for all checks (state and counter). Velocity counter thresholds gate themselves on the configured velocityUnit, so a single fast poll suits every check.                                          |
+| `--platform-connector-socket` | `unix:///var/run/nvsentinel.sock`                                                             | gRPC target for the platform connector that receives health events.                                                                                                                                                |
+| `--metrics-port`              | `2112`                                                                                        | HTTP port that exposes `/metrics` (Prometheus) and `/healthz`.                                                                                                                                                     |
+| `--state-file`                | `/var/run/nic_health_monitor/state.json`                                                      | Path to the persistent state file (hostPath-backed JSON). Seeds previous-poll port state across pod restarts and emits healthy baselines after host reboots. Missing or corrupt files are treated as a fresh boot. |
+| `--boot-id-path`              | `/nvsentinel/proc/sys/kernel/random/boot_id`                                                  | Path to the kernel boot ID file. Detects host reboots; state is cleared and healthy baselines emitted when the ID changes.                                                                                         |
+| `--processing-strategy`       | `EXECUTE_REMEDIATION`                                                                         | Event processing strategy (`EXECUTE_REMEDIATION` or `STORE_ONLY`).                                                                                                                                                 |
+| `--node-name`                 | `${NODE_NAME}`                                                                                | Node name stamped on every event. Falls back to the `NODE_NAME` env var; startup fails if unset.                                                                                                                   |
 
 **GPU metadata** is a hard startup dependency — see [Section 4](#4-management-nic-exclusion-and-uncabled-port-detection) for the fail-fast conditions and [Section 12.2](#122-metadata-collector-requirements) for the required fields.
 
@@ -1134,20 +1134,20 @@ The key question: **"Will the workload fail because of this?"**
 
 ### Fatal State Conditions (IsFatal = true)
 
-| Condition                          | Recommended Action               | Rationale                                                  |
-|------------------------------------|----------------------------------|------------------------------------------------------------|
-| **NIC state = DOWN**               | **RecommendedAction_REPLACE_VM** | No network connectivity, workloads will timeout            |
-| **Device disappeared**             | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure                    |
-| **phys_state = Disabled**          | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible                   |
-| **Uncabled port anomaly**          | **RecommendedAction_REPLACE_VM** | Card has fewer active ports than peers (homogeneity check) |
-| **Port flapping (3+ cycles)**      | **RecommendedAction_REPLACE_VM** | Intermittent hardware/cable instability                    |
+| Condition                     | Recommended Action               | Rationale                                                  |
+|-------------------------------|----------------------------------|------------------------------------------------------------|
+| **NIC state = DOWN**          | **RecommendedAction_REPLACE_VM** | No network connectivity, workloads will timeout            |
+| **Device disappeared**        | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure                    |
+| **phys_state = Disabled**     | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible                   |
+| **Uncabled port anomaly**     | **RecommendedAction_REPLACE_VM** | Card has fewer active ports than peers (homogeneity check) |
+| **Port flapping (3+ cycles)** | **RecommendedAction_REPLACE_VM** | Intermittent hardware/cable instability                    |
 
 ### Non-Fatal State Conditions (IsFatal = false)
 
-| Condition                          | Recommended Action               | Rationale                                                  |
-|------------------------------------|----------------------------------|------------------------------------------------------------|
-| **phys_state = LinkErrorRecovery** | **RecommendedAction_NONE**       | HCA firmware actively retrying; escalated to fatal by card homogeneity check if persistent |
-| **phys_state = Polling**           | **RecommendedAction_NONE**       | Transient link training; escalated to fatal by card homogeneity check if persistent |
+| Condition                          | Recommended Action         | Rationale                                                                                  |
+|------------------------------------|----------------------------|--------------------------------------------------------------------------------------------|
+| **phys_state = LinkErrorRecovery** | **RecommendedAction_NONE** | HCA firmware actively retrying; escalated to fatal by card homogeneity check if persistent |
+| **phys_state = Polling**           | **RecommendedAction_NONE** | Transient link training; escalated to fatal by card homogeneity check if persistent        |
 
 ### Fatal Counters (IsFatal = true)
 
@@ -1164,13 +1164,13 @@ For kernel log pattern details (fatal and non-fatal classifications, regex patte
 
 ### State Detection Paths
 
-| Condition                        | Recommended Action               | Path/Source                                           |
-|----------------------------------|----------------------------------|-------------------------------------------------------|
-| `state = DOWN`                   | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/state`      |
-| `phys_state = Disabled`          | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` |
+| Condition                        | Recommended Action               | Path/Source                                                                                                     |
+|----------------------------------|----------------------------------|-----------------------------------------------------------------------------------------------------------------|
+| `state = DOWN`                   | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/state`                                                                |
+| `phys_state = Disabled`          | **RecommendedAction_REPLACE_VM** | `/sys/class/infiniband/<dev>/ports/<port>/phys_state`                                                           |
 | `phys_state = LinkErrorRecovery` | **RecommendedAction_NONE**       | `/sys/class/infiniband/<dev>/ports/<port>/phys_state` (non-fatal; escalated by homogeneity check if persistent) |
-| Uncabled port anomaly            | **RecommendedAction_REPLACE_VM** | Card homogeneity check (PCI card grouping + mode)     |
-| Device disappeared               | **RecommendedAction_REPLACE_VM** | Device enumeration in `/sys/class/infiniband/`        |
+| Uncabled port anomaly            | **RecommendedAction_REPLACE_VM** | Card homogeneity check (PCI card grouping + mode)                                                               |
+| Device disappeared               | **RecommendedAction_REPLACE_VM** | Device enumeration in `/sys/class/infiniband/`                                                                  |
 
 ---
 

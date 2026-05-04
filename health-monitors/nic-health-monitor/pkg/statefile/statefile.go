@@ -13,8 +13,8 @@
 // limitations under the License.
 
 // Package statefile manages the NIC Health Monitor's persistent state
-// file. The file is a single JSON document storing port snapshots and
-// known devices for the state checks.
+// file. The file is a single JSON document storing port snapshots,
+// known devices, counter snapshots, and breach flags.
 package statefile
 
 import (
@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -56,6 +57,13 @@ type MonitorState struct {
 	// EthernetStateCheck. Keys follow the `<device>_<port>` convention.
 	PortStates   map[string]PortStateSnapshot `json:"port_states,omitempty"`
 	KnownDevices []string                     `json:"known_devices,omitempty"`
+
+	// Counter detection state — produced by InfiniBandDegradationCheck
+	// and EthernetDegradationCheck. Both maps key on
+	// `<device>:<port>:<counter_name>` so the IB and Ethernet checks
+	// keep distinct entries even when they share a state file.
+	CounterSnapshots map[string]CounterSnapshot   `json:"counter_snapshots,omitempty"`
+	BreachFlags      map[string]CounterBreachFlag `json:"breach_flags,omitempty"`
 }
 
 // PortStateSnapshot captures the last-known state of a port. LinkLayer
@@ -67,6 +75,27 @@ type PortStateSnapshot struct {
 	State         string `json:"state"`
 	PhysicalState string `json:"physical_state"`
 	LinkLayer     string `json:"link_layer,omitempty"`
+}
+
+// CounterSnapshot stores the value and wall-clock timestamp of a counter
+// reading. For delta thresholds the snapshot is updated every poll;
+// for velocity thresholds it is held for the configured velocityUnit
+// window so the rate can be computed over real elapsed time.
+type CounterSnapshot struct {
+	Value     uint64    `json:"value"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+// CounterBreachFlag tracks whether a counter is currently in a breached
+// state. Breach is latching: once set, it stays set until the counter
+// is reset (admin clear) or the host reboots. The CheckName and IsFatal
+// fields preserve the original event's identity so the recovery event
+// clears the same condition on the platform.
+type CounterBreachFlag struct {
+	Breached  bool      `json:"breached"`
+	CheckName string    `json:"check_name,omitempty"`
+	IsFatal   bool      `json:"is_fatal,omitempty"`
+	Since     time.Time `json:"since,omitempty"`
 }
 
 // Manager coordinates reads and writes to the shared state file. A
@@ -312,6 +341,95 @@ func (m *Manager) portStatesChanged(
 	}
 
 	return false
+}
+
+// CounterSnapshots returns a copy of the persisted counter snapshots.
+// Each evaluator seeds its in-memory snapshot map from this on startup
+// so that delta and velocity windows survive pod restarts.
+func (m *Manager) CounterSnapshots() map[string]CounterSnapshot {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make(map[string]CounterSnapshot, len(m.state.CounterSnapshots))
+	for k, v := range m.state.CounterSnapshots {
+		out[k] = v
+	}
+
+	return out
+}
+
+// UpdateCounterSnapshots merges the supplied counter snapshots into the
+// shared map. The merge iterates only over the incoming map, so callers
+// (the IB and Ethernet evaluators) must scope their input to the keys
+// they actually own — otherwise one evaluator's loaded-but-not-written
+// view of a sibling key could clobber the sibling's update. Returns
+// true if any persisted snapshot value or timestamp actually changed;
+// callers only Save when true.
+func (m *Manager) UpdateCounterSnapshots(snapshots map[string]CounterSnapshot) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.state.CounterSnapshots == nil {
+		m.state.CounterSnapshots = make(map[string]CounterSnapshot, len(snapshots))
+	}
+
+	changed := false
+
+	for k, v := range snapshots {
+		old, exists := m.state.CounterSnapshots[k]
+		if !exists || old.Value != v.Value || !old.Timestamp.Equal(v.Timestamp) {
+			m.state.CounterSnapshots[k] = v
+			changed = true
+		}
+	}
+
+	return changed
+}
+
+// BreachFlags returns a copy of the persisted breach flags so an
+// evaluator can rehydrate its in-memory view on startup.
+func (m *Manager) BreachFlags() map[string]CounterBreachFlag {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	out := make(map[string]CounterBreachFlag, len(m.state.BreachFlags))
+	for k, v := range m.state.BreachFlags {
+		out[k] = v
+	}
+
+	return out
+}
+
+// UpdateBreachFlags merges incoming breach flags. Incoming entries with
+// Breached=false delete any matching persisted entry (signalling a
+// recovered counter), so callers MUST submit such entries explicitly
+// rather than just dropping cleared flags from their input map — the
+// merge cannot infer a deletion from an absent key. Returns true if
+// any entry was added, removed, or had its fields changed.
+func (m *Manager) UpdateBreachFlags(flags map[string]CounterBreachFlag) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.state.BreachFlags == nil {
+		m.state.BreachFlags = make(map[string]CounterBreachFlag, len(flags))
+	}
+
+	changed := false
+
+	for k, v := range flags {
+		old, exists := m.state.BreachFlags[k]
+		switch {
+		case !v.Breached && exists:
+			delete(m.state.BreachFlags, k)
+
+			changed = true
+		case v.Breached && (!exists || old != v):
+			m.state.BreachFlags[k] = v
+			changed = true
+		}
+	}
+
+	return changed
 }
 
 // Save writes the current state to disk atomically (tmp file + rename).

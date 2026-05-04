@@ -36,6 +36,28 @@ type Config struct {
 
 	// SysClassInfinibandPath is the sysfs path for InfiniBand devices (container mount point)
 	SysClassInfinibandPath string `toml:"sysClassInfinibandPath"`
+
+	// CounterDetection contains counter monitoring configuration
+	CounterDetection CounterDetectionConfig `toml:"counterDetection"`
+}
+
+// CounterDetectionConfig contains the configuration for counter-based monitoring.
+type CounterDetectionConfig struct {
+	Enabled  bool            `toml:"enabled"`
+	Counters []CounterConfig `toml:"counters"`
+}
+
+// CounterConfig defines a single counter to monitor.
+type CounterConfig struct {
+	Name              string  `toml:"name"`
+	Path              string  `toml:"path"`
+	Enabled           bool    `toml:"enabled"`
+	IsFatal           bool    `toml:"isFatal"`
+	ThresholdType     string  `toml:"thresholdType"`
+	Threshold         float64 `toml:"threshold"`
+	VelocityUnit      string  `toml:"velocityUnit,omitempty"`
+	Description       string  `toml:"description"`
+	RecommendedAction string  `toml:"recommendedAction"`
 }
 
 // LoadConfig reads and parses the TOML configuration file.
