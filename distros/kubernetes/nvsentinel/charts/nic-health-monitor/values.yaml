@@ -149,16 +149,6 @@ counterDetection:
       description: "Malformed packets received"
       recommendedAction: NONE
 
-    - name: out_of_sequence
-      path: hw_counters/out_of_sequence
-      enabled: true
-      isFatal: false
-      thresholdType: velocity
-      threshold: 100.0
-      velocityUnit: second
-      description: "Fabric routing issues - out of sequence packets"
-      recommendedAction: NONE
-
     - name: local_ack_timeout_err
       path: hw_counters/local_ack_timeout_err
       enabled: true
@@ -178,16 +168,6 @@ counterDetection:
       threshold: 100.0
       velocityUnit: second
       description: "TX discards due to congestion"
-      recommendedAction: NONE
-
-    - name: port_xmit_wait
-      path: counters/port_xmit_wait
-      enabled: true
-      isFatal: false
-      thresholdType: velocity
-      threshold: 10000.0
-      velocityUnit: second
-      description: "TX wait ticks - congestion backpressure"
       recommendedAction: NONE
 
     # RoCE-specific
