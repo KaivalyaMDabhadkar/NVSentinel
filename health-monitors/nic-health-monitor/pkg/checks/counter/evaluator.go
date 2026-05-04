@@ -403,10 +403,25 @@ func (e *Evaluator) recordBreach(
 		Since:     now,
 	}
 
+	rateUnit := "interval"
+
+	if counterCfg.ThresholdType == thresholdTypeVelocity {
+		switch counterCfg.VelocityUnit {
+		case velocityUnitSecond:
+			rateUnit = "sec"
+		case velocityUnitMinute:
+			rateUnit = "min"
+		case velocityUnitHour:
+			rateUnit = "hour"
+		default:
+			rateUnit = counterCfg.VelocityUnit
+		}
+	}
+
 	message := fmt.Sprintf(
-		"Port %s port %s: %s - %s (value=%d, delta=%d, rate=%.2f/sec)",
+		"Port %s port %s: %s - %s (value=%d, delta=%d, rate=%.2f/%s)",
 		device, port, counterCfg.Name, counterCfg.Description,
-		currentValue, delta, rate,
+		currentValue, delta, rate, rateUnit,
 	)
 
 	return checks.NewHealthEvent(

@@ -544,3 +544,197 @@ func TestEvaluator_DoesNotPersistForeignKeys(t *testing.T) {
 	assert.NotContains(t, flags, "mlx5_2:1:carrier_changes",
 		"IB evaluator must NOT persist a foreign Ethernet breach flag from the loaded map")
 }
+
+// ---------------------------------------------------------------------------
+// Threshold boundary and window duration tests
+// ---------------------------------------------------------------------------
+
+func TestEvaluateThreshold_Delta(t *testing.T) {
+	cfg := config.CounterConfig{
+		Name:          "link_downed",
+		ThresholdType: "delta",
+		Threshold:     0,
+	}
+
+	assert.True(t, EvaluateThreshold(cfg, 1, 5*time.Second), "delta=1 > threshold=0 should breach")
+	assert.False(t, EvaluateThreshold(cfg, 0, 5*time.Second), "delta=0 <= threshold=0 should NOT breach")
+}
+
+func TestEvaluateThreshold_Velocity(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      config.CounterConfig
+		delta    uint64
+		elapsed  time.Duration
+		expected bool
+	}{
+		{
+			"above threshold",
+			config.CounterConfig{ThresholdType: "velocity", Threshold: 10.0, VelocityUnit: "second"},
+			100, 5 * time.Second, true,
+		},
+		{
+			"below threshold",
+			config.CounterConfig{ThresholdType: "velocity", Threshold: 10.0, VelocityUnit: "second"},
+			10, 5 * time.Second, false,
+		},
+		{
+			"per minute above",
+			config.CounterConfig{ThresholdType: "velocity", Threshold: 5.0, VelocityUnit: "minute"},
+			5, 5 * time.Second, true,
+		},
+		{
+			"per minute below",
+			config.CounterConfig{ThresholdType: "velocity", Threshold: 5.0, VelocityUnit: "minute"},
+			0, 5 * time.Second, false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := EvaluateThreshold(tt.cfg, tt.delta, tt.elapsed)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestEvaluateThreshold_ExactBoundaryDoesNotBreach(t *testing.T) {
+	// The docs use strict greater-than ("> 10/sec", "> 120/hour").
+	// rate == threshold must NOT breach.
+	cfg := config.CounterConfig{
+		ThresholdType: "velocity",
+		Threshold:     10.0,
+		VelocityUnit:  "second",
+	}
+
+	// 50 errors in 5 seconds = exactly 10/sec → should NOT breach.
+	assert.False(t, EvaluateThreshold(cfg, 50, 5*time.Second),
+		"rate exactly equal to threshold must NOT breach (strict greater-than)")
+
+	// 51 errors in 5 seconds = 10.2/sec → SHOULD breach.
+	assert.True(t, EvaluateThreshold(cfg, 51, 5*time.Second),
+		"rate above threshold must breach")
+
+	// Delta boundary: threshold=0, delta=0 → no breach.
+	deltaCfg := config.CounterConfig{
+		ThresholdType: "delta",
+		Threshold:     0,
+	}
+	assert.False(t, EvaluateThreshold(deltaCfg, 0, time.Second),
+		"delta exactly equal to threshold must NOT breach")
+}
+
+func TestWindowDuration(t *testing.T) {
+	assert.Equal(t, time.Second, windowDuration("second"))
+	assert.Equal(t, time.Minute, windowDuration("minute"))
+	assert.Equal(t, time.Hour, windowDuration("hour"))
+	assert.Equal(t, time.Second, windowDuration("unknown"),
+		"unknown unit should default to second")
+}
+
+func TestEvaluateCounters_VelocityPerSecondWindow(t *testing.T) {
+	value := uint64(0)
+	reader := newReaderFor(&value)
+
+	// Pre-seed a snapshot from just over 1 second ago.
+	preSnapshots := map[string]statefile.CounterSnapshot{
+		"mlx5_0:1:symbol_error_fatal": {
+			Value:     0,
+			Timestamp: time.Now().Add(-time.Second - 100*time.Millisecond),
+		},
+	}
+
+	ev := NewEvaluator(testNode, reader, pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		preSnapshots, nil, false)
+
+	// 100 errors over ~1s = 100/sec, threshold is 10/sec → breach.
+	value = 100
+	cfg := []config.CounterConfig{velocityCounter("second", 10.0)}
+
+	events := ev.EvaluateCounters(ibDevice(), ibPort(), cfg, checks.InfiniBandDegradationCheckName)
+	require.Len(t, events, 1, "per-second velocity counter should evaluate after 1s window")
+	assert.Contains(t, events[0].Message, "symbol_error_fatal")
+}
+
+func TestEvaluateCounters_VelocityPerMinuteWindow(t *testing.T) {
+	value := uint64(0)
+	reader := newReaderFor(&value)
+
+	// Pre-seed a snapshot from just over 1 minute ago.
+	preSnapshots := map[string]statefile.CounterSnapshot{
+		"mlx5_0:1:symbol_error_fatal": {
+			Value:     0,
+			Timestamp: time.Now().Add(-time.Minute - time.Second),
+		},
+	}
+
+	ev := NewEvaluator(testNode, reader, pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		preSnapshots, nil, false)
+
+	// 100 errors over ~1min = 100/min, threshold is 5/min → breach.
+	value = 100
+	cfg := []config.CounterConfig{velocityCounter("minute", 5.0)}
+
+	events := ev.EvaluateCounters(ibDevice(), ibPort(), cfg, checks.InfiniBandDegradationCheckName)
+	require.Len(t, events, 1, "per-minute velocity counter should evaluate after 1m window")
+}
+
+func TestEvaluateCounters_VelocityPerMinuteWindowNotElapsed(t *testing.T) {
+	value := uint64(0)
+	reader := newReaderFor(&value)
+
+	// Pre-seed a snapshot from 30 seconds ago (less than 1 minute window).
+	preSnapshots := map[string]statefile.CounterSnapshot{
+		"mlx5_0:1:symbol_error_fatal": {
+			Value:     0,
+			Timestamp: time.Now().Add(-30 * time.Second),
+		},
+	}
+
+	ev := NewEvaluator(testNode, reader, pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		preSnapshots, nil, false)
+
+	value = 10000
+	cfg := []config.CounterConfig{velocityCounter("minute", 5.0)}
+
+	events := ev.EvaluateCounters(ibDevice(), ibPort(), cfg, checks.InfiniBandDegradationCheckName)
+	assert.Empty(t, events, "per-minute counter must NOT evaluate before 1m window elapses")
+}
+
+func TestEvaluateCounters_BreachMessageContainsCorrectRateUnit(t *testing.T) {
+	tests := []struct {
+		name     string
+		unit     string
+		expected string
+	}{
+		{"per-second counter shows /sec", "second", "/sec"},
+		{"per-minute counter shows /min", "minute", "/min"},
+		{"per-hour counter shows /hour", "hour", "/hour"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			value := uint64(0)
+			reader := newReaderFor(&value)
+
+			windowOffset := windowDuration(tt.unit) + time.Second
+			preSnapshots := map[string]statefile.CounterSnapshot{
+				"mlx5_0:1:symbol_error_fatal": {
+					Value:     0,
+					Timestamp: time.Now().Add(-windowOffset),
+				},
+			}
+
+			ev := NewEvaluator(testNode, reader, pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+				preSnapshots, nil, false)
+
+			value = 10000
+			cfg := []config.CounterConfig{velocityCounter(tt.unit, 1.0)}
+
+			events := ev.EvaluateCounters(ibDevice(), ibPort(), cfg, checks.InfiniBandDegradationCheckName)
+			require.Len(t, events, 1)
+			assert.Contains(t, events[0].Message, tt.expected,
+				"breach message must contain the correct rate unit")
+		})
+	}
+}

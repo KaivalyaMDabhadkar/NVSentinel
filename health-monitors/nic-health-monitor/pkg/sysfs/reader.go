@@ -106,7 +106,12 @@ func readUint64(path string) (uint64, error) {
 		return 0, fmt.Errorf("failed to read %s: %w", path, err)
 	}
 
-	return strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	val, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse uint64 from %s: %w", path, err)
+	}
+
+	return val, nil
 }
 
 func (r *fsReader) ReadIBDeviceNUMANode(device string) (int, error) {
