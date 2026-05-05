@@ -177,7 +177,7 @@ rm -rf "$FAKE" "$NET" "$PROC"
 
 create_pf() {
   dev="$1"; numa="$2"; pci="$3"; ll="$4"; hca="$5"; iface="$6"
-  mkdir -p "$FAKE/$dev/ports/1" "$FAKE/$dev/device/net"
+  mkdir -p "$FAKE/$dev/ports/1/counters" "$FAKE/$dev/ports/1/hw_counters" "$FAKE/$dev/device/net"
   echo "4: ACTIVE"  > "$FAKE/$dev/ports/1/state"
   echo "5: LinkUp"  > "$FAKE/$dev/ports/1/phys_state"
   echo "$ll"        > "$FAKE/$dev/ports/1/link_layer"
@@ -189,6 +189,14 @@ create_pf() {
   echo "PCI_SLOT_NAME=$pci" > "$FAKE/$dev/device/uevent"
   echo "0x15b3"     > "$FAKE/$dev/device/vendor"
   if [ -n "$iface" ]; then mkdir -p "$FAKE/$dev/device/net/$iface"; fi
+  for counter in symbol_error link_error_recovery link_downed port_rcv_errors \
+                 local_link_integrity_errors excessive_buffer_overrun_errors \
+                 port_xmit_discards port_xmit_wait; do
+    echo "0" > "$FAKE/$dev/ports/1/counters/$counter"
+  done
+  for counter in rnr_nak_retry_err local_ack_timeout_err roce_slow_restart out_of_sequence; do
+    echo "0" > "$FAKE/$dev/ports/1/hw_counters/$counter"
+  done
 }
 
 # 8 IB compute NICs modeled after DGX A100 (ConnectX-6 HDR).
@@ -216,10 +224,11 @@ for vf in mlx5_9 mlx5_10; do
   ln -s dummy "$FAKE/$vf/device/physfn"
 done
 
-# /sys/class/net: do NOT create an eth0 entry here. The KIND node's
-# real /proc/net/route has eth0 as the default route; if we link
-# eth0 → mlx5_8 in fake-net, the classifier would exclude mlx5_8 as
-# management, leaving zero Ethernet devices for EthernetStateCheck.
+# Net statistics for carrier_changes (EvaluateNetCounters path).
+# Only statistics/ is created; no operstate file, so the NUMA
+# classifier and EthernetStateCheck are unaffected.
+mkdir -p "$NET/eth0/statistics"
+echo "0" > "$NET/eth0/statistics/carrier_changes"
 
 mkdir -p "$PROC/sys/kernel/random"
 echo "test-boot-id-00000000-0000-0000-0000-000000000001" > "$PROC/sys/kernel/random/boot_id"
@@ -271,6 +280,43 @@ func MutateBootID(t *testing.T, ctx context.Context,
 	script := fmt.Sprintf(
 		`echo '%s' > /host/fake-proc/sys/kernel/random/boot_id`, bootID)
 	runShellPodOnNode(t, ctx, client, namespace, nodeName, "nic-bootid-mutator", script)
+}
+
+// MutateSysfsCounter writes a new value to an IB port counter file
+// under the fake sysfs tree. counterPath is relative to the port
+// directory, e.g. "counters/link_downed" or "hw_counters/rnr_nak_retry_err".
+func MutateSysfsCounter(t *testing.T, ctx context.Context,
+	client klient.Client, namespace, nodeName, device, port, counterPath, value string,
+) {
+	t.Helper()
+
+	script := fmt.Sprintf(`echo '%s' > "/host/fake-ib/%s/ports/%s/%s"`,
+		value, device, port, counterPath)
+	runShellPodOnNode(t, ctx, client, namespace, nodeName, "nic-counter-mutator", script)
+}
+
+// ResetSysfsCounter resets an IB port counter to 0, simulating an
+// admin counter clear (perfquery -x).
+func ResetSysfsCounter(t *testing.T, ctx context.Context,
+	client klient.Client, namespace, nodeName, device, port, counterPath string,
+) {
+	t.Helper()
+
+	MutateSysfsCounter(t, ctx, client, namespace, nodeName, device, port, counterPath, "0")
+}
+
+// MutateNetCounter writes a value to a network interface statistics
+// counter under fake-net. Creates the directory if missing for
+// idempotency.
+func MutateNetCounter(t *testing.T, ctx context.Context,
+	client klient.Client, namespace, nodeName, iface, counter, value string,
+) {
+	t.Helper()
+
+	script := fmt.Sprintf(
+		`mkdir -p "/host/fake-net/%s/statistics" && echo '%s' > "/host/fake-net/%s/statistics/%s"`,
+		iface, value, iface, counter)
+	runShellPodOnNode(t, ctx, client, namespace, nodeName, "nic-net-counter-mutator", script)
 }
 
 // runShellPodOnNode creates an ephemeral busybox pod on the target node,
@@ -347,7 +393,10 @@ func hostPathType(t corev1.HostPathType) *corev1.HostPathType { return &t }
 func clearNICConditions(ctx context.Context, t *testing.T, nodeName string) {
 	t.Helper()
 
-	for _, checkName := range []string{"InfiniBandStateCheck", "EthernetStateCheck"} {
+	for _, checkName := range []string{
+		"InfiniBandStateCheck", "EthernetStateCheck",
+		"InfiniBandDegradationCheck", "EthernetDegradationCheck",
+	} {
 		event := NewHealthEvent(nodeName).
 			WithAgent("nic-health-monitor").
 			WithCheckName(checkName).
@@ -451,7 +500,7 @@ func updateNICMonitorForFakeSysfs(t *testing.T, ctx context.Context,
 	args := map[string]string{
 		"--state-file":   "/var/run/nic_health_monitor/state.json",
 		"--boot-id-path": FakeBootIDPath,
-		"--checks":       "InfiniBandStateCheck,EthernetStateCheck",
+		"--checks":       "InfiniBandStateCheck,InfiniBandDegradationCheck,EthernetStateCheck,EthernetDegradationCheck",
 	}
 
 	originalArgs, err := UpdateDaemonSetArgs(ctx, t, client,
