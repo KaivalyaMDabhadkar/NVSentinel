@@ -72,10 +72,6 @@ func (c *InfiniBandDegradationCheck) Name() string {
 // evaluation it merges the evaluator's snapshots and breach flags back
 // into the shared state file and persists if either changed.
 func (c *InfiniBandDegradationCheck) Run() ([]*pb.HealthEvent, error) {
-	if !c.cfg.CounterDetection.Enabled {
-		return nil, nil
-	}
-
 	result, err := discovery.DiscoverDevices(c.reader, c.cfg.NicExclusionRegex)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover devices: %w", err)

@@ -76,8 +76,7 @@ func deltaCounter(threshold float64) config.CounterConfig {
 		IsFatal:           true,
 		ThresholdType:     "delta",
 		Threshold:         threshold,
-		Description:       "QP disconnect",
-		RecommendedAction: "REPLACE_VM",
+		Description: "QP disconnect",
 	}
 }
 
@@ -90,8 +89,7 @@ func velocityCounter(unit string, threshold float64) config.CounterConfig {
 		ThresholdType:     "velocity",
 		Threshold:         threshold,
 		VelocityUnit:      unit,
-		Description:       "BER spec violation",
-		RecommendedAction: "REPLACE_VM",
+		Description: "BER spec violation",
 	}
 }
 
@@ -141,10 +139,8 @@ func TestComputeRate(t *testing.T) {
 }
 
 func TestResolveAction(t *testing.T) {
-	assert.Equal(t, pb.RecommendedAction_REPLACE_VM, ResolveAction("REPLACE_VM"))
-	assert.Equal(t, pb.RecommendedAction_NONE, ResolveAction("NONE"))
-	assert.Equal(t, pb.RecommendedAction_NONE, ResolveAction(""))
-	assert.Equal(t, pb.RecommendedAction_NONE, ResolveAction("unknown"))
+	assert.Equal(t, pb.RecommendedAction_REPLACE_VM, ResolveAction(true))
+	assert.Equal(t, pb.RecommendedAction_NONE, ResolveAction(false))
 }
 
 func TestFatalCheckName(t *testing.T) {
@@ -408,10 +404,7 @@ func TestEvaluateCounters_DisabledCounterSkipped(t *testing.T) {
 	assert.Zero(t, called, "disabled counters must not be read from sysfs")
 }
 
-// TestEvaluateCounters_CarrierChangesNotEvaluatedHere verifies that the
-// interface-level carrier_changes counter is skipped by EvaluateCounters
-// (it is handled by EvaluateNetCounters instead).
-func TestEvaluateCounters_CarrierChangesNotEvaluatedHere(t *testing.T) {
+func TestEvaluateCounters_StatisticsCountersNotEvaluatedHere(t *testing.T) {
 	called := 0
 	reader := &sysfs.MockReader{
 		ReadIBPortCounterFunc: func(_ string, _ int, _ string) (uint64, error) {
@@ -430,10 +423,17 @@ func TestEvaluateCounters_CarrierChangesNotEvaluatedHere(t *testing.T) {
 			ThresholdType: "delta",
 			Threshold:     2,
 		},
+		{
+			Name:          "rx_missed_errors",
+			Path:          "statistics/rx_missed_errors",
+			Enabled:       true,
+			ThresholdType: "delta",
+			Threshold:     5,
+		},
 	}
 
 	_ = ev.EvaluateCounters(ibDevice(), ibPort(), cfg, checks.EthernetDegradationCheckName)
-	assert.Zero(t, called, "carrier_changes must be routed through EvaluateNetCounters, not the IB path")
+	assert.Zero(t, called, "statistics/* counters must be routed through EvaluateNetCounters, not the IB path")
 }
 
 func TestEvaluateNetCounters_DeltaBreach(t *testing.T) {
@@ -456,8 +456,7 @@ func TestEvaluateNetCounters_DeltaBreach(t *testing.T) {
 			IsFatal:           false,
 			ThresholdType:     "delta",
 			Threshold:         2,
-			Description:       "carrier flap",
-			RecommendedAction: "NONE",
+			Description: "carrier flap",
 		},
 	}
 
@@ -468,6 +467,69 @@ func TestEvaluateNetCounters_DeltaBreach(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.False(t, events[0].IsFatal)
 	assert.Equal(t, checks.EthernetDegradationCheckName, events[0].CheckName)
+}
+
+func TestEvaluateNetCounters_PathDrivesStatFile(t *testing.T) {
+	var observedFile string
+
+	reader := &sysfs.MockReader{
+		ReadNetStatisticFunc: func(_ string, counter string) (uint64, error) {
+			observedFile = counter
+			return 0, nil
+		},
+	}
+
+	ev := newEvaluator(t, reader, false)
+
+	dev := &discovery.IBDevice{Name: testDevice, NetDev: "eth0"}
+	port := &discovery.IBPort{Device: testDevice, Port: testPort, LinkLayer: "Ethernet"}
+	cfg := []config.CounterConfig{
+		{
+			Name:              "rx_missed_errors",
+			Path:              "statistics/rx_missed_errors",
+			Enabled:           true,
+			ThresholdType:     "delta",
+			Threshold:         5,
+			Description: "host bottleneck",
+		},
+	}
+
+	_ = ev.EvaluateNetCounters(dev, port, cfg, checks.EthernetDegradationCheckName)
+	assert.Equal(t, "rx_missed_errors", observedFile)
+}
+
+func TestEvaluateNetCounters_NonStatisticsPathSkipped(t *testing.T) {
+	called := 0
+	reader := &sysfs.MockReader{
+		ReadNetStatisticFunc: func(_ string, _ string) (uint64, error) {
+			called++
+			return 0, nil
+		},
+	}
+
+	ev := newEvaluator(t, reader, false)
+
+	dev := &discovery.IBDevice{Name: testDevice, NetDev: "eth0"}
+	port := &discovery.IBPort{Device: testDevice, Port: testPort, LinkLayer: "Ethernet"}
+	cfg := []config.CounterConfig{
+		{
+			Name:          "link_downed",
+			Path:          "counters/link_downed",
+			Enabled:       true,
+			ThresholdType: "delta",
+			Threshold:     0,
+		},
+		{
+			Name:          "rnr_nak_retry_err",
+			Path:          "hw_counters/rnr_nak_retry_err",
+			Enabled:       true,
+			ThresholdType: "delta",
+			Threshold:     0,
+		},
+	}
+
+	_ = ev.EvaluateNetCounters(dev, port, cfg, checks.EthernetDegradationCheckName)
+	assert.Zero(t, called, "non-statistics paths must not be read from /sys/class/net")
 }
 
 // TestEvaluateCounters_ResetAcrossRestartViaSnapshotFallback verifies

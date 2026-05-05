@@ -933,7 +933,6 @@ counterDetection:
   #   - threshold:      Numeric threshold value
   #   - velocityUnit:   For velocity thresholds: "second", "minute", "hour"
   #   - description:    Human-readable description for event messages
-  #   - recommendedAction: Action for fatal counters (REPLACE_VM, NONE)
 
   counters: []  # See defaults below
 ```
@@ -966,7 +965,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0              # Any increment (> 0) is fatal
       description: "Port Training State Machine failed - QP disconnect"
-      recommendedAction: REPLACE_VM
       
     - name: excessive_buffer_overrun_errors
       path: counters/excessive_buffer_overrun_errors
@@ -975,7 +973,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0              # Any increment is fatal
       description: "HCA internal buffer overflow - lossless contract violated"
-      recommendedAction: REPLACE_VM
       
     - name: local_link_integrity_errors
       path: counters/local_link_integrity_errors
@@ -984,7 +981,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0              # Any increment is fatal
       description: "Physical errors exceed LocalPhyErrors hardware cap"
-      recommendedAction: REPLACE_VM
       
     - name: rnr_nak_retry_err
       path: hw_counters/rnr_nak_retry_err
@@ -993,7 +989,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0              # Any increment is fatal
       description: "Receiver Not Ready NAK retry exhausted - connection severed"
-      recommendedAction: REPLACE_VM
     
     #--------------------------------------------------------------------------
     # NON-FATAL COUNTERS (Default: IsFatal=false, RecommendedAction=NONE)
@@ -1009,7 +1004,6 @@ counterDetection:
       threshold: 10.0
       velocityUnit: second
       description: "PHY bit errors before FEC - physical layer degradation"
-      recommendedAction: NONE
 
     - name: symbol_error_fatal
       path: counters/symbol_error
@@ -1019,7 +1013,6 @@ counterDetection:
       threshold: 120.0
       velocityUnit: hour
       description: "Symbol errors exceed IBTA BER threshold (10E-12) - link outside spec"
-      recommendedAction: REPLACE_VM
       
     - name: link_error_recovery
       path: counters/link_error_recovery
@@ -1029,7 +1022,6 @@ counterDetection:
       threshold: 5.0
       velocityUnit: minute
       description: "Link retraining events - micro-flapping"
-      recommendedAction: NONE
     
     # Transport Layer
     - name: port_rcv_errors
@@ -1040,7 +1032,6 @@ counterDetection:
       threshold: 10.0
       velocityUnit: second
       description: "Malformed packets received"
-      recommendedAction: NONE
       
     - name: out_of_sequence
       path: hw_counters/out_of_sequence
@@ -1050,7 +1041,6 @@ counterDetection:
       threshold: 100.0
       velocityUnit: second
       description: "Fabric routing issues - out of sequence packets"
-      recommendedAction: NONE
       
     - name: local_ack_timeout_err
       path: hw_counters/local_ack_timeout_err
@@ -1060,7 +1050,6 @@ counterDetection:
       threshold: 1.0
       velocityUnit: second
       description: "ACK timeout - potential fabric black hole"
-      recommendedAction: NONE
     
     # Congestion Indicators
     - name: port_xmit_discards
@@ -1071,7 +1060,6 @@ counterDetection:
       threshold: 100.0
       velocityUnit: second
       description: "TX discards due to congestion"
-      recommendedAction: NONE
       
     - name: port_xmit_wait
       path: counters/port_xmit_wait
@@ -1081,7 +1069,6 @@ counterDetection:
       threshold: 10000.0
       velocityUnit: second
       description: "TX wait ticks - congestion backpressure"
-      recommendedAction: NONE
     
     # RoCE-specific
     - name: roce_slow_restart
@@ -1092,7 +1079,6 @@ counterDetection:
       threshold: 10.0
       velocityUnit: second
       description: "Victim flow oscillation"
-      recommendedAction: NONE
     
     # Interface Level
     - name: carrier_changes
@@ -1102,7 +1088,6 @@ counterDetection:
       thresholdType: delta
       threshold: 2               # > 2 changes per interval
       description: "Link instability - carrier state changes"
-      recommendedAction: NONE
 ```
 
 ### 10.3 Custom Counter Example
@@ -1121,7 +1106,6 @@ counterDetection:
       threshold: 120.0                 # IBTA spec: 120/hour
       velocityUnit: hour               # Changed from second
       description: "Symbol errors exceed IBTA BER threshold"
-      recommendedAction: REPLACE_VM
     
     # Custom: Add vendor-specific counter
     - name: custom_vendor_error
@@ -1131,7 +1115,6 @@ counterDetection:
       thresholdType: delta
       threshold: 100
       description: "Vendor-specific error counter"
-      recommendedAction: NONE
     
     # Disable: Turn off a default counter
     - name: port_xmit_wait
@@ -1212,7 +1195,7 @@ For each configured counter (key = <device>:<port>:<counter_name>):
      → Emit UNHEALTHY event:
          - IsHealthy = false
          - IsFatal = counter.isFatal
-         - RecommendedAction = counter.recommendedAction
+         - RecommendedAction = REPLACE_VM if counter.isFatal, else NONE
          - Message = "{port}: {name} - {description} (value=..., delta=..., rate=...)"
          - CheckName:
              isFatal=true  → state check name (InfiniBandStateCheck / EthernetStateCheck)

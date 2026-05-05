@@ -318,20 +318,24 @@ func buildChecks(
 				stateManager, bootIDChanged,
 			))
 		case checks.InfiniBandDegradationCheckName:
-			result = append(result, counter.NewInfiniBandDegradationCheck(
-				nodeName, reader, cfg, processingStrategy,
-				stateManager, bootIDChanged,
-			))
+			if cfg.CounterDetection.Enabled {
+				result = append(result, counter.NewInfiniBandDegradationCheck(
+					nodeName, reader, cfg, processingStrategy,
+					stateManager, bootIDChanged,
+				))
+			}
 		case checks.EthernetStateCheckName:
 			result = append(result, state.NewEthernetStateCheck(
 				nodeName, reader, cfg, classifier, processingStrategy,
 				stateManager, bootIDChanged,
 			))
 		case checks.EthernetDegradationCheckName:
-			result = append(result, counter.NewEthernetDegradationCheck(
-				nodeName, reader, cfg, processingStrategy,
-				stateManager, bootIDChanged,
-			))
+			if cfg.CounterDetection.Enabled {
+				result = append(result, counter.NewEthernetDegradationCheck(
+					nodeName, reader, cfg, processingStrategy,
+					stateManager, bootIDChanged,
+				))
+			}
 		default:
 			slog.Warn("Unknown check, skipping", "check", c)
 		}

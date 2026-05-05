@@ -65,7 +65,7 @@ counterDetection:
   enabled: true
   counters:
     #--------------------------------------------------------------------------
-    # FATAL COUNTERS (Default: IsFatal=true, RecommendedAction=REPLACE_VM)
+    # FATAL COUNTERS (isFatal=true → RecommendedAction=REPLACE_VM)
     #--------------------------------------------------------------------------
     - name: link_downed
       path: counters/link_downed
@@ -74,7 +74,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0
       description: "Port Training State Machine failed - QP disconnect"
-      recommendedAction: REPLACE_VM
 
     - name: excessive_buffer_overrun_errors
       path: counters/excessive_buffer_overrun_errors
@@ -83,7 +82,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0
       description: "HCA internal buffer overflow - lossless contract violated"
-      recommendedAction: REPLACE_VM
 
     - name: local_link_integrity_errors
       path: counters/local_link_integrity_errors
@@ -92,7 +90,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0
       description: "Physical errors exceed LocalPhyErrors hardware cap"
-      recommendedAction: REPLACE_VM
 
     - name: rnr_nak_retry_err
       path: hw_counters/rnr_nak_retry_err
@@ -101,10 +98,9 @@ counterDetection:
       thresholdType: delta
       threshold: 0
       description: "Receiver Not Ready NAK retry exhausted - connection severed"
-      recommendedAction: REPLACE_VM
 
     #--------------------------------------------------------------------------
-    # NON-FATAL COUNTERS (Default: IsFatal=false, RecommendedAction=NONE)
+    # NON-FATAL COUNTERS (isFatal=false → RecommendedAction=NONE)
     #--------------------------------------------------------------------------
 
     # Physical Layer (PHY)
@@ -116,7 +112,6 @@ counterDetection:
       threshold: 10.0
       velocityUnit: second
       description: "PHY bit errors before FEC - physical layer degradation"
-      recommendedAction: NONE
 
     - name: symbol_error_fatal
       path: counters/symbol_error
@@ -126,7 +121,6 @@ counterDetection:
       threshold: 120.0
       velocityUnit: hour
       description: "Symbol errors exceed IBTA BER threshold (10E-12) - link outside spec"
-      recommendedAction: REPLACE_VM
 
     - name: link_error_recovery
       path: counters/link_error_recovery
@@ -136,7 +130,6 @@ counterDetection:
       threshold: 5.0
       velocityUnit: minute
       description: "Link retraining events - micro-flapping"
-      recommendedAction: NONE
 
     # Transport Layer
     - name: port_rcv_errors
@@ -147,7 +140,6 @@ counterDetection:
       threshold: 10.0
       velocityUnit: second
       description: "Malformed packets received"
-      recommendedAction: NONE
 
     - name: local_ack_timeout_err
       path: hw_counters/local_ack_timeout_err
@@ -157,7 +149,6 @@ counterDetection:
       threshold: 1.0
       velocityUnit: second
       description: "ACK timeout - potential fabric black hole"
-      recommendedAction: NONE
 
     # Congestion Indicators
     - name: port_xmit_discards
@@ -168,7 +159,6 @@ counterDetection:
       threshold: 100.0
       velocityUnit: second
       description: "TX discards due to congestion"
-      recommendedAction: NONE
 
     # RoCE-specific
     - name: roce_slow_restart
@@ -179,7 +169,6 @@ counterDetection:
       threshold: 10.0
       velocityUnit: second
       description: "Victim flow oscillation"
-      recommendedAction: NONE
 
     # Interface Level
     - name: carrier_changes
@@ -189,7 +178,6 @@ counterDetection:
       thresholdType: delta
       threshold: 2
       description: "Link instability - carrier state changes"
-      recommendedAction: NONE
 
 # Scheduling configuration
 nodeSelector: {}

@@ -31,14 +31,14 @@ const (
 	velocityUnitMinute = "minute"
 	velocityUnitHour   = "hour"
 
-	recommendedActionNone      = "NONE"
-	recommendedActionReplaceVM = "REPLACE_VM"
-
-	// The platform-connectors K8s connector uses this marker to parse
-	// message identity for deduplication and compaction. If it appears
-	// inside a description field it will break that parsing.
 	recommendedActionMarker = "Recommended Action="
 )
+
+var supportedCounterPathPrefixes = []string{
+	"counters/",
+	"hw_counters/",
+	"statistics/",
+}
 
 // Config represents the NIC Health Monitor configuration loaded from TOML.
 type Config struct {
@@ -67,15 +67,14 @@ type CounterDetectionConfig struct {
 
 // CounterConfig defines a single counter to monitor.
 type CounterConfig struct {
-	Name              string  `toml:"name"`
-	Path              string  `toml:"path"`
-	Enabled           bool    `toml:"enabled"`
-	IsFatal           bool    `toml:"isFatal"`
-	ThresholdType     string  `toml:"thresholdType"`
-	Threshold         float64 `toml:"threshold"`
-	VelocityUnit      string  `toml:"velocityUnit,omitempty"`
-	Description       string  `toml:"description"`
-	RecommendedAction string  `toml:"recommendedAction"`
+	Name          string  `toml:"name"`
+	Path          string  `toml:"path"`
+	Enabled       bool    `toml:"enabled"`
+	IsFatal       bool    `toml:"isFatal"`
+	ThresholdType string  `toml:"thresholdType"`
+	Threshold     float64 `toml:"threshold"`
+	VelocityUnit  string  `toml:"velocityUnit,omitempty"`
+	Description   string  `toml:"description"`
 }
 
 // LoadConfig reads and parses the TOML configuration file.
@@ -159,11 +158,6 @@ var validVelocityUnits = map[string]struct{}{
 	velocityUnitHour:   {},
 }
 
-var validRecommendedActions = map[string]struct{}{
-	recommendedActionNone:      {},
-	recommendedActionReplaceVM: {},
-}
-
 func validateCounter(c CounterConfig) error {
 	if c.Name == "" {
 		return fmt.Errorf("name must not be empty")
@@ -171,6 +165,10 @@ func validateCounter(c CounterConfig) error {
 
 	if c.Path == "" {
 		return fmt.Errorf("path must not be empty")
+	}
+
+	if err := validateCounterPath(c.Path); err != nil {
+		return fmt.Errorf("path: %w", err)
 	}
 
 	switch c.ThresholdType {
@@ -184,15 +182,24 @@ func validateCounter(c CounterConfig) error {
 		return fmt.Errorf("thresholdType %q is invalid; must be one of: delta, velocity", c.ThresholdType)
 	}
 
-	if _, ok := validRecommendedActions[c.RecommendedAction]; !ok {
-		return fmt.Errorf("recommendedAction %q is invalid; must be one of: NONE, REPLACE_VM", c.RecommendedAction)
-	}
-
 	if err := validateDescription(c.Description); err != nil {
 		return fmt.Errorf("description: %w", err)
 	}
 
 	return nil
+}
+
+func validateCounterPath(path string) error {
+	for _, prefix := range supportedCounterPathPrefixes {
+		if strings.HasPrefix(path, prefix) && len(path) > len(prefix) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf(
+		"%q is invalid; must start with one of: %s",
+		path, strings.Join(supportedCounterPathPrefixes, ", "),
+	)
 }
 
 func validateDescription(desc string) error {

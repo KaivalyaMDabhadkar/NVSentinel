@@ -28,8 +28,7 @@ func validDeltaCounter() CounterConfig {
 		Enabled:           true,
 		ThresholdType:     "delta",
 		Threshold:         0,
-		Description:       "Port Training State Machine failed",
-		RecommendedAction: "REPLACE_VM",
+		Description: "Port Training State Machine failed",
 	}
 }
 
@@ -41,8 +40,7 @@ func validVelocityCounter() CounterConfig {
 		ThresholdType:     "velocity",
 		VelocityUnit:      "second",
 		Threshold:         10.0,
-		Description:       "PHY bit errors before FEC",
-		RecommendedAction: "NONE",
+		Description: "PHY bit errors before FEC",
 	}
 }
 
@@ -88,15 +86,6 @@ func TestValidateCounterDetection_AllVelocityUnits(t *testing.T) {
 	}
 }
 
-func TestValidateCounterDetection_AllRecommendedActions(t *testing.T) {
-	for _, action := range []string{"NONE", "REPLACE_VM"} {
-		c := validDeltaCounter()
-		c.RecommendedAction = action
-		cd := counterDetection(c)
-		assert.NoError(t, validateCounterDetection(&cd), "recommendedAction %q should be valid", action)
-	}
-}
-
 func TestValidateCounter_EmptyName(t *testing.T) {
 	c := validDeltaCounter()
 	c.Name = ""
@@ -111,6 +100,38 @@ func TestValidateCounter_EmptyPath(t *testing.T) {
 	err := validateCounter(c)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "path must not be empty")
+}
+
+func TestValidateCounter_UnsupportedPathPrefix(t *testing.T) {
+	c := validDeltaCounter()
+	c.Path = "ports/1/counters/link_downed"
+	err := validateCounter(c)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path")
+	assert.Contains(t, err.Error(), "must start with")
+}
+
+func TestValidateCounter_PathPrefixOnlyRejected(t *testing.T) {
+	for _, prefix := range []string{"counters/", "hw_counters/", "statistics/"} {
+		c := validDeltaCounter()
+		c.Path = prefix
+		err := validateCounter(c)
+		require.Error(t, err, "bare prefix %q should be rejected (no counter name)", prefix)
+		assert.Contains(t, err.Error(), "path")
+	}
+}
+
+func TestValidateCounter_SupportedPathPrefixes(t *testing.T) {
+	for _, path := range []string{
+		"counters/link_downed",
+		"hw_counters/rnr_nak_retry_err",
+		"statistics/carrier_changes",
+		"statistics/rx_missed_errors",
+	} {
+		c := validDeltaCounter()
+		c.Path = path
+		assert.NoError(t, validateCounter(c), "path %q should be valid", path)
+	}
 }
 
 func TestValidateCounter_InvalidThresholdType(t *testing.T) {
@@ -135,14 +156,6 @@ func TestValidateCounter_VelocityInvalidUnit(t *testing.T) {
 	err := validateCounter(c)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "velocityUnit")
-}
-
-func TestValidateCounter_InvalidRecommendedAction(t *testing.T) {
-	c := validDeltaCounter()
-	c.RecommendedAction = "REPLACE_vm"
-	err := validateCounter(c)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "recommendedAction")
 }
 
 func TestValidateCounter_EmptyDescription(t *testing.T) {

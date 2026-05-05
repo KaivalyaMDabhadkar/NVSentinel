@@ -35,6 +35,7 @@ package counter
 import (
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
@@ -54,7 +55,7 @@ const (
 	velocityUnitMinute = "minute"
 	velocityUnitHour   = "hour"
 
-	netCarrierChangesPath = "statistics/carrier_changes"
+	netStatisticsPathPrefix = "statistics/"
 )
 
 // Evaluator owns the counter evaluation state for one degradation
@@ -174,10 +175,9 @@ func (e *Evaluator) BreachFlags() map[string]statefile.CounterBreachFlag {
 	return out
 }
 
-// EvaluateCounters reads each enabled, non-interface counter for the
-// given port and returns any HealthEvents produced. Interface-level
-// counters (statistics/carrier_changes) are routed through
-// EvaluateNetCounters because they live under /sys/class/net.
+// EvaluateCounters reads each enabled IB-tree counter for the given port.
+// Counters with a statistics/ path prefix are skipped (handled by
+// EvaluateNetCounters).
 func (e *Evaluator) EvaluateCounters(
 	dev *discovery.IBDevice,
 	port *discovery.IBPort,
@@ -189,7 +189,7 @@ func (e *Evaluator) EvaluateCounters(
 	now := time.Now()
 
 	for _, counterCfg := range counters {
-		if !counterCfg.Enabled || counterCfg.Path == netCarrierChangesPath {
+		if !counterCfg.Enabled || strings.HasPrefix(counterCfg.Path, netStatisticsPathPrefix) {
 			continue
 		}
 
@@ -209,8 +209,10 @@ func (e *Evaluator) EvaluateCounters(
 	return events
 }
 
-// EvaluateNetCounters reads interface-level counters (currently only
-// carrier_changes) for the network device associated with the port.
+// EvaluateNetCounters reads counters whose path starts with "statistics/"
+// from /sys/class/net/<iface>/statistics/. The counter file is derived
+// from the configured path (e.g., "statistics/carrier_changes" reads
+// "carrier_changes").
 func (e *Evaluator) EvaluateNetCounters(
 	dev *discovery.IBDevice,
 	port *discovery.IBPort,
@@ -226,11 +228,16 @@ func (e *Evaluator) EvaluateNetCounters(
 	now := time.Now()
 
 	for _, counterCfg := range counters {
-		if !counterCfg.Enabled || counterCfg.Path != netCarrierChangesPath {
+		if !counterCfg.Enabled || !strings.HasPrefix(counterCfg.Path, netStatisticsPathPrefix) {
 			continue
 		}
 
-		currentValue, err := e.reader.ReadNetStatistic(dev.NetDev, "carrier_changes")
+		statFile := strings.TrimPrefix(counterCfg.Path, netStatisticsPathPrefix)
+		if statFile == "" {
+			continue
+		}
+
+		currentValue, err := e.reader.ReadNetStatistic(dev.NetDev, statFile)
 		if err != nil {
 			continue
 		}
@@ -428,7 +435,7 @@ func (e *Evaluator) recordBreach(
 		e.nodeName, effectiveCheckName, message,
 		entities,
 		counterCfg.IsFatal, false,
-		ResolveAction(counterCfg.RecommendedAction),
+		ResolveAction(counterCfg.IsFatal),
 		e.processingStrategy,
 	)
 }
@@ -613,11 +620,9 @@ func ComputeRate(delta uint64, elapsed time.Duration, unit string) float64 {
 	return computeRate(delta, elapsed, unit)
 }
 
-// ResolveAction maps a config string to the protobuf enum. Only the
-// two values that appear in the default counter configs are recognised;
-// everything else falls through to NONE.
-func ResolveAction(action string) pb.RecommendedAction {
-	if action == "REPLACE_VM" {
+// ResolveAction derives the recommended action from the isFatal flag.
+func ResolveAction(isFatal bool) pb.RecommendedAction {
+	if isFatal {
 		return pb.RecommendedAction_REPLACE_VM
 	}
 

@@ -40,5 +40,4 @@ data:
     velocityUnit = {{ .velocityUnit | quote }}
     {{- end }}
     description = {{ .description | quote }}
-    recommendedAction = {{ .recommendedAction | quote }}
     {{- end }}
