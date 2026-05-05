@@ -18,8 +18,26 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/configmanager"
+)
+
+const (
+	thresholdTypeDelta    = "delta"
+	thresholdTypeVelocity = "velocity"
+
+	velocityUnitSecond = "second"
+	velocityUnitMinute = "minute"
+	velocityUnitHour   = "hour"
+
+	recommendedActionNone      = "NONE"
+	recommendedActionReplaceVM = "REPLACE_VM"
+
+	// The platform-connectors K8s connector uses this marker to parse
+	// message identity for deduplication and compaction. If it appears
+	// inside a description field it will break that parsing.
+	recommendedActionMarker = "Recommended Action="
 )
 
 // Config represents the NIC Health Monitor configuration loaded from TOML.
@@ -83,6 +101,10 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("invalid nicInclusionRegexOverride: %w", err)
 	}
 
+	if err := validateCounterDetection(&cfg.CounterDetection); err != nil {
+		return nil, fmt.Errorf("invalid counterDetection: %w", err)
+	}
+
 	return cfg, nil
 }
 
@@ -100,6 +122,97 @@ func validateRegexList(commaSeparated string) error {
 		if _, err := regexp.Compile(pat); err != nil {
 			return fmt.Errorf("pattern %q: %w", pat, err)
 		}
+	}
+
+	return nil
+}
+
+func validateCounterDetection(cd *CounterDetectionConfig) error {
+	if !cd.Enabled {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+
+	for i, c := range cd.Counters {
+		if !c.Enabled {
+			continue
+		}
+
+		if err := validateCounter(c); err != nil {
+			return fmt.Errorf("counters[%d] (%q): %w", i, c.Name, err)
+		}
+
+		if _, exists := seen[c.Name]; exists {
+			return fmt.Errorf("counters[%d]: duplicate counter name %q", i, c.Name)
+		}
+
+		seen[c.Name] = struct{}{}
+	}
+
+	return nil
+}
+
+var validVelocityUnits = map[string]struct{}{
+	velocityUnitSecond: {},
+	velocityUnitMinute: {},
+	velocityUnitHour:   {},
+}
+
+var validRecommendedActions = map[string]struct{}{
+	recommendedActionNone:      {},
+	recommendedActionReplaceVM: {},
+}
+
+func validateCounter(c CounterConfig) error {
+	if c.Name == "" {
+		return fmt.Errorf("name must not be empty")
+	}
+
+	if c.Path == "" {
+		return fmt.Errorf("path must not be empty")
+	}
+
+	switch c.ThresholdType {
+	case thresholdTypeDelta:
+		// velocityUnit is ignored for delta counters
+	case thresholdTypeVelocity:
+		if _, ok := validVelocityUnits[c.VelocityUnit]; !ok {
+			return fmt.Errorf("velocityUnit %q is invalid; must be one of: second, minute, hour", c.VelocityUnit)
+		}
+	default:
+		return fmt.Errorf("thresholdType %q is invalid; must be one of: delta, velocity", c.ThresholdType)
+	}
+
+	if _, ok := validRecommendedActions[c.RecommendedAction]; !ok {
+		return fmt.Errorf("recommendedAction %q is invalid; must be one of: NONE, REPLACE_VM", c.RecommendedAction)
+	}
+
+	if err := validateDescription(c.Description); err != nil {
+		return fmt.Errorf("description: %w", err)
+	}
+
+	return nil
+}
+
+func validateDescription(desc string) error {
+	if desc == "" {
+		return fmt.Errorf("must not be empty")
+	}
+
+	if !utf8.ValidString(desc) {
+		return fmt.Errorf("contains invalid UTF-8")
+	}
+
+	if strings.Contains(desc, ";") {
+		return fmt.Errorf("must not contain %q (used as message delimiter by platform-connectors)", ";")
+	}
+
+	if strings.Contains(desc, recommendedActionMarker) {
+		return fmt.Errorf(
+			"must not contain %q (used as message parser marker by platform-connectors)",
+			recommendedActionMarker,
+		)
 	}
 
 	return nil
