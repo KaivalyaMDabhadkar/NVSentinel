@@ -116,6 +116,7 @@ func TestNICCounterIBDegradation(t *testing.T) {
 		require.Never(t, func() bool {
 			node, getErr := helpers.GetNodeByName(ctx, client, nodeName)
 			if getErr != nil {
+				require.NoError(t, getErr, "failed to read node while verifying latch behavior")
 				return false
 			}
 
