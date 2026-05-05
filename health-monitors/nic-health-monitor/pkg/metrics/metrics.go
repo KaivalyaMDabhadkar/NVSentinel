@@ -47,4 +47,10 @@ var (
 		Name: "nic_health_monitor_state_check_errors_total",
 		Help: "Total number of state check error events",
 	}, []string{"node", "check", "device", "port"})
+
+	// CounterThresholdBreaches counts counter threshold breaches.
+	CounterThresholdBreaches = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "nic_health_monitor_counter_threshold_breaches_total",
+		Help: "Total number of counter threshold breaches detected",
+	}, []string{"node", "counter", "device", "port", "is_fatal"})
 )

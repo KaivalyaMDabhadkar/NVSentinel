@@ -87,13 +87,13 @@ This monitor uses a binary severity model based on **workload impact**:
 │                                     │                                            │
 │                                     ▼                                            │
 │  ┌─────────────────────────────────────────────────────────────────────────┐    │
-│  │              DEGRADATION MONITOR (5s polling interval)                   │    │
+│  │              DEGRADATION MONITOR (1s polling interval)                   │    │
 │  ├─────────────────────────────────────────────────────────────────────────┤    │
 │  │                                                                          │    │
 │  │  CALCULATES (locally, for threshold comparison):                         │    │
-│  │  ├── Δ (delta)      →  Change in counter value since last poll          │    │
-│  │  ├── Δt (elapsed)   →  Actual wall-clock time (per-counter timestamp)   │    │
-│  │  └── Δ/Δt (rate)    →  Errors per unit time (precise velocity)          │    │
+│  │  ├── Δ (delta)      →  current_value − snapshot.value                    │    │
+│  │  ├── Δt (elapsed)   →  now − snapshot.timestamp (wall-clock)             │    │
+│  │  └── Δ/Δt (rate)    →  Errors per unit time, only after Δt ≥ window     │    │
 │  │                                                                          │    │
 │  │  PERSISTS (hostPath-backed state file):                                  │    │
 │  │  ├── Per-counter snapshot (value + timestamp for delta/velocity)         │    │
@@ -316,9 +316,9 @@ The Degradation Monitor follows NVSentinel's established architectural pattern w
 | **NIC Health Monitor (Degradation Check)** | Poll sysfs counters, calculate deltas/rates, persist counter snapshots and breach state, emit raw events and recovery events | Aggregation, deduplication, correlation, pattern detection |
 | **Health Events Analyzer**                 | Correlate events, detect patterns, escalate severity                                                                         | Direct hardware access                                     |
 
-> **Local State Persistence**: The Degradation Check maintains a persistent state file on the node (hostPath-backed) containing per-counter snapshots (value + timestamp), per-counter breach flags, and the host boot ID. This enables the monitor to (1) compute accurate deltas and **precise velocity rates** immediately after pod restart — using the real elapsed time from the persisted per-counter timestamp rather than assuming the nominal poll interval, (2) emit recovery events (`IsHealthy=true`) when counters are reset by an administrator, and (3) detect host reboots to **clear all state and emit healthy baseline events** for all ports and counters, since the node may have had NICs replaced during maintenance. This local state is strictly operational — all correlation and pattern detection remains centralized in the Health Events Analyzer.
+> **Local State Persistence**: The Degradation Check maintains a persistent state file on the node (hostPath-backed) containing per-counter snapshots (value + timestamp), per-counter breach flags, and the host boot ID. This enables the monitor to (1) compute accurate deltas and **precise velocity rates** by holding the persisted snapshot for the configured velocity window and computing the rate over the real elapsed time — so a `120/hour` threshold is observed over a one-hour window rather than extrapolated from a single 1s sample; (2) seamlessly resume velocity windows after a pod restart because the snapshot timestamp survives the restart; (3) emit recovery events (`IsHealthy=true`) when counters are reset by an administrator, by retaining the breach flag across restarts; and (4) detect host reboots to **clear all state and emit healthy baseline events** for all ports and counters, since the node may have had NICs replaced during maintenance. This local state is strictly operational — all correlation and pattern detection remains centralized in the Health Events Analyzer.
 
-### 3.3 Degradation Check Data Flow (5s polling interval)
+### 3.3 Degradation Check Data Flow (1s polling interval)
 
 ```
 Reads:
@@ -328,16 +328,21 @@ Reads:
 └── carrier_changes → Link flap counter (catches UP/DOWN events between polls)
 
 Calculates (locally, for threshold comparison):
-├── Δ (delta)      → Change in counter value since last poll
-├── Δt (elapsed)   → Actual wall-clock time since last read (per-counter timestamp)
-└── Δ/Δt (rate)    → Errors per unit time (using real elapsed, not nominal interval)
+├── Δ (delta)      → current_value − snapshot.value
+├── Δt (elapsed)   → now − snapshot.timestamp (real wall-clock time)
+└── Δ/Δt (rate)    → For velocity thresholds, evaluated only after Δt ≥ window
+                     (window = 1s / 1m / 1h, matching the configured velocityUnit)
 
-When threshold exceeded, emits RAW event with:
-├── Counter name   → e.g., "symbol_error"
+When threshold exceeded for the first time, emits a single RAW event with:
+├── Counter name   → e.g., "symbol_error_fatal"
 ├── Current value  → e.g., 12500
-├── Delta          → e.g., 150 (change since last poll)
-├── Rate           → e.g., 30/sec
-└── Threshold      → e.g., 10/sec
+├── Delta          → accumulated since the snapshot was taken
+├── Rate           → e.g., 200/hour
+└── Threshold      → e.g., 120/hour
+
+Subsequent polls while breached emit nothing (latching breach). A
+recovery event is emitted only when the counter is reset (admin clear)
+or the host reboots.
 
 Fatal counter thresholds (configurable, defaults shown):
 ├── link_downed (Delta > 0)                    → QP disconnect (FATAL)
@@ -546,31 +551,49 @@ Naive Delta = 50 - 1,000,000 = NEGATIVE (or overflow to huge positive)
 
 ### 6.3 Counter Reset Handling Algorithm
 
-**Delta Calculation Steps:**
+**Reset Detection** (uses an in-memory `lastPollValue` per counter
+plus the persisted snapshot as fallback after pod restart):
 
-1. **Compare current vs previous** counter value
-2. **If current < previous** (reset detected):
-   - Treat the new value as the delta since the reset
-   - Return `current` as the delta
-3. **Otherwise**:
-   - Return `current - previous` as the delta
+1. **If `lastPollValue` is recorded** for this counter (steady state):
+   - Reset detected when `current < lastPollValue`
+2. **Else if a persisted snapshot exists** (first poll after pod restart,
+   `lastPollValue` not yet rebuilt):
+   - Reset detected when `current < snapshot.value`
+3. **Else** (truly first poll for this counter):
+   - No reset to detect; just initialize the snapshot
 
-**Threshold Evaluation and Recovery Steps:**
+Sysfs counters are kernel-maintained and monotonic between resets, so
+`current < previous` is a definitive reset signal.
 
-1. **Calculate delta** using the algorithm above
-2. **Evaluate threshold** (delta or velocity-based, see Section 10.4)
-3. **If threshold breached** and counter was not previously breached:
-   - Emit **unhealthy event** (`IsHealthy=false`, `IsFatal` per counter config)
-   - Set `breached=true` for this counter in persistent state
-4. **If threshold NOT breached** and counter was previously breached:
-   - Emit **recovery event** (`IsHealthy=true`, `IsFatal=false`, `RecommendedAction=NONE`)
-   - Set `breached=false` for this counter in persistent state
-5. **If threshold breached** and counter was already breached:
-   - **No event** — still unhealthy, avoid duplicate events
-6. **If threshold NOT breached** and counter was not previously breached:
+**Threshold Evaluation and Recovery Steps** (latching breach):
+
+1. **If reset detected**:
+   - If counter was previously breached → emit **recovery event**
+     (`IsHealthy=true`, `IsFatal=false`, `RecommendedAction=NONE`),
+     clear `breached` flag
+   - If not previously breached → no event
+   - Update snapshot to `(current, now)` so the next window starts
+     fresh from the post-reset baseline
+2. **Else if counter is already breached** (latched):
+   - **No event** — breach stays latched until counter reset or boot ID change
+3. **Else** (no reset, not currently breached) — evaluate the threshold:
+   - For `delta`: `breach = (current − snapshot.value) > threshold`,
+     update snapshot every poll
+   - For `velocity`: skip until `now − snapshot.timestamp ≥ window`,
+     then `breach = rate > threshold`, update snapshot
+4. **If breach detected** in step 3:
+   - Emit **unhealthy event** (`IsHealthy=false`, `IsFatal` per counter
+     config), set `breached=true` in persistent state
+5. **If no breach** in step 3:
    - **No event** — still healthy
 
-This mirrors the **health boundary crossing** pattern used by the state checks (see [Link State Detection, Section 3.4](./link-state-detection.md#34-state-based-event-generation-algorithm)), where events are only emitted on transitions between healthy and unhealthy states.
+> **Latching breach rationale**: Once a fatal counter increments
+> (e.g. `link_downed=1`), the underlying physical event has happened.
+> The fact that no further increments occur in the next poll does not
+> mean the issue is resolved — only that no more events are accumulating
+> right now. Recovery therefore requires explicit remediation (admin
+> counter reset or host reboot), not merely the absence of new errors.
+> This is consistent with the Section 6.4 admin-reset timeline.
 
 ### 6.4 Admin Counter Reset: Recovery Event Scenario
 
@@ -608,7 +631,9 @@ On host reboot, the node may come back with **entirely different hardware** (the
    - Update the stored boot ID and save the empty state
    - On the **first poll cycle after reboot**, emit baseline events:
      - **State checks**: For every port that is currently `ACTIVE/LinkUp`, emit a **healthy event** (`IsHealthy=true`). This clears any stale FATAL port conditions on the platform from the previous boot. Ports that are currently unhealthy (e.g., `DOWN`, `Disabled`) emit **fatal/non-fatal events as usual** — the node may have come back with a hardware issue.
-     - **Counter checks**: Emit a **healthy event** (`IsHealthy=true`) for every configured counter. Since counters reset to 0 on reboot and there is no previous value to compute a delta from, all counters are below threshold on the first poll. This clears any stale counter breach conditions on the platform. The first poll also establishes the counter baseline; if any counter begins incrementing above threshold, the **second poll** (one interval later) will detect the delta and emit an unhealthy event.
+     - **Counter checks**: Emit a **healthy event** (`IsHealthy=true`) for every configured counter. Since counters reset to 0 on reboot and there is no previous value to compute a delta from, all counters are below threshold on the first poll. This clears any stale counter breach conditions on the platform. The first poll also establishes the counter baseline:
+       - **Delta counters** evaluate against the new baseline starting from the **second poll** (one polling interval later) — any increment above threshold triggers an unhealthy event.
+       - **Velocity counters** wait for their full `velocityUnit` window (1s / 1m / 1h) to elapse against the new baseline before evaluating; they do not extrapolate from a partial sample.
    - Rationale: the node is effectively a fresh machine after reboot — NICs may have been replaced, firmware updated, cables reseated. The platform must be told that all previously-reported conditions are resolved unless new issues are detected on this boot.
 4. **If boot IDs match** (pod restart, same host boot):
    - Restore all persisted state (counter snapshots, breach flags, port states, known devices)
@@ -654,15 +679,21 @@ type MonitorState struct {
     KnownDevices     []string                     `json:"known_devices"`
 }
 
-// CounterSnapshot stores the last-seen value and the exact wall-clock timestamp
-// of the read for a single counter. The per-counter timestamp is critical for
-// accurate velocity calculation: the monitor computes rate as delta / elapsed
-// where elapsed is derived from this timestamp, not from the nominal poll
-// interval. This matters because (a) actual poll timing drifts due to
-// scheduling jitter and system load, (b) after a pod restart the elapsed time
-// since the last persisted read may be much longer than one poll interval, and
-// (c) different counter groups (state vs degradation) poll at different
-// intervals (1s vs 5s).
+// CounterSnapshot stores the value and wall-clock timestamp of a counter
+// reading. It plays two distinct roles depending on the configured
+// thresholdType:
+//   - For "delta" thresholds, the snapshot is updated every poll. Δ is
+//     just current_value − snapshot.value over the polling interval.
+//   - For "velocity" thresholds, the snapshot is held for the full
+//     velocityUnit window (1s / 1m / 1h). Evaluation only happens once
+//     elapsed ≥ window, and the rate is computed as delta / elapsed in
+//     the configured unit. After evaluation the snapshot is advanced
+//     to the current reading so the next window starts fresh. This
+//     avoids extrapolating a 1s sample into an hourly rate.
+//
+// Because the timestamp is persisted, velocity windows survive pod
+// restarts: the new pod resumes from the persisted (value, timestamp)
+// instead of restarting the window from zero.
 type CounterSnapshot struct {
     Value     uint64    `json:"value"`
     Timestamp time.Time `json:"timestamp"`
@@ -714,7 +745,7 @@ type PortStateSnapshot struct {
 - **Admin-initiated resets are a legitimate remediation action** — the monitor must recognize them and clear the unhealthy condition by emitting a recovery event
 - Driver reloads are logged separately by the Syslog Health Monitor, providing correlation context
 - Persistent state ensures recovery events survive pod restarts, preventing nodes from being permanently stuck in an unhealthy state
-- **Per-counter timestamps enable precise velocity calculation** — the monitor uses the actual wall-clock elapsed time between reads (`now - persisted_timestamp`) rather than the nominal poll interval. This is essential because: (a) real poll timing drifts under system load, (b) after a pod restart the gap since the last read may be seconds, minutes, or longer, and (c) velocity thresholds configured in different units (per-second, per-minute, per-hour) require accurate elapsed time to produce correct rates. Using the nominal interval after a restart would yield wildly incorrect rates.
+- **Per-counter timestamps enable accurate velocity calculation** — the snapshot is held for the configured velocityUnit window (1s / 1m / 1h) and the rate is computed over the real wall-clock elapsed time, not extrapolated from a single poll. This means a `120/hour` threshold genuinely observes one hour of data, not 3600 × the per-second rate. Persisting the timestamp lets the window survive pod restarts: the new pod resumes from the persisted snapshot instead of starting a fresh window.
 
 ---
 
@@ -837,65 +868,7 @@ type CounterDelta struct {
 
 ### 9.2 Persistent State Structures
 
-The monitor persists operational state to survive pod restarts. See [Section 6.6](#66-persistent-state-file) for the persistence mechanism and volume mount configuration.
-
-```go
-// MonitorState is the top-level persistent state written to disk as JSON.
-// This single state file is shared by both state checks and counter checks.
-type MonitorState struct {
-    Version          int                                `json:"version"`
-    BootID           string                             `json:"boot_id"`
-
-    // Counter detection state
-    CounterSnapshots map[string]PersistedCounterValue   `json:"counter_snapshots"`
-    BreachFlags      map[string]CounterBreachFlag       `json:"breach_flags"`
-
-    // State detection state
-    PortStates       map[string]PersistedPortState      `json:"port_states"`
-    KnownDevices     []string                           `json:"known_devices"`
-}
-
-// PersistedCounterValue stores the last-seen value and the exact wall-clock
-// timestamp of the read for a single counter. Two roles:
-//   1. Delta calculation: delta = current_value - persisted_value
-//   2. Velocity precision: elapsed = now - persisted_timestamp, then
-//      rate = delta / elapsed (converted to the configured velocityUnit).
-//      Using the real per-counter timestamp instead of the nominal poll
-//      interval is critical after pod restarts (where elapsed >> poll interval)
-//      and under scheduling jitter.
-type PersistedCounterValue struct {
-    Value     uint64    `json:"value"`
-    Timestamp time.Time `json:"timestamp"`
-}
-
-// CounterBreachFlag tracks whether a counter has an active threshold breach,
-// enabling recovery event emission when the breach clears (e.g., admin counter
-// reset). The breach state cannot be derived from the counter value alone —
-// it depends on the delta at the time of the original breach, not the absolute
-// value.
-type CounterBreachFlag struct {
-    Breached  bool      `json:"breached"`
-    CheckName string    `json:"check_name"`
-    IsFatal   bool      `json:"is_fatal"`
-    Since     time.Time `json:"since"`
-}
-
-// PersistedPortState captures the last-known state of a port for the state
-// checks. Enables recovery event emission (IsHealthy=true) after pod restart
-// when a previously-DOWN port has been fixed. Also enables device disappearance
-// detection across restarts via the KnownDevices list in MonitorState.
-//
-// LinkLayer ("InfiniBand" or "Ethernet") lets each state check filter the
-// shared map to its own ports on startup so the IB and Ethernet checks
-// don't treat each other's entries as "disappeared" during the seed.
-type PersistedPortState struct {
-    State         string `json:"state"`
-    PhysicalState string `json:"physical_state"`
-    Device        string `json:"device"`
-    Port          int    `json:"port"`
-    LinkLayer     string `json:"link_layer,omitempty"`
-}
-```
+The monitor persists operational state to survive pod restarts. See [Section 6.6](#66-persistent-state-file) for the on-disk schema and field-level rationale; the structures defined there (`MonitorState`, `CounterSnapshot`, `CounterBreachFlag`, `PortStateSnapshot`) are the canonical reference.
 
 **Example state file content:**
 
@@ -949,10 +922,7 @@ The counter monitoring system is fully configurable, allowing operators to:
 counterDetection:
   # Enable/disable counter monitoring
   enabled: true
-  
-  # Polling interval for counter collection (milliseconds)
-  pollIntervalMs: 5000
-  
+
   # Counter definitions - fully configurable
   # Each counter can specify:
   #   - name:           Counter identifier (used in events)
@@ -963,10 +933,16 @@ counterDetection:
   #   - threshold:      Numeric threshold value
   #   - velocityUnit:   For velocity thresholds: "second", "minute", "hour"
   #   - description:    Human-readable description for event messages
-  #   - recommendedAction: Action for fatal counters (REPLACE_VM, RESTART_BM, NONE)
-  
+
   counters: []  # See defaults below
 ```
+
+> **Polling interval**: The polling interval is set globally on the
+> Helm chart (`pollingInterval`, default `1s`) and is not configured
+> per counter. Velocity thresholds are evaluated against a window
+> matching the configured `velocityUnit` (1s / 1m / 1h), independent of
+> the polling interval — so a fast 1s poll is suitable for every
+> counter type without producing false alerts on long windows.
 
 ### 10.2 Default Counter Configuration
 
@@ -975,14 +951,13 @@ The following counters are monitored by default. Operators can override any sett
 ```yaml
 counterDetection:
   enabled: true
-  pollIntervalMs: 5000
-  
+
   counters:
     #--------------------------------------------------------------------------
     # FATAL COUNTERS (Default: IsFatal=true, RecommendedAction=REPLACE_VM)
     # These counters indicate deterministic workload failure
     #--------------------------------------------------------------------------
-    
+
     - name: link_downed
       path: counters/link_downed
       enabled: true
@@ -990,7 +965,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0              # Any increment (> 0) is fatal
       description: "Port Training State Machine failed - QP disconnect"
-      recommendedAction: REPLACE_VM
       
     - name: excessive_buffer_overrun_errors
       path: counters/excessive_buffer_overrun_errors
@@ -999,7 +973,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0              # Any increment is fatal
       description: "HCA internal buffer overflow - lossless contract violated"
-      recommendedAction: REPLACE_VM
       
     - name: local_link_integrity_errors
       path: counters/local_link_integrity_errors
@@ -1008,7 +981,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0              # Any increment is fatal
       description: "Physical errors exceed LocalPhyErrors hardware cap"
-      recommendedAction: REPLACE_VM
       
     - name: rnr_nak_retry_err
       path: hw_counters/rnr_nak_retry_err
@@ -1017,7 +989,6 @@ counterDetection:
       thresholdType: delta
       threshold: 0              # Any increment is fatal
       description: "Receiver Not Ready NAK retry exhausted - connection severed"
-      recommendedAction: REPLACE_VM
     
     #--------------------------------------------------------------------------
     # NON-FATAL COUNTERS (Default: IsFatal=false, RecommendedAction=NONE)
@@ -1033,7 +1004,6 @@ counterDetection:
       threshold: 10.0
       velocityUnit: second
       description: "PHY bit errors before FEC - physical layer degradation"
-      recommendedAction: NONE
 
     - name: symbol_error_fatal
       path: counters/symbol_error
@@ -1043,7 +1013,6 @@ counterDetection:
       threshold: 120.0
       velocityUnit: hour
       description: "Symbol errors exceed IBTA BER threshold (10E-12) - link outside spec"
-      recommendedAction: REPLACE_VM
       
     - name: link_error_recovery
       path: counters/link_error_recovery
@@ -1053,7 +1022,6 @@ counterDetection:
       threshold: 5.0
       velocityUnit: minute
       description: "Link retraining events - micro-flapping"
-      recommendedAction: NONE
     
     # Transport Layer
     - name: port_rcv_errors
@@ -1064,7 +1032,6 @@ counterDetection:
       threshold: 10.0
       velocityUnit: second
       description: "Malformed packets received"
-      recommendedAction: NONE
       
     - name: out_of_sequence
       path: hw_counters/out_of_sequence
@@ -1074,7 +1041,6 @@ counterDetection:
       threshold: 100.0
       velocityUnit: second
       description: "Fabric routing issues - out of sequence packets"
-      recommendedAction: NONE
       
     - name: local_ack_timeout_err
       path: hw_counters/local_ack_timeout_err
@@ -1084,7 +1050,6 @@ counterDetection:
       threshold: 1.0
       velocityUnit: second
       description: "ACK timeout - potential fabric black hole"
-      recommendedAction: NONE
     
     # Congestion Indicators
     - name: port_xmit_discards
@@ -1095,7 +1060,6 @@ counterDetection:
       threshold: 100.0
       velocityUnit: second
       description: "TX discards due to congestion"
-      recommendedAction: NONE
       
     - name: port_xmit_wait
       path: counters/port_xmit_wait
@@ -1105,7 +1069,6 @@ counterDetection:
       threshold: 10000.0
       velocityUnit: second
       description: "TX wait ticks - congestion backpressure"
-      recommendedAction: NONE
     
     # RoCE-specific
     - name: roce_slow_restart
@@ -1116,7 +1079,6 @@ counterDetection:
       threshold: 10.0
       velocityUnit: second
       description: "Victim flow oscillation"
-      recommendedAction: NONE
     
     # Interface Level
     - name: carrier_changes
@@ -1126,7 +1088,6 @@ counterDetection:
       thresholdType: delta
       threshold: 2               # > 2 changes per interval
       description: "Link instability - carrier state changes"
-      recommendedAction: NONE
 ```
 
 ### 10.3 Custom Counter Example
@@ -1145,7 +1106,6 @@ counterDetection:
       threshold: 120.0                 # IBTA spec: 120/hour
       velocityUnit: hour               # Changed from second
       description: "Symbol errors exceed IBTA BER threshold"
-      recommendedAction: REPLACE_VM
     
     # Custom: Add vendor-specific counter
     - name: custom_vendor_error
@@ -1155,7 +1115,6 @@ counterDetection:
       thresholdType: delta
       threshold: 100
       description: "Vendor-specific error counter"
-      recommendedAction: NONE
     
     # Disable: Turn off a default counter
     - name: port_xmit_wait
@@ -1164,89 +1123,93 @@ counterDetection:
 
 ### 10.4 Threshold Processing Algorithm
 
+The evaluator uses **latching breach** semantics: once a counter
+breaches its threshold, the breach flag stays set until the counter is
+reset (`current < previous`) or the host reboots. Polls while a counter
+is already breached emit nothing; recovery events fire only on counter
+reset of a previously breached counter.
+
 ```
 On startup, before the first poll cycle:
   0. Check boot ID (see Section 6.5):
      IF boot ID changed (host rebooted):
-       - Clear ALL persisted state
+       - Clear ALL persisted state (snapshots and breach flags)
        - Set reboot_detected = true
      ELSE (pod restart, same boot):
        - Restore all persisted state
        - Set reboot_detected = false
 
-For each configured counter:
-  1. Read current value from sysfs path, record current wall-clock time (now)
-  
-  2. IF reboot_detected AND first poll:
-     → Counter value is post-reboot baseline (counters reset to 0 by kernel)
-     → Evaluate threshold: if below threshold (expected for all counters at 0),
-       emit HEALTHY event to clear any stale breach on the platform:
+For each configured counter (key = <device>:<port>:<counter_name>):
+  1. Read current_value from sysfs and capture wall-clock now.
+
+  2. IF reboot_detected AND this is the first poll for the key:
+     → Emit HEALTHY baseline event (clears any stale platform condition):
          - IsHealthy = true
          - IsFatal = false
          - RecommendedAction = NONE
          - Message = "Counter {name} healthy after reboot on port {device} port {port}"
-         - CheckName: configured check name for this counter
-     → Store current value + now as baseline, skip to next counter
+         - CheckName: state check name if isFatal, else degradation check name
+     → Store snapshot = (current_value, now). Continue to next counter.
 
-  3. Load previous value AND timestamp from persistent state (or in-memory)
-     - If no previous value exists: store current value + now, skip to next counter
-  4. Calculate delta and elapsed:
-     delta   = current_value - previous_value
-     elapsed = now - previous_timestamp        ← actual wall-clock time, NOT pollIntervalMs
-     Handle counter reset if current < previous (treat delta = current_value)
-  
-  5. Evaluate threshold based on thresholdType:
-     
+  3. Reset detection (in this priority order):
+     a. IF an in-memory lastPollValue exists for this key AND
+        current_value < lastPollValue → reset
+     b. ELSE IF a persisted snapshot exists AND
+        current_value < snapshot.value → reset
+     The lastPollValue path catches mid-window resets in steady state;
+     the snapshot.value fallback catches resets that happened during pod
+     downtime when lastPollValue is gone.
+
+     IF reset:
+       IF previously_breached:
+         → Emit RECOVERY event (IsHealthy=true, IsFatal=false,
+           RecommendedAction=NONE, CheckName matching the original breach)
+         → Clear breach flag
+       Update snapshot to (current_value, now). Continue to next counter.
+
+  4. IF previously_breached:
+     → No event (latched). Skip evaluation entirely.
+
+  5. Evaluate based on thresholdType:
+
      IF thresholdType == "delta":
-       breach = (delta > threshold)
-     
-     IF thresholdType == "velocity":
-       Calculate rate using actual elapsed time and configured velocityUnit:
-         - second: rate = delta / elapsed_in_seconds
-         - minute: rate = delta / elapsed_in_minutes
-         - hour:   rate = delta / elapsed_in_hours
-       breach = (rate > threshold)
-       
-       NOTE: Using the real per-counter elapsed time (not the nominal poll
-       interval) is critical for precision. After a pod restart, elapsed may
-       be seconds, minutes, or hours — using pollIntervalMs would produce
-       wildly incorrect rates. Even during normal operation, scheduling jitter
-       causes the true interval to deviate from the configured value.
-  
-  6. Determine event based on health boundary crossing:
+         delta = current_value − snapshot.value
+         breach = (delta > threshold)
+         Update snapshot to (current_value, now) every poll.
 
-     IF breach AND NOT previously_breached:
-       → Emit UNHEALTHY event:
-           - IsHealthy = false
-           - IsFatal = counter.isFatal
-           - RecommendedAction = counter.recommendedAction
-           - Message = counter.description + " (value={value}, delta={delta}, rate={rate})"
-           - CheckName:
-               If isFatal: state check name (InfiniBandStateCheck / EthernetStateCheck)
-               If non-fatal: degradation check name (InfiniBandDegradationCheck / EthernetDegradationCheck)
-           - ComponentClass = "NIC"
-       → Set breached = true in persistent state
-     
-     IF NOT breach AND previously_breached:
-       → Emit RECOVERY event:
-           - IsHealthy = true
-           - IsFatal = false
-           - RecommendedAction = NONE
-           - Message = "Counter {name} recovered on port {device} port {port}"
-           - CheckName: same check name as the original breach event
-           - ComponentClass = "NIC"
-       → Set breached = false in persistent state
-     
-     IF breach AND previously_breached:
-       → No event (still unhealthy, avoid duplicates)
-     
-     IF NOT breach AND NOT previously_breached:
-       → No event (still healthy)
-  
-  7. Update persistent state with current counter snapshot
-  
+     IF thresholdType == "velocity":
+         elapsed = now − snapshot.timestamp
+         window = velocityUnit (1s | 1m | 1h)
+
+         IF elapsed < window:
+             → Skip evaluation; leave snapshot untouched. The window is
+               not yet full. Continue to next counter.
+
+         delta   = current_value − snapshot.value
+         rate    = delta / elapsed expressed in velocityUnit
+         breach  = (rate > threshold)
+         Update snapshot to (current_value, now). The next window starts
+         from this reading.
+
+  6. IF breach (and we got here, so we were not previously breached):
+     → Emit UNHEALTHY event:
+         - IsHealthy = false
+         - IsFatal = counter.isFatal
+         - RecommendedAction = REPLACE_VM if counter.isFatal, else NONE
+         - Message = "{port}: {name} - {description} (value=..., delta=..., rate=...)"
+         - CheckName:
+             isFatal=true  → state check name (InfiniBandStateCheck / EthernetStateCheck)
+             isFatal=false → degradation check name
+         - ComponentClass = "NIC"
+     → Set breached = true in persistent breach flags.
+
+     IF NOT breach: no event.
+
+  7. Record current_value as lastPollValue (in-memory) for the next poll.
+
 After all counters evaluated:
-  8. Save persistent state to disk
+  8. Save persistent state to disk only if any snapshot or breach flag
+     actually changed (to avoid unnecessary writes every poll).
 ```
 
 ### 10.5 Configuration Validation

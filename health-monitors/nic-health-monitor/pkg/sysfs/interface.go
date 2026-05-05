@@ -41,6 +41,13 @@ type Reader interface {
 	// Network (operstate) ----------------------------------------------
 	ReadNetOperState(iface string) (string, error)
 
+	// Counters -----------------------------------------------------------
+	// ReadIBPortCounter reads a uint64 counter from the port's sysfs tree.
+	// counterPath is relative to the port directory, e.g. "counters/link_downed".
+	ReadIBPortCounter(device string, port int, counterPath string) (uint64, error)
+	// ReadNetStatistic reads a uint64 counter from /sys/class/net/<iface>/statistics/<counter>.
+	ReadNetStatistic(iface, counter string) (uint64, error)
+
 	// NUMA / PCI --------------------------------------------------------
 	// ReadIBDeviceNUMANode reads /sys/class/infiniband/<dev>/device/numa_node.
 	ReadIBDeviceNUMANode(device string) (int, error)

@@ -92,6 +92,28 @@ func (r *fsReader) ReadNetOperState(iface string) (string, error) {
 	return r.ReadFile(filepath.Join(r.netBase, iface, "operstate"))
 }
 
+func (r *fsReader) ReadIBPortCounter(device string, port int, counterPath string) (uint64, error) {
+	return readUint64(filepath.Join(r.IBPortPath(device, port), counterPath))
+}
+
+func (r *fsReader) ReadNetStatistic(iface, counter string) (uint64, error) {
+	return readUint64(filepath.Join(r.netBase, iface, "statistics", counter))
+}
+
+func readUint64(path string) (uint64, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read %s: %w", path, err)
+	}
+
+	val, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("failed to parse uint64 from %s: %w", path, err)
+	}
+
+	return val, nil
+}
+
 func (r *fsReader) ReadIBDeviceNUMANode(device string) (int, error) {
 	s, err := r.ReadFile(filepath.Join(r.ibBase, device, "device", "numa_node"))
 	if err != nil {

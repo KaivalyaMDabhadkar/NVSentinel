@@ -31,6 +31,9 @@ type MockReader struct {
 
 	ReadNetOperStateFunc func(iface string) (string, error)
 
+	ReadIBPortCounterFunc func(device string, port int, counterPath string) (uint64, error)
+	ReadNetStatisticFunc  func(iface, counter string) (uint64, error)
+
 	ReadIBDeviceNUMAFunc  func(device string) (int, error)
 	ReadPCIAddressFunc    func(device string) (string, error)
 	IsVirtualFunctionFunc func(device string) bool
@@ -125,6 +128,22 @@ func (m *MockReader) ReadNetOperState(iface string) (string, error) {
 	}
 
 	return "", nil
+}
+
+func (m *MockReader) ReadIBPortCounter(device string, port int, counterPath string) (uint64, error) {
+	if m.ReadIBPortCounterFunc != nil {
+		return m.ReadIBPortCounterFunc(device, port, counterPath)
+	}
+
+	return 0, nil
+}
+
+func (m *MockReader) ReadNetStatistic(iface, counter string) (uint64, error) {
+	if m.ReadNetStatisticFunc != nil {
+		return m.ReadNetStatisticFunc(iface, counter)
+	}
+
+	return 0, nil
 }
 
 func (m *MockReader) ReadIBDeviceNUMANode(device string) (int, error) {

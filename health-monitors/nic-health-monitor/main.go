@@ -35,6 +35,7 @@ import (
 	"github.com/nvidia/nvsentinel/commons/pkg/server"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/checks"
+	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/checks/counter"
 	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/checks/state"
 	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/config"
 	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/monitor"
@@ -54,14 +55,14 @@ var (
 	date    = "unknown"
 
 	checksList = flag.String("checks",
-		"InfiniBandStateCheck,EthernetStateCheck",
+		"InfiniBandStateCheck,InfiniBandDegradationCheck,EthernetStateCheck,EthernetDegradationCheck",
 		"Comma-separated list of checks to enable.")
 	platformConnectorSocket = flag.String("platform-connector-socket", "unix:///var/run/nvsentinel.sock",
 		"Path to the platform-connector UDS socket")
 	nodeNameEnv = flag.String("node-name", os.Getenv("NODE_NAME"),
 		"Node name. Defaults to NODE_NAME env var.")
 	statePollingIntervalFlag = flag.String("state-polling-interval", defaultStatePollingInterval,
-		"Polling interval for state checks (e.g., 1s, 5s)")
+		"Polling interval for state checks (e.g., 1s, 2s).")
 	metricsPort = flag.String("metrics-port", "2112",
 		"Port to expose Prometheus metrics on")
 	configPath = flag.String("config", "/etc/nic-health-monitor/config.toml",
@@ -95,11 +96,11 @@ func main() {
 // runtimeConfig groups the parsed inputs that run() produces during
 // startup so the various wiring steps can take a single argument.
 type runtimeConfig struct {
-	nodeName           string
-	cfg                *config.Config
-	processingStrategy pb.ProcessingStrategy
-	stateInterval      time.Duration
-	metricsPort        int
+	nodeName             string
+	cfg                  *config.Config
+	processingStrategy   pb.ProcessingStrategy
+	statePollingInterval time.Duration
+	metricsPort          int
 }
 
 func run() error {
@@ -140,12 +141,11 @@ func run() error {
 	enabledChecks := buildChecks(rc.nodeName, reader, rc.cfg, classifier,
 		rc.processingStrategy, stateManager, bootIDChanged)
 	if len(enabledChecks) == 0 {
-		return fmt.Errorf("no state checks enabled — set --checks to include at least " +
-			"InfiniBandStateCheck or EthernetStateCheck")
+		return fmt.Errorf("no checks enabled — set --checks to include at least one of: " +
+			"InfiniBandStateCheck, InfiniBandDegradationCheck, EthernetStateCheck, EthernetDegradationCheck")
 	}
 
-	nicMonitor := monitor.NewNICHealthMonitor(rc.nodeName, client, enabledChecks,
-		rc.stateInterval)
+	nicMonitor := monitor.NewNICHealthMonitor(rc.nodeName, client, enabledChecks, rc.statePollingInterval)
 
 	return runServerAndLoops(ctx, rc, nicMonitor)
 }
@@ -206,13 +206,13 @@ func parseRuntimeConfig() (*runtimeConfig, error) {
 		return nil, err
 	}
 
-	stateInterval, err := time.ParseDuration(*statePollingIntervalFlag)
+	statePollingInterval, err := time.ParseDuration(*statePollingIntervalFlag)
 	if err != nil {
 		return nil, fmt.Errorf("invalid state-polling-interval: %w", err)
 	}
 
-	if stateInterval <= 0 {
-		return nil, fmt.Errorf("state-polling-interval must be > 0, got %s", stateInterval)
+	if statePollingInterval <= 0 {
+		return nil, fmt.Errorf("state-polling-interval must be > 0, got %s", statePollingInterval)
 	}
 
 	portInt, err := strconv.Atoi(*metricsPort)
@@ -221,11 +221,11 @@ func parseRuntimeConfig() (*runtimeConfig, error) {
 	}
 
 	return &runtimeConfig{
-		nodeName:           nodeName,
-		cfg:                cfg,
-		processingStrategy: processingStrategy,
-		stateInterval:      stateInterval,
-		metricsPort:        portInt,
+		nodeName:             nodeName,
+		cfg:                  cfg,
+		processingStrategy:   processingStrategy,
+		statePollingInterval: statePollingInterval,
+		metricsPort:          portInt,
 	}, nil
 }
 
@@ -283,7 +283,11 @@ func runServerAndLoops(ctx context.Context, rc *runtimeConfig, nicMonitor *monit
 	})
 
 	g.Go(func() error {
-		return pollingLoop(gCtx, "state", rc.stateInterval, nicMonitor.RunStateChecks)
+		return pollingLoop(gCtx, "state", rc.statePollingInterval, nicMonitor.RunStateChecks)
+	})
+
+	g.Go(func() error {
+		return pollingLoop(gCtx, "counter", monitor.CounterPollingInterval, nicMonitor.RunCounterChecks)
 	})
 
 	return g.Wait()
@@ -313,11 +317,25 @@ func buildChecks(
 				nodeName, reader, cfg, classifier, processingStrategy,
 				stateManager, bootIDChanged,
 			))
+		case checks.InfiniBandDegradationCheckName:
+			if cfg.CounterDetection.Enabled {
+				result = append(result, counter.NewInfiniBandDegradationCheck(
+					nodeName, reader, cfg, processingStrategy,
+					stateManager, bootIDChanged,
+				))
+			}
 		case checks.EthernetStateCheckName:
 			result = append(result, state.NewEthernetStateCheck(
 				nodeName, reader, cfg, classifier, processingStrategy,
 				stateManager, bootIDChanged,
 			))
+		case checks.EthernetDegradationCheckName:
+			if cfg.CounterDetection.Enabled {
+				result = append(result, counter.NewEthernetDegradationCheck(
+					nodeName, reader, cfg, processingStrategy,
+					stateManager, bootIDChanged,
+				))
+			}
 		default:
 			slog.Warn("Unknown check, skipping", "check", c)
 		}

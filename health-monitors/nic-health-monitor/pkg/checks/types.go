@@ -25,8 +25,10 @@ import (
 
 const (
 	// Check names match the enabledChecks keys in the Helm values.
-	InfiniBandStateCheckName = "InfiniBandStateCheck"
-	EthernetStateCheckName   = "EthernetStateCheck"
+	InfiniBandStateCheckName       = "InfiniBandStateCheck"
+	InfiniBandDegradationCheckName = "InfiniBandDegradationCheck"
+	EthernetStateCheckName         = "EthernetStateCheck"
+	EthernetDegradationCheckName   = "EthernetDegradationCheck"
 
 	// Agent / component identifiers used in every HealthEvent.
 	AgentName      = "nic-health-monitor"
@@ -53,4 +55,27 @@ type Check interface {
 	Name() string
 	// Run executes a single poll cycle and returns zero or more events.
 	Run() ([]*pb.HealthEvent, error)
+}
+
+// CheckCategory indicates whether a check monitors port/device state or
+// counters. The orchestrator runs each category on its own polling loop
+// so counter checks can run on a fixed fast cadence regardless of the
+// configurable state polling interval.
+type CheckCategory int
+
+const (
+	// StateCheck runs at the user-configurable state polling interval.
+	StateCheck CheckCategory = iota
+	// CounterCheck runs at a fixed counter polling interval (1s).
+	CounterCheck
+)
+
+// CategoryOf returns the polling category for a given check name.
+func CategoryOf(checkName string) CheckCategory {
+	switch checkName {
+	case InfiniBandDegradationCheckName, EthernetDegradationCheckName:
+		return CounterCheck
+	default:
+		return StateCheck
+	}
 }

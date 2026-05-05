@@ -35,49 +35,72 @@ import (
 	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/metrics"
 )
 
-// NICHealthMonitor orchestrates state-category checks.
-// Every enqueued check is run once per polling cycle; events are
-// batched to a single gRPC send so the platform connector sees fewer RPCs.
+// CounterPollingInterval is the fixed cadence for counter checks. It is
+// intentionally not user-configurable: counter snapshots want a fast
+// poll so delta counters are responsive and so velocity windows have
+// fresh data when they evaluate. Velocity thresholds gate themselves on
+// the configured velocityUnit, so a 1s read frequency is safe for every
+// counter type without producing false alerts on long windows.
+const CounterPollingInterval = time.Second
+
+// NICHealthMonitor orchestrates state checks on the user-configurable
+// state-polling cadence and counter checks on a fixed 1s cadence. Each
+// category has its own polling loop so the two cadences are independent.
 type NICHealthMonitor struct {
 	nodeName string
 	pcClient pb.PlatformConnectorClient
 
-	stateChecks []checks.Check
+	stateChecks   []checks.Check
+	counterChecks []checks.Check
 
 	stateInterval time.Duration
 }
 
-// NewNICHealthMonitor constructs a NICHealthMonitor with the given checks.
+// NewNICHealthMonitor constructs a NICHealthMonitor. The allChecks slice
+// is automatically partitioned into state and counter categories based
+// on each check's name.
 func NewNICHealthMonitor(
 	nodeName string,
 	pcClient pb.PlatformConnectorClient,
-	stateChecks []checks.Check,
+	allChecks []checks.Check,
 	stateInterval time.Duration,
 ) *NICHealthMonitor {
 	m := &NICHealthMonitor{
 		nodeName:      nodeName,
 		pcClient:      pcClient,
-		stateChecks:   stateChecks,
 		stateInterval: stateInterval,
+	}
+
+	for _, chk := range allChecks {
+		switch checks.CategoryOf(chk.Name()) {
+		case checks.StateCheck:
+			m.stateChecks = append(m.stateChecks, chk)
+		case checks.CounterCheck:
+			m.counterChecks = append(m.counterChecks, chk)
+		}
 	}
 
 	slog.Info("NIC Health Monitor initialized",
 		"state_checks", len(m.stateChecks),
+		"counter_checks", len(m.counterChecks),
 		"state_interval", m.stateInterval,
+		"counter_interval", CounterPollingInterval,
 	)
 
 	return m
 }
 
-// RunStateChecks executes all state-category checks once. The context
-// is threaded into the gRPC send path so that in-flight RPCs and retry
-// sleeps are cancelled promptly on shutdown.
+// RunStateChecks executes all state-category checks once.
 func (m *NICHealthMonitor) RunStateChecks(ctx context.Context) error {
 	return m.runChecks(ctx, m.stateChecks, "state")
 }
 
-// StateInterval returns the state polling interval (used by main to
-// drive the polling loop).
+// RunCounterChecks executes all counter-category checks once.
+func (m *NICHealthMonitor) RunCounterChecks(ctx context.Context) error {
+	return m.runChecks(ctx, m.counterChecks, "counter")
+}
+
+// StateInterval returns the configurable state polling interval.
 func (m *NICHealthMonitor) StateInterval() time.Duration { return m.stateInterval }
 
 // runChecks executes the checks in a category and sends any resulting

@@ -139,7 +139,9 @@ This monitor uses a binary severity model based on **workload impact**:
 │                                                                            │
 │  LAYER 2: LINK COUNTER DETECTION                                           │
 │  ═══════════════════════════════                                           │
-│  • Polling interval: 5 seconds                                             │
+│  • Polling interval: 1 second                                              │
+│  • Velocity thresholds gate themselves on the configured velocityUnit      │
+│    (1s / 1m / 1h), so a fast poll is safe for every counter type.          │
 │  • Data source: /sys/class/infiniband/<dev>/ports/<port>/counters/         │
 │  • Detects: Symbol errors, link flaps, buffer overruns, transport errors   │
 │  • Documentation: link-counter-detection.md                                │
