@@ -219,9 +219,9 @@ func TestNICCounterIBDegradation(t *testing.T) {
 
 		t.Log("Waiting up to 150s for the 60s velocity window to elapse and emit event")
 		require.Eventually(t, func() bool {
-			_, err := helpers.CheckNodeEventExists(ctx, client, nodeName,
+			found, _ := helpers.CheckNodeEventExists(ctx, client, nodeName,
 				ibDegCheckName, ibDegUnhealthyReason)
-			return err == nil
+			return found
 		}, 150*time.Second, helpers.WaitInterval,
 			"InfiniBandDegradationCheck event should appear after 60s window elapses")
 
