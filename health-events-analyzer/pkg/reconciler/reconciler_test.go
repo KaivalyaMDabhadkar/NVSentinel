@@ -169,7 +169,7 @@ var (
 			Description: "check multiple remediations are completed within 2 minutes",
 			Stage: []string{
 				`{"$match": {"$expr": {"$gte": ["$healthevent.generatedtimestamp.seconds", {"$subtract": [{"$divide": [{"$toLong": "$$NOW"}, 1000]}, 120]}]}}}`,
-				`{"$match": {"healtheventstatus.faultremediated": true, "healthevent.nodename": "this.healthevent.nodename"}}`,
+				`{"$match": {"healtheventstatus.faultremediated.value": true, "healthevent.nodename": "this.healthevent.nodename"}}`,
 				`{"$count": "count"}`,
 				`{"$match": {"count": {"$gte": 5}}}`,
 			},

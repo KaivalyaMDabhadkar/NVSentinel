@@ -36,9 +36,9 @@ func TestParseSequenceString(t *testing.T) {
 		{
 			name: "criteria with fault remediation check and .this reference",
 			criteria: map[string]any{
-				"healtheventstatus.faultremediated": true,
-				"healthevent.nodename":              "this.healthevent.nodename",
-				"healthevent.isfatal":               "this.healthevent.isfatal",
+				"healtheventstatus.faultremediated.value": true,
+				"healthevent.nodename":                    "this.healthevent.nodename",
+				"healthevent.isfatal":                     "this.healthevent.isfatal",
 			},
 			event: datamodels.HealthEventWithStatus{
 				HealthEvent: &protos.HealthEvent{
@@ -49,9 +49,9 @@ func TestParseSequenceString(t *testing.T) {
 					FaultRemediated: wrapperspb.Bool(remediated)},
 			},
 			want: map[string]interface{}{
-				"healtheventstatus.faultremediated": true,
-				"healthevent.nodename":              "gpu-node-1",
-				"healthevent.isfatal":               true,
+				"healtheventstatus.faultremediated.value": true,
+				"healthevent.nodename":                    "gpu-node-1",
+				"healthevent.isfatal":                     true,
 			},
 			wantErr: false,
 		},
@@ -393,14 +393,14 @@ func TestGetValueFromPath(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "nested struct field",
-			path: "healtheventstatus.faultremediated",
+			name: "nested BoolValue field",
+			path: "healtheventstatus.faultremediated.value",
 			event: datamodels.HealthEventWithStatus{
 				HealthEventStatus: &protos.HealthEventStatus{
 					FaultRemediated: remediated,
 				},
 			},
-			want:    remediated,
+			want:    true,
 			wantErr: false,
 		},
 		{

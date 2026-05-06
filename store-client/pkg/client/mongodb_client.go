@@ -519,9 +519,9 @@ func (c *MongoDBClient) buildDirectFieldUpdate(statusPath string, status interfa
 // buildStructFieldUpdates extracts individual fields from a status struct for granular updates
 // This prevents overwriting other fields when doing partial status updates
 // Used by store methods like UpdateHealthEventStatus
-// Example: statusPath="healtheventstatus", status=HealthEventStatus{FaultRemediated: true}
+// Example: statusPath="healtheventstatus", status=HealthEventStatus{FaultRemediated: &faultRemediated}
 //
-//	→ {"healtheventstatus.faultremediated": true}
+//	→ {"healtheventstatus.faultremediated": {"value": true}}
 func (c *MongoDBClient) buildStructFieldUpdates(basePath string, status interface{}) bson.M {
 	updateFields := bson.M{}
 
