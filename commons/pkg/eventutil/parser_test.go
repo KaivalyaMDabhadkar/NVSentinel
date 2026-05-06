@@ -108,6 +108,97 @@ func TestParseHealthEventFromEvent(t *testing.T) {
 			},
 		},
 		{
+			name: "parse direct document with legacy plain faultRemediated bool",
+			event: datastore.Event{
+				"healtheventstatus": map[string]interface{}{
+					"nodequarantined": "Quarantined",
+					"faultremediated": true,
+				},
+				"healthevent": map[string]interface{}{
+					"nodename":       "legacy-node",
+					"checkname":      "GpuXidError",
+					"componentclass": "GPU",
+				},
+			},
+			expectError: false,
+			checkResult: func(t *testing.T, result model.HealthEventWithStatus) {
+				assert.Equal(t, "legacy-node", result.HealthEvent.NodeName)
+				require.NotNil(t, result.HealthEventStatus.FaultRemediated)
+				assert.True(t, result.HealthEventStatus.FaultRemediated.GetValue())
+			},
+		},
+		{
+			name: "parse change stream event with legacy plain faultRemediated bool",
+			event: datastore.Event{
+				"operationType": "update",
+				"fullDocument": map[string]interface{}{
+					"healtheventstatus": map[string]interface{}{
+						"nodequarantined": "Quarantined",
+						"faultremediated": false,
+					},
+					"healthevent": map[string]interface{}{
+						"nodename":       "legacy-change-stream-node",
+						"checkname":      "GpuXidError",
+						"componentclass": "GPU",
+					},
+				},
+			},
+			expectError: false,
+			checkResult: func(t *testing.T, result model.HealthEventWithStatus) {
+				assert.Equal(t, "legacy-change-stream-node", result.HealthEvent.NodeName)
+				require.NotNil(t, result.HealthEventStatus.FaultRemediated)
+				assert.False(t, result.HealthEventStatus.FaultRemediated.GetValue())
+			},
+		},
+		{
+			name: "parse PostgreSQL document field with legacy plain faultRemediated bool",
+			event: datastore.Event{
+				"operationType": "insert",
+				"fullDocument": map[string]interface{}{
+					"document": map[string]interface{}{
+						"healtheventstatus": map[string]interface{}{
+							"nodequarantined": "Quarantined",
+							"faultremediated": true,
+						},
+						"healthevent": map[string]interface{}{
+							"nodename":       "postgres-legacy-node",
+							"checkname":      "GpuXidError",
+							"componentclass": "GPU",
+						},
+					},
+				},
+			},
+			expectError: false,
+			checkResult: func(t *testing.T, result model.HealthEventWithStatus) {
+				assert.Equal(t, "postgres-legacy-node", result.HealthEvent.NodeName)
+				require.NotNil(t, result.HealthEventStatus.FaultRemediated)
+				assert.True(t, result.HealthEventStatus.FaultRemediated.GetValue())
+			},
+		},
+		{
+			name: "parse change stream event with wrapped faultRemediated bool",
+			event: datastore.Event{
+				"operationType": "update",
+				"fullDocument": map[string]interface{}{
+					"healtheventstatus": map[string]interface{}{
+						"nodequarantined": "Quarantined",
+						"faultremediated": map[string]interface{}{"value": true},
+					},
+					"healthevent": map[string]interface{}{
+						"nodename":       "wrapped-node",
+						"checkname":      "GpuXidError",
+						"componentclass": "GPU",
+					},
+				},
+			},
+			expectError: false,
+			checkResult: func(t *testing.T, result model.HealthEventWithStatus) {
+				assert.Equal(t, "wrapped-node", result.HealthEvent.NodeName)
+				require.NotNil(t, result.HealthEventStatus.FaultRemediated)
+				assert.True(t, result.HealthEventStatus.FaultRemediated.GetValue())
+			},
+		},
+		{
 			name: "handle nil NodeQuarantined with default value",
 			event: datastore.Event{
 				"operationType": "insert",

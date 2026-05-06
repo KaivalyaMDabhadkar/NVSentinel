@@ -172,7 +172,7 @@ func (f *PipelineFilter) matchesCondition(event map[string]interface{}, key stri
 		result := f.matchesAnd(event, expectedValue)
 		return result
 	default:
-		// Handle field path matching (e.g., "operationType", "fullDocument.healtheventstatus.faultremediated")
+		// Handle field path matching (e.g., "operationType", "fullDocument.healtheventstatus.faultremediated.value")
 		actualValue := f.getFieldValue(event, key)
 
 		result := f.matchesValue(actualValue, expectedValue)

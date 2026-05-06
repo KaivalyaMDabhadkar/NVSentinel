@@ -419,7 +419,7 @@ cursor, err := dbClient.Find(ctx, filter, nil)
 ```go
 // Using query builders (recommended)
 q := query.New().Build(query.Eq("_id", eventID))
-u := query.NewUpdate().Set("healtheventstatus.faultremediated", true)
+u := query.NewUpdate().Set("healtheventstatus.faultremediated.value", true)
 
 err := healthStore.UpdateHealthEventsByQuery(ctx, q, u)
 
@@ -427,7 +427,7 @@ err := healthStore.UpdateHealthEventsByQuery(ctx, q, u)
 filter := map[string]interface{}{"_id": eventID}
 update := map[string]interface{}{
     "$set": map[string]interface{}{
-        "healtheventstatus.faultremediated": true,
+        "healtheventstatus.faultremediated.value": true,
     },
 }
 _, err := dbClient.UpdateDocument(ctx, filter, update)

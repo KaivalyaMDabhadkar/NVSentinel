@@ -56,6 +56,17 @@ func ParseHealthEventFromEvent(event datastore.Event) (model.HealthEventWithStat
 		if err != nil {
 			return healthEventWithStatus, fmt.Errorf("failed to marshal document field: %w", err)
 		}
+
+		if err := json.Unmarshal(jsonBytes, &tempMap); err != nil {
+			return healthEventWithStatus, fmt.Errorf("failed to unmarshal document field to map: %w", err)
+		}
+	}
+
+	normalizeProtoWrapperBoolFields(tempMap)
+
+	jsonBytes, err = json.Marshal(tempMap)
+	if err != nil {
+		return healthEventWithStatus, fmt.Errorf("failed to marshal normalized health event: %w", err)
 	}
 
 	// Now unmarshal to the actual structure
@@ -74,4 +85,28 @@ func ParseHealthEventFromEvent(event datastore.Event) (model.HealthEventWithStat
 	}
 
 	return healthEventWithStatus, nil
+}
+
+func normalizeProtoWrapperBoolFields(document map[string]interface{}) {
+	for _, statusKey := range []string{"healtheventstatus", "healthEventStatus", "HealthEventStatus"} {
+		status, ok := document[statusKey].(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		normalizeWrappedBoolField(status, "faultremediated")
+		normalizeWrappedBoolField(status, "faultRemediated")
+		normalizeWrappedBoolField(status, "FaultRemediated")
+	}
+}
+
+func normalizeWrappedBoolField(document map[string]interface{}, field string) {
+	value, ok := document[field]
+	if !ok {
+		return
+	}
+
+	if boolValue, ok := value.(bool); ok {
+		document[field] = map[string]interface{}{"value": boolValue}
+	}
 }
