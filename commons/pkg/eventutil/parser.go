@@ -28,43 +28,14 @@ import (
 func ParseHealthEventFromEvent(event datastore.Event) (model.HealthEventWithStatus, error) {
 	var healthEventWithStatus model.HealthEventWithStatus
 
-	// Determine what to unmarshal: check if this is a change stream event with fullDocument
-	var documentToUnmarshal interface{}
-	if fullDoc, ok := event["fullDocument"]; ok {
-		// This is a change stream event, extract the fullDocument
-		documentToUnmarshal = fullDoc
-	} else {
-		// This is already the document itself
-		documentToUnmarshal = event
-	}
-
-	// Convert to JSON to inspect structure
-	jsonBytes, err := json.Marshal(documentToUnmarshal)
+	tempMap, err := healthEventDocumentMap(event)
 	if err != nil {
-		return healthEventWithStatus, fmt.Errorf("failed to marshal event to JSON: %w", err)
-	}
-
-	// Check if the data is nested inside a "document" field (PostgreSQL format)
-	var tempMap map[string]interface{}
-	if err := json.Unmarshal(jsonBytes, &tempMap); err != nil {
-		return healthEventWithStatus, fmt.Errorf("failed to unmarshal to map: %w", err)
-	}
-
-	// If there's a "document" field, extract it
-	if doc, ok := tempMap["document"]; ok {
-		jsonBytes, err = json.Marshal(doc)
-		if err != nil {
-			return healthEventWithStatus, fmt.Errorf("failed to marshal document field: %w", err)
-		}
-
-		if err := json.Unmarshal(jsonBytes, &tempMap); err != nil {
-			return healthEventWithStatus, fmt.Errorf("failed to unmarshal document field to map: %w", err)
-		}
+		return healthEventWithStatus, err
 	}
 
 	normalizeProtoWrapperBoolFields(tempMap)
 
-	jsonBytes, err = json.Marshal(tempMap)
+	jsonBytes, err := json.Marshal(tempMap)
 	if err != nil {
 		return healthEventWithStatus, fmt.Errorf("failed to marshal normalized health event: %w", err)
 	}
@@ -85,6 +56,44 @@ func ParseHealthEventFromEvent(event datastore.Event) (model.HealthEventWithStat
 	}
 
 	return healthEventWithStatus, nil
+}
+
+func healthEventDocumentMap(event datastore.Event) (map[string]interface{}, error) {
+	documentToUnmarshal := healthEventDocument(event)
+
+	tempMap, err := toMap(documentToUnmarshal, "event")
+	if err != nil {
+		return nil, err
+	}
+
+	// PostgreSQL watcher events store the actual health event under "document".
+	if doc, ok := tempMap["document"]; ok {
+		return toMap(doc, "document field")
+	}
+
+	return tempMap, nil
+}
+
+func healthEventDocument(event datastore.Event) interface{} {
+	if fullDoc, ok := event["fullDocument"]; ok {
+		return fullDoc
+	}
+
+	return event
+}
+
+func toMap(value interface{}, name string) (map[string]interface{}, error) {
+	jsonBytes, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal %s to JSON: %w", name, err)
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(jsonBytes, &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal %s to map: %w", name, err)
+	}
+
+	return result, nil
 }
 
 func normalizeProtoWrapperBoolFields(document map[string]interface{}) {
