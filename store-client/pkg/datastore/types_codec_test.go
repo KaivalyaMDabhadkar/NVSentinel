@@ -140,13 +140,6 @@ func TestHealthEventStatus_UnmarshalJSON_WrappedBool(t *testing.T) {
 	assert.False(t, *status.FaultRemediated)
 }
 
-func TestHealthEventStatus_UnmarshalJSON_CamelCaseWrappedBool(t *testing.T) {
-	status := unmarshalHealthEventStatusJSON(t, `{"faultRemediated": {"value": true}}`)
-
-	require.NotNil(t, status.FaultRemediated)
-	assert.True(t, *status.FaultRemediated)
-}
-
 func TestHealthEventStatus_UnmarshalJSON_NullBool(t *testing.T) {
 	status := unmarshalHealthEventStatusJSON(t, `{"faultremediated": null}`)
 

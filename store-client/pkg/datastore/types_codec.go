@@ -105,34 +105,27 @@ func (h *HealthEventStatus) UnmarshalJSON(data []byte) error {
 
 	var faultRemediated *bool
 
-	for _, key := range []string{"faultremediated", "faultRemediated", "FaultRemediated"} {
-		value, ok := raw[key]
-		if !ok {
-			continue
-		}
-
+	if value, ok := raw["faultremediated"]; ok {
 		decoded, err := decodeJSONBoolValue(value)
 		if err != nil {
-			return fmt.Errorf("failed to decode %s: %w", key, err)
+			return fmt.Errorf("failed to decode faultremediated: %w", err)
 		}
 
 		faultRemediated = decoded
 
-		delete(raw, key)
-
-		break
+		delete(raw, "faultremediated")
 	}
 
 	remainingBytes, err := json.Marshal(raw)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to marshal remaining JSON fields: %w", err)
 	}
 
 	type alias HealthEventStatus
 
 	var decoded alias
 	if err := json.Unmarshal(remainingBytes, &decoded); err != nil {
-		return err
+		return fmt.Errorf("failed to unmarshal remaining JSON fields: %w", err)
 	}
 
 	*h = HealthEventStatus(decoded)
