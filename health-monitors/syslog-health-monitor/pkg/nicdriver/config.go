@@ -68,6 +68,7 @@ func LoadConfig(path string) ([]CompiledPattern, error) {
 
 func compilePatterns(raw []PatternConfig) ([]CompiledPattern, error) {
 	seen := make(map[string]struct{})
+
 	var compiled []CompiledPattern
 
 	for i, p := range raw {

@@ -14,6 +14,7 @@
 8. [Configuration](#8-configuration)
 9. [Event Management](#9-event-management)
 10. [Monitoring Scope and Limitations](#10-monitoring-scope-and-limitations)
+    - [10.4 Event Severity Classification](#104-event-severity-classification)
 - [Appendix A: Quick Reference - Kernel Log Patterns](#appendix-a-quick-reference---kernel-log-patterns)
 - [Appendix B: Health Events Analyzer Rules for NIC Monitoring](#appendix-b-health-events-analyzer-rules-for-nic-monitoring)
 
@@ -617,7 +618,7 @@ NIC driver error patterns are defined in a TOML configuration file, allowing ope
 **TOML Shape:**
 
 ```toml
-[[patterns]]
+[[nicDriverDetection.patterns]]
 name = "cmd_exec_timeout"
 regex = 'mlx5_core.*timeout\. Will cause a leak of a command resource'
 enabled = true
@@ -625,7 +626,7 @@ isFatal = true
 recommendedAction = "REPLACE_VM"
 description = "Firmware command timeout with resource leak"
 
-[[patterns]]
+[[nicDriverDetection.patterns]]
 name = "netdev_watchdog"
 regex = 'NETDEV WATCHDOG:.*mlx5_core.*transmit queue.*timed out'
 enabled = true
@@ -646,7 +647,7 @@ description = "TX queue stall with auto-recovery via mlx5e_tx_timeout"
 | `description`       | `string` | Human-readable explanation of the pattern                                   |
 
 > **Custom patterns should be NIC/mlx5-specific.** Generic PCIe/AER patterns such as `PCIe Bus Error.*Fatal` are intentionally not shipped because they can match GPUs, NVMe, or root ports. The handler does not BDF-gate generic patterns; if you add one, ensure its regex includes an mlx5-specific prefix (`mlx5_core`, `mlx5_cmd_out_err`, etc.) so it cannot match other devices. This follows gpud's same-decision approach in `kmsg_matcher.go`.
-
+>
 > **Operational Note**: Operators can disable noisy patterns, add site-specific patterns, or reclassify severity (e.g., promote a Non-Fatal pattern to Fatal) by editing the TOML file and restarting the syslog-health-monitor pod. No code changes required.
 
 ---
@@ -727,7 +728,7 @@ The following table shows which hardware failures this monitor detects and how t
 | **Driver crash**    | Kernel log: `device's health compromised - reached miss count` | NIC becomes unusable          |
 | **TX stall**        | Kernel log: `NETDEV WATCHDOG`         | Network transmission fails    |
 
-### 11.4 Event Severity Classification
+### 10.4 Event Severity Classification
 
 Kernel log events are classified by their determinism of failure:
 
@@ -899,6 +900,6 @@ enableRepeatedNICDegradationRule: true
 6. [PCIe AER HOWTO (Linux Kernel)](https://www.kernel.org/doc/html/latest/PCI/pcieaer-howto.html) - PCIe Bus Error log format and BDF identification
 
 ### Vendor Documentation
-3. [ibdiagnet User Manual (NVIDIA)](https://docs.nvidia.com/networking/display/ibdiagnet-infiniband-fabric-diagnostic-tool-user-manual-v2-21.21.pdf)
+1. [ibdiagnet User Manual (NVIDIA)](https://docs.nvidia.com/networking/display/ibdiagnet-infiniband-fabric-diagnostic-tool-user-manual-v2-21.21.pdf)
 
 ---

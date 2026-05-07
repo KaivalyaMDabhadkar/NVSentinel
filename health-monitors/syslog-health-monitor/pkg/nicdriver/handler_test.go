@@ -31,6 +31,28 @@ func makeHandler(t *testing.T, patterns []CompiledPattern, resolver Resolver) *N
 		patterns, resolver, pb.ProcessingStrategy_EXECUTE_REMEDIATION)
 }
 
+type mockResolver struct {
+	results map[string]mockResult
+}
+
+type mockResult struct {
+	driver string
+	device string
+}
+
+func newMockResolver(results map[string]mockResult) Resolver {
+	return &mockResolver{results: results}
+}
+
+func (m *mockResolver) Resolve(bdf string) (string, string, bool) {
+	r, ok := m.results[bdf]
+	if !ok {
+		return "", "", false
+	}
+
+	return r.driver, r.device, true
+}
+
 var defaultTestPatterns = []CompiledPattern{
 	{
 		Name:              "cmd_exec_timeout",

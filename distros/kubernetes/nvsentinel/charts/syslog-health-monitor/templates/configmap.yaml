@@ -15,7 +15,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "syslog-health-monitor.fullname" . }}-nic-driver
+  name: '{{ include "syslog-health-monitor.fullname" . }}-nic-driver'
   labels:
     {{- include "syslog-health-monitor.labels" . | nindent 4 }}
 data:

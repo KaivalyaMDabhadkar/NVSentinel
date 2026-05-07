@@ -12,6 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package nicdriver implements syslog-based detection of mlx5_core NIC
+// driver and firmware errors. It loads configurable TOML patterns, matches
+// them against kernel log lines, and emits structured HealthEvents with
+// optional NIC entity enrichment via sysfs BDF resolution.
 package nicdriver
 
 import (
@@ -83,27 +87,4 @@ func firstEntry(dir string) string {
 	}
 
 	return entries[0].Name()
-}
-
-// mockResolver is used by tests to supply deterministic results.
-type mockResolver struct {
-	results map[string]mockResult
-}
-
-type mockResult struct {
-	driver string
-	device string
-}
-
-func newMockResolver(results map[string]mockResult) Resolver {
-	return &mockResolver{results: results}
-}
-
-func (m *mockResolver) Resolve(bdf string) (string, string, bool) {
-	r, ok := m.results[bdf]
-	if !ok {
-		return "", "", false
-	}
-
-	return r.driver, r.device, true
 }
