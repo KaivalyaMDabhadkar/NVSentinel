@@ -33,6 +33,7 @@ import (
 
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/gpufallen"
+	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/nicdriver"
 	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/sxid"
 	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/types"
 	"github.com/nvidia/nvsentinel/health-monitors/syslog-health-monitor/pkg/xid"
@@ -50,11 +51,14 @@ func NewSyslogMonitor(
 	xidAnalyserEndpoint string,
 	metadataPath string,
 	processingStrategy pb.ProcessingStrategy,
+	nicDriverConfigPath string,
+	sysfsRoot string,
 ) (*SyslogMonitor, error) {
 	return NewSyslogMonitorWithFactory(nodeName, checks, pcClient, defaultAgentName,
 		defaultComponentClass, pollingInterval, stateFilePath, GetDefaultJournalFactory(),
 		xidAnalyserEndpoint, metadataPath,
 		processingStrategy,
+		nicDriverConfigPath, sysfsRoot,
 	)
 }
 
@@ -71,6 +75,8 @@ func NewSyslogMonitorWithFactory(
 	xidAnalyserEndpoint string,
 	metadataPath string,
 	processingStrategy pb.ProcessingStrategy,
+	nicDriverConfigPath string,
+	sysfsRoot string,
 ) (*SyslogMonitor, error) {
 	// Load state from file
 	state, err := loadState(stateFilePath)
@@ -103,7 +109,8 @@ func NewSyslogMonitorWithFactory(
 	}
 
 	if err := initHandlers(sm, checks, nodeName, defaultAgentName, defaultComponentClass,
-		xidAnalyserEndpoint, metadataPath, processingStrategy); err != nil {
+		xidAnalyserEndpoint, metadataPath, processingStrategy,
+		nicDriverConfigPath, sysfsRoot); err != nil {
 		return nil, err
 	}
 
@@ -127,10 +134,13 @@ func initHandlers(
 	xidAnalyserEndpoint string,
 	metadataPath string,
 	processingStrategy pb.ProcessingStrategy,
+	nicDriverConfigPath string,
+	sysfsRoot string,
 ) error {
 	for _, check := range checks {
 		handler, err := initHandlerForCheck(check, nodeName, defaultAgentName, defaultComponentClass,
-			xidAnalyserEndpoint, metadataPath, processingStrategy)
+			xidAnalyserEndpoint, metadataPath, processingStrategy,
+			nicDriverConfigPath, sysfsRoot)
 		if err != nil {
 			return err
 		}
@@ -155,6 +165,8 @@ func initHandlerForCheck(
 	xidAnalyserEndpoint string,
 	metadataPath string,
 	processingStrategy pb.ProcessingStrategy,
+	nicDriverConfigPath string,
+	sysfsRoot string,
 ) (types.Handler, error) {
 	switch check.Name {
 	case XIDErrorCheck:
@@ -181,6 +193,15 @@ func initHandlerForCheck(
 		if err != nil {
 			slog.Error("Error initializing GPU Fallen Off handler", "error", err.Error())
 			return nil, fmt.Errorf("failed to initialize GPU Fallen Off handler: %w", err)
+		}
+
+		return h, nil
+	case NICDriverErrorCheck:
+		h, err := nicdriver.NewNICDriverHandler(nodeName, defaultAgentName, check.Name,
+			nicDriverConfigPath, sysfsRoot, processingStrategy)
+		if err != nil {
+			slog.Error("Error initializing NIC Driver handler", "error", err.Error())
+			return nil, fmt.Errorf("failed to initialize NIC Driver handler: %w", err)
 		}
 
 		return h, nil

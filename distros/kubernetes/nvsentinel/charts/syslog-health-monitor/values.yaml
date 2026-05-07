@@ -31,6 +31,7 @@ enabledChecks:
   - SysLogsXIDError
   - SysLogsSXIDError
   - SysLogsGPUFallenOff
+  - SysLogsNICDriverError
 
 # XID (GPU error) analyzer sidecar configuration
 xidSideCar:
@@ -57,3 +58,80 @@ logLevel: info
 # EXECUTE_REMEDIATION: normal behavior; downstream modules may update cluster state.
 # STORE_ONLY: observability-only behavior; event should be persisted/exported but should not modify cluster resources (i.e., no node conditions, no quarantine, no drain, no remediation).
 processingStrategy: EXECUTE_REMEDIATION
+
+# NIC driver syslog pattern detection configuration.
+# Patterns are evaluated in order; first match wins.
+# Only consumed when SysLogsNICDriverError is in enabledChecks.
+#
+# IMPORTANT: Custom patterns should be NIC/mlx5-specific. Generic PCIe/AER
+# patterns (e.g. 'PCIe Bus Error.*Fatal') are intentionally NOT shipped
+# because they can match GPUs, NVMe, or root ports. The handler does not
+# BDF-gate generic patterns; if you add one, ensure its regex includes an
+# mlx5-specific prefix (mlx5_core, mlx5_cmd_out_err, etc.) so it cannot
+# match other devices.
+nicDriverDetection:
+  patterns:
+    #--------------------------------------------------------------------------
+    # FATAL PATTERNS (3) (isFatal=true, recommendedAction=REPLACE_VM)
+    # Verified against upstream Linux kernel source as always fatal to the
+    # running workload with no automatic in-place recovery.
+    #--------------------------------------------------------------------------
+    - name: cmd_exec_timeout
+      regex: 'mlx5_core.*timeout\. Will cause a leak of a command resource'
+      enabled: true
+      isFatal: true
+      recommendedAction: REPLACE_VM
+      description: "Firmware/driver command timeout - control plane broken"
+
+    - name: health_poll_failed
+      regex: "mlx5_core.*device's health compromised.*reached miss count"
+      enabled: true
+      isFatal: true
+      recommendedAction: REPLACE_VM
+      description: "Firmware heartbeat lost - device health compromised"
+
+    - name: unrecoverable_err
+      regex: 'mlx5_core.*unrecoverable hardware error'
+      enabled: true
+      isFatal: true
+      recommendedAction: REPLACE_VM
+      description: "Unrecoverable hardware error (syndrome 0x8)"
+
+    #--------------------------------------------------------------------------
+    # NON-FATAL PATTERNS (5) (isFatal=false, recommendedAction=NONE)
+    # Diagnostic context or transient/auto-recoverable conditions.
+    #--------------------------------------------------------------------------
+    - name: netdev_watchdog
+      regex: 'NETDEV WATCHDOG.*mlx5_core.*transmit queue.*timed out'
+      enabled: true
+      isFatal: false
+      recommendedAction: NONE
+      description: "TX queue timeout - mlx5 driver has auto-recovery"
+
+    - name: pci_power_insufficient
+      regex: 'mlx5_core.*Detected insufficient power on the PCIe slot'
+      enabled: true
+      isFatal: false
+      recommendedAction: NONE
+      description: "PCIe slot power negotiation issue"
+
+    - name: port_module_high_temp
+      regex: 'mlx5_core.*Port module event.*High Temperature'
+      enabled: true
+      isFatal: false
+      recommendedAction: NONE
+      description: "Port module high temperature warning"
+
+    - name: access_reg_failed
+      regex: 'mlx5_cmd_out_err.*ACCESS_REG.*failed'
+      enabled: true
+      isFatal: false
+      recommendedAction: NONE
+      description: "ACCESS_REG command failed - restricted PF access noise"
+
+    - name: module_unplugged
+      regex: 'mlx5_core.*Port module event.*Cable unplugged'
+      enabled: true
+      isFatal: false
+      recommendedAction: NONE
+      description: "SFP/transceiver cable unplugged"

@@ -113,7 +113,7 @@ This monitor uses a binary severity model based on **workload impact**:
 | Severity      | Meaning                                  | Example                                                    |
 |---------------|------------------------------------------|------------------------------------------------------------|
 | **Fatal**     | Workload WILL fail or HAS failed         | NIC DOWN, `cmd_exec timeout`, unrecoverable hardware error |
-| **Non-Fatal** | Degradation detected, workload continues | Symbol errors, congestion, insufficient power              |
+| **Non-Fatal** | Degradation detected, workload continues | Symbol errors, congestion, insufficient power, `NETDEV WATCHDOG` |
 
 **Key Design Principle**: The only question that matters is **"Will the running workload fail because of this?"**
 
@@ -214,8 +214,8 @@ This monitor uses a binary severity model based on **workload impact**:
 
 | Source          | Conditions                                                                         | Severity      | Purpose                               |
 |-----------------|------------------------------------------------------------------------------------|---------------|---------------------------------------|
-| **Log Watcher** | `mlx5_core.*cmd_exec timeout`, `health poll failed`, `unrecoverable`, `PCIe Fatal` | **Fatal**     | Deterministic hardware/driver failure |
-| **Log Watcher** | `insufficient power`, `module absent`, `ACCESS_REG failed`                         | **Non-Fatal** | Diagnostic context for correlation    |
+| **Log Watcher** | `mlx5_core.*cmd_exec timeout`, `health poll failed`, `unrecoverable` | **Fatal**     | Deterministic hardware/driver failure |
+| **Log Watcher** | `insufficient power`, `module absent`, `ACCESS_REG failed`, `NETDEV WATCHDOG` (TX queue timeout - auto-recoverable) | **Non-Fatal** | Diagnostic context for correlation    |
 
 > **Design Note**: Deterministically fatal events in logs trigger `REPLACE_VM` (emitted as `IsFatal=true`). Diagnostic logs are published as non-fatal events (`IsFatal=false`) for correlation and do not directly trigger automated remediation.
 

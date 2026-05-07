@@ -74,6 +74,10 @@ var (
 		"Path to GPU metadata JSON file.")
 	processingStrategyFlag = flag.String("processing-strategy", "EXECUTE_REMEDIATION",
 		"Event processing strategy: EXECUTE_REMEDIATION or STORE_ONLY")
+	nicDriverConfigPath = flag.String("nic-driver-config", "/etc/nic-driver-syslog/config.toml",
+		"Path to NIC driver syslog pattern config (TOML). Used only when SysLogsNICDriverError is in --checks.")
+	sysfsRoot = flag.String("sysfs-root", "/nvsentinel/sys",
+		"Root path for sysfs reads (BDF→driver resolution). Typically a container mount point.")
 )
 
 var checks []fd.CheckDefinition
@@ -324,6 +328,8 @@ func createSyslogMonitor(
 		*xidAnalyserEndpoint,
 		*metadataPath,
 		processingStrategy,
+		*nicDriverConfigPath,
+		*sysfsRoot,
 	)
 	if err != nil {
 		return nil, 0, fmt.Errorf("error creating syslog health monitor: %w", err)

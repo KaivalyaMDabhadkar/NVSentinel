@@ -31,9 +31,10 @@ const (
 	FieldSyslogFacility = "SYSLOG_FACILITY"
 	FieldSystemdUnit    = "_SYSTEMD_UNIT"
 
-	XIDErrorCheck     = "SysLogsXIDError"
-	SXIDErrorCheck    = "SysLogsSXIDError"
-	GPUFallenOffCheck = "SysLogsGPUFallenOff"
+	XIDErrorCheck       = "SysLogsXIDError"
+	SXIDErrorCheck      = "SysLogsSXIDError"
+	GPUFallenOffCheck   = "SysLogsGPUFallenOff"
+	NICDriverErrorCheck = "SysLogsNICDriverError"
 )
 
 // syslogMonitorState represents the persistent state of the syslog monitor
