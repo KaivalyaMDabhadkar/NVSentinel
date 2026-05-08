@@ -480,13 +480,13 @@ journalctl -k -f | grep --line-buffered mlx5_core
 
 ## 6. Event Correlation (via Health Events Analyzer)
 
-Following gpud's design, kernel log events for diagnostic patterns are emitted as **Non-Fatal** (`IsFatal=false`). The Health Events Analyzer can correlate these non-fatal events with port state changes to provide richer diagnostic context.
+Fatal syslog events are emitted immediately with their configured remediation action. The Health Events Analyzer can still correlate those raw events with port state changes to provide incident context. Non-Fatal diagnostic syslog events are emitted as `IsFatal=false` and can also be correlated with state changes for operator investigation.
 
 ### 6.1 Correlation Examples
 
-The Health Events Analyzer can correlate kernel log warnings with port state events:
+The Health Events Analyzer can correlate kernel log events with port state events:
 
-| Kernel Log (Non-Fatal)                    | Port State Event | Correlation Insight     |
+| Kernel Log Event                          | Port State Event | Correlation Insight     |
 |-------------------------------------------|------------------|-------------------------|
 | `High Temperature` + `health poll failed` | Port DOWN        | Thermal-induced failure |
 | command timeout with resource leak        | Port DOWN        | Driver/firmware failure |
@@ -503,20 +503,20 @@ Some kernel messages can be filtered to reduce noise:
 
 ## 7. Repeat Failure Detection
 
-Unlike a local correlation engine, all pattern detection is handled by the **Health Events Analyzer**:
+Unlike a local correlation engine, repeat/cross-signal pattern detection is handled by the **Health Events Analyzer**:
 
-1. **Raw Event Flow**: Syslog-health-monitor sends raw `mlx5_core` non-fatal events to Platform Connector → MongoDB
-2. **Correlation Rules**: Health Events Analyzer queries MongoDB and correlates warnings with port state events
-3. **Example**: command timeout with resource leak at 10:00:01 + `port state=DOWN` at 10:00:05 → Analyzer provides correlated diagnostic context
+1. **Raw Event Flow**: Syslog-health-monitor sends raw `mlx5_core` events to Platform Connector → MongoDB
+2. **Correlation Rules**: Health Events Analyzer queries MongoDB and correlates syslog events with port state events
+3. **Example**: command timeout with resource leak at 10:00:01 is emitted immediately as Fatal; `port state=DOWN` at 10:00:05 can be correlated later to provide diagnostic context
 
 ### 7.1 Correlation Purpose
 
-Following gpud's design, kernel log warnings are **not escalated to fatal**. Instead, the Health Events Analyzer correlates them with port state events for diagnostic context:
+Kernel log events are emitted with their configured severity. The Health Events Analyzer can correlate them with port state events for diagnostic context:
 
 ```
 1. Diagnostic Correlation:
-   ├── Purpose: Link kernel log warnings to port state changes
-   ├── Input: Non-fatal events (kernel logs) + Port state events
+   ├── Purpose: Link kernel log events to port state changes
+   ├── Input: Kernel log events + Port state events
    └── Output: Correlated diagnostic information for operators
 
 2. Port Drop/Flap Detection (via Link State Detection):
