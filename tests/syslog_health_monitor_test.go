@@ -728,17 +728,25 @@ func TestSyslogHealthMonitorNICDriverDetection(t *testing.T) {
 	})
 
 	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		if stopChanVal := ctx.Value(keyStopChan); stopChanVal != nil {
+			t.Log("Stopping port-forward")
+			close(stopChanVal.(chan struct{}))
+		}
+
 		client, err := c.NewClient()
-		require.NoError(t, err, "failed to create kubernetes client")
+		if err != nil {
+			t.Logf("Warning: failed to create client for teardown: %v", err)
+			return ctx
+		}
 
-		nodeName := ctx.Value(keySyslogNodeName).(string)
-		stopChan := ctx.Value(keyStopChan).(chan struct{})
-		originalArgs, _ := ctx.Value(keyOriginalArgs).([]string)
+		nodeNameVal := ctx.Value(keySyslogNodeName)
+		if nodeNameVal == nil {
+			t.Log("Skipping teardown: nodeName not set (setup likely failed early)")
+			return ctx
+		}
+		nodeName := nodeNameVal.(string)
 
-		t.Log("Stopping port-forward")
-		close(stopChan)
-
-		if originalArgs != nil {
+		if originalArgs, ok := ctx.Value(keyOriginalArgs).([]string); ok && originalArgs != nil {
 			helpers.RestoreDaemonSetArgs(ctx, t, client, helpers.SyslogDaemonSetName,
 				helpers.SyslogContainerName, originalArgs)
 		}
