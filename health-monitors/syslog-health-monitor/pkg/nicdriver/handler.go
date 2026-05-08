@@ -112,6 +112,11 @@ func (h *NICDriverHandler) buildEvent(
 
 	nicDriverEventCounter.WithLabelValues(h.nodeName, p.Name, sev).Inc()
 
+	processingStrategy := h.processingStrategy
+	if p.HasProcessingStrategy {
+		processingStrategy = p.ProcessingStrategy
+	}
+
 	event := &pb.HealthEvent{
 		Version:            1,
 		Agent:              h.defaultAgentName,
@@ -125,7 +130,7 @@ func (h *NICDriverHandler) buildEvent(
 		NodeName:           h.nodeName,
 		RecommendedAction:  p.RecommendedAction,
 		ErrorCode:          []string{p.Name},
-		ProcessingStrategy: h.processingStrategy,
+		ProcessingStrategy: processingStrategy,
 	}
 
 	return &pb.HealthEvents{

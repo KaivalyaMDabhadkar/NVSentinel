@@ -38,21 +38,24 @@ type PatternDetectionConfig struct {
 
 // PatternConfig defines a single kernel log pattern to match.
 type PatternConfig struct {
-	Name              string `toml:"name"`
-	Regex             string `toml:"regex"`
-	Enabled           bool   `toml:"enabled"`
-	IsFatal           bool   `toml:"isFatal"`
-	RecommendedAction string `toml:"recommendedAction"`
-	Description       string `toml:"description"`
+	Name               string `toml:"name"`
+	Regex              string `toml:"regex"`
+	Enabled            bool   `toml:"enabled"`
+	IsFatal            bool   `toml:"isFatal"`
+	RecommendedAction  string `toml:"recommendedAction"`
+	ProcessingStrategy string `toml:"processingStrategy"`
+	Description        string `toml:"description"`
 }
 
 // CompiledPattern is a validated, ready-to-evaluate pattern produced by LoadConfig.
 type CompiledPattern struct {
-	Name              string
-	Re                *regexp.Regexp
-	IsFatal           bool
-	RecommendedAction pb.RecommendedAction
-	Description       string
+	Name                  string
+	Re                    *regexp.Regexp
+	IsFatal               bool
+	RecommendedAction     pb.RecommendedAction
+	ProcessingStrategy    pb.ProcessingStrategy
+	HasProcessingStrategy bool
+	Description           string
 }
 
 // LoadConfig reads and validates the TOML configuration, returning only the
@@ -96,12 +99,19 @@ func compilePatterns(raw []PatternConfig) ([]CompiledPattern, error) {
 			return nil, fmt.Errorf("patterns[%d] (%q): %w", i, p.Name, err)
 		}
 
+		processingStrategy, hasProcessingStrategy, err := resolveProcessingStrategy(p.ProcessingStrategy)
+		if err != nil {
+			return nil, fmt.Errorf("patterns[%d] (%q): %w", i, p.Name, err)
+		}
+
 		compiled = append(compiled, CompiledPattern{
-			Name:              p.Name,
-			Re:                re,
-			IsFatal:           p.IsFatal,
-			RecommendedAction: action,
-			Description:       p.Description,
+			Name:                  p.Name,
+			Re:                    re,
+			IsFatal:               p.IsFatal,
+			RecommendedAction:     action,
+			ProcessingStrategy:    processingStrategy,
+			HasProcessingStrategy: hasProcessingStrategy,
+			Description:           p.Description,
 		})
 	}
 
@@ -135,6 +145,21 @@ func resolveAction(action string) (pb.RecommendedAction, error) {
 	}
 
 	return pb.RecommendedAction(val), nil
+}
+
+func resolveProcessingStrategy(strategy string) (pb.ProcessingStrategy, bool, error) {
+	if strings.TrimSpace(strategy) == "" {
+		return 0, false, nil
+	}
+
+	upper := strings.ToUpper(strings.TrimSpace(strategy))
+
+	val, ok := pb.ProcessingStrategy_value[upper]
+	if !ok {
+		return 0, false, fmt.Errorf("processingStrategy %q is not a known ProcessingStrategy enum value", strategy)
+	}
+
+	return pb.ProcessingStrategy(val), true, nil
 }
 
 func validateDescription(desc string) error {

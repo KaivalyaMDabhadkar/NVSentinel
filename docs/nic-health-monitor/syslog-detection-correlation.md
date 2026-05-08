@@ -58,9 +58,9 @@ This document covers the **Syslog Health Monitor** component for NIC driver erro
 
 Following gpud's design and forensic analysis of `mlx5_core` telemetry, kernel log events are classified based on their **determinism of failure**:
 
-| Severity      | Meaning                                       | Example                                                                        |
-|---------------|-----------------------------------------------|--------------------------------------------------------------------------------|
-| **Fatal**     | Deterministically fatal hardware/driver state | `timeout. Will cause a leak`, `unrecoverable hardware error`                    |
+| Severity      | Meaning                                       | Example                                                                           |
+|---------------|-----------------------------------------------|-----------------------------------------------------------------------------------|
+| **Fatal**     | Deterministically fatal hardware/driver state | `timeout. Will cause a leak`, `unrecoverable hardware error`                      |
 | **Non-Fatal** | Diagnostic context or transient issues        | `insufficient power`, `High Temperature`, `ACCESS_REG failed`, `module unplugged` |
 
 > **Key Design Principle**: Only deterministically fatal events in the logs are raised as Fatal (`IsFatal=true`). All other events are raised as Non-Fatal (`IsFatal=false`) to provide diagnostic context without triggering immediate remediation.
@@ -412,6 +412,8 @@ The `NICDriverErrorHandler` follows the same pattern as the existing XID handler
    - `EntityType = "NIC"`, `EntityValue = <device_name>`
 7. **Send event** to Platform Connector (no local aggregation)
 
+> **Why live sysfs lookup instead of metadata collector**: The metadata collector publishes relatively static GPU/NVSwitch inventory. The BDF itself is usually stable during a boot, but the kernel state used for NIC enrichment is not: `/sys/bus/pci/devices/<BDF>/driver` can disappear or reappear when `mlx5_core` is unloaded, reloaded, rebound, or recovered, and the exposed `infiniband/*` or `net/*` names can be recreated. The syslog handler therefore reads the current sysfs state at event-processing time. This lookup is best-effort enrichment only; if it fails, the raw syslog event is still emitted without a `NIC` entity.
+
 ---
 
 ## 5. Monitored Kernel Patterns
@@ -422,16 +424,16 @@ The NIC driver error handler monitors for the following patterns:
 
 Following gpud's design, kernel log events are classified as **Non-Fatal (`IsFatal=false`)** by default. Only deterministic hardware state changes (port drops/flaps) that will cause workload failure are escalated to affect component health.
 
-| Event Name               | Regex Pattern                                            | Severity      | Kernel Source                                                                                                                                                      | Systemic Impact                                                           |
-|--------------------------|----------------------------------------------------------|---------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------|
-| `pci_power_insufficient` | `mlx5_core.*Detected insufficient power on the PCIe slot` | **Non-Fatal** | [`events.c#L295-L299`](https://github.com/torvalds/linux/blob/ac9c34d1e45a4c25174ced4fc0cfc33ff3ed08c7/drivers/net/ethernet/mellanox/mlx5/core/events.c#L295-L299) | Power negotiation issue. Often transient during boot BIOS/BMC handshake.  |
-| `port_module_high_temp`  | `mlx5_core.*Port module event.*High Temperature`         | **Non-Fatal** | [`events.c#L252-L254`](https://github.com/torvalds/linux/blob/ac9c34d1e45a4c25174ced4fc0cfc33ff3ed08c7/drivers/net/ethernet/mellanox/mlx5/core/events.c#L252-L254) | Thermal warning. May indicate cooling issue or impending PHY throttling.  |
-| `cmd_exec_timeout`       | `mlx5_core.*timeout\. Will cause a leak of a command resource` | **Fatal**     | [`cmd.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/cmd.c)                                                             | Control plane broken. Driver cannot manage device. **Always Fatal**.      |
-| `health_poll_failed`     | `mlx5_core.*device's health compromised.*reached miss count` | **Fatal**     | [`health.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/health.c)                                                       | Firmware heartbeat lost. Device is non-functional. **Always Fatal**.      |
-| `unrecoverable_err`      | `mlx5_core.*unrecoverable hardware error`                | **Fatal**     | [`health.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/health.c)                                                       | Hardware admission of failure. **Always Fatal**.                          |
-| `access_reg_failed`      | `mlx5_cmd_out_err.*ACCESS_REG.*failed`                   | **Non-Fatal** | [`cmd.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/cmd.c)                                                             | Monitoring tool conflict on restricted PFs. **Non-Fatal Noise**.          |
-| `netdev_watchdog`        | `NETDEV WATCHDOG:.*mlx5_core.*transmit queue.*timed out` | **Non-Fatal** | [`sch_generic.c`](https://github.com/torvalds/linux/blob/master/net/sched/sch_generic.c) (generic kernel mechanism)                                                | TX queue stall with auto-recovery via `mlx5e_tx_timeout`. **Non-Fatal**. |
-| `module_unplugged`       | `mlx5_core.*Port module event.*Cable unplugged`          | **Non-Fatal** | [`events.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/events.c)                                                       | SFP/transceiver unplugged. Informational (though port will be DOWN).      |
+| Event Name               | Regex Pattern                                                  | Severity      | Kernel Source                                                                                                                                                      | Systemic Impact                                                          |
+|--------------------------|----------------------------------------------------------------|---------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------|
+| `pci_power_insufficient` | `mlx5_core.*Detected insufficient power on the PCIe slot`      | **Non-Fatal** | [`events.c#L295-L299`](https://github.com/torvalds/linux/blob/ac9c34d1e45a4c25174ced4fc0cfc33ff3ed08c7/drivers/net/ethernet/mellanox/mlx5/core/events.c#L295-L299) | Power negotiation issue. Often transient during boot BIOS/BMC handshake. |
+| `port_module_high_temp`  | `mlx5_core.*Port module event.*High Temperature`               | **Non-Fatal** | [`events.c#L252-L254`](https://github.com/torvalds/linux/blob/ac9c34d1e45a4c25174ced4fc0cfc33ff3ed08c7/drivers/net/ethernet/mellanox/mlx5/core/events.c#L252-L254) | Thermal warning. May indicate cooling issue or impending PHY throttling. |
+| `cmd_exec_timeout`       | `mlx5_core.*timeout\. Will cause a leak of a command resource` | **Fatal**     | [`cmd.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/cmd.c)                                                             | Control plane broken. Driver cannot manage device. **Always Fatal**.     |
+| `health_poll_failed`     | `mlx5_core.*device's health compromised.*reached miss count`   | **Fatal**     | [`health.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/health.c)                                                       | Firmware heartbeat lost. Device is non-functional. **Always Fatal**.     |
+| `unrecoverable_err`      | `mlx5_core.*unrecoverable hardware error`                      | **Fatal**     | [`health.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/health.c)                                                       | Hardware admission of failure. **Always Fatal**.                         |
+| `access_reg_failed`      | `mlx5_cmd_out_err.*ACCESS_REG.*failed`                         | **Non-Fatal** | [`cmd.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/cmd.c)                                                             | Monitoring tool conflict on restricted PFs. **Non-Fatal Noise**.         |
+| `netdev_watchdog`        | `NETDEV WATCHDOG:.*mlx5_core.*transmit queue.*timed out`       | **Non-Fatal** | [`sch_generic.c`](https://github.com/torvalds/linux/blob/master/net/sched/sch_generic.c) (generic kernel mechanism)                                                | TX queue stall with auto-recovery via `mlx5e_tx_timeout`. **Non-Fatal**. |
+| `module_unplugged`       | `mlx5_core.*Port module event.*Cable unplugged`                | **Non-Fatal** | [`events.c`](https://github.com/torvalds/linux/blob/master/drivers/net/ethernet/mellanox/mlx5/core/events.c)                                                       | SFP/transceiver unplugged. Informational (though port will be DOWN).     |
 
 **Full Log Line Examples:**
 
@@ -444,7 +446,7 @@ Following gpud's design, kernel log events are classified as **Non-Fatal (`IsFat
 | `unrecoverable_err`      | `mlx5_core: INFO: synd 0x8: unrecoverable hardware error.`                                                            |
 | `access_reg_failed`      | `mlx5_cmd_out_err:838: ACCESS_REG(0x805) op_mod(0x1) failed, status bad operation(0x2)`                               |
 | `netdev_watchdog`        | `NETDEV WATCHDOG: eth0 (mlx5_core): transmit queue 0 timed out`                                                       |
-| `module_unplugged`       | `mlx5_core 0000:12:00.0: Port module event: module 0, Cable unplugged`                                                         |
+| `module_unplugged`       | `mlx5_core 0000:12:00.0: Port module event: module 0, Cable unplugged`                                                |
 
 > **Design Note**: While gpud internally treats many of these as non-fatal, NVSentinel escalates **deterministically fatal** signals to Fatal (`IsFatal=true`) to trigger proactive remediation (`REPLACE_VM`) before workload failure cascades. Non-fatal signals remain as `IsFatal=false` for diagnostic correlation.
 
@@ -452,9 +454,9 @@ Following gpud's design, kernel log events are classified as **Non-Fatal (`IsFat
 
 Patterns are classified according to their operational impact:
 
-| Category                  | Patterns                                                                       | Severity      | Recommended Action  |
-|---------------------------|--------------------------------------------------------------------------------|---------------|---------------------|
-| **Always Fatal (Device)** | command timeout with resource leak, `health poll failed`, `unrecoverable`                       | **Fatal**     | `REPLACE_VM`        |
+| Category                  | Patterns                                                                                             | Severity      | Recommended Action  |
+|---------------------------|------------------------------------------------------------------------------------------------------|---------------|---------------------|
+| **Always Fatal (Device)** | command timeout with resource leak, `health poll failed`, `unrecoverable`                            | **Fatal**     | `REPLACE_VM`        |
 | **Non-Fatal / Evidence**  | `insufficient power`, `High Temperature`, `ACCESS_REG failed`, `module unplugged`, `NETDEV WATCHDOG` | **Non-Fatal** | `NONE` (Diagnostic) |
 
 > **Key Principle**: Kernel logs provide **diagnostic context**, not **remediation triggers**. The decision to drain/replace a node is based on actual port state (via link state detection), not log messages alone.
@@ -484,11 +486,11 @@ Following gpud's design, kernel log events for diagnostic patterns are emitted a
 
 The Health Events Analyzer can correlate kernel log warnings with port state events:
 
-| Kernel Log (Non-Fatal)                    | Port State Event   | Correlation Insight     |
-|-------------------------------------------|--------------------|-------------------------|
-| `High Temperature` + `health poll failed` | Port DOWN          | Thermal-induced failure |
-| command timeout with resource leak        | Port DOWN          | Driver/firmware failure |
-| `insufficient power`                      | Port DOWN          | Power delivery issue    |
+| Kernel Log (Non-Fatal)                    | Port State Event | Correlation Insight     |
+|-------------------------------------------|------------------|-------------------------|
+| `High Temperature` + `health poll failed` | Port DOWN        | Thermal-induced failure |
+| command timeout with resource leak        | Port DOWN        | Driver/firmware failure |
+| `insufficient power`                      | Port DOWN        | Power delivery issue    |
 
 ### 6.2 Noise Filtering
 
@@ -624,6 +626,7 @@ regex = 'mlx5_core.*timeout\. Will cause a leak of a command resource'
 enabled = true
 isFatal = true
 recommendedAction = "REPLACE_VM"
+processingStrategy = "EXECUTE_REMEDIATION"
 description = "Firmware command timeout with resource leak"
 
 [[nicDriverDetection.patterns]]
@@ -632,19 +635,21 @@ regex = 'NETDEV WATCHDOG:.*mlx5_core.*transmit queue.*timed out'
 enabled = true
 isFatal = false
 recommendedAction = "NONE"
+processingStrategy = "EXECUTE_REMEDIATION"
 description = "TX queue stall with auto-recovery via mlx5e_tx_timeout"
 ```
 
 **Fields:**
 
-| Field               | Type     | Description                                                                 |
-|---------------------|----------|-----------------------------------------------------------------------------|
-| `name`              | `string` | Unique identifier for the pattern                                           |
-| `regex`             | `string` | Regular expression matched against kernel log lines                         |
-| `enabled`           | `bool`   | Whether the pattern is active; set `false` to disable without removing      |
-| `isFatal`           | `bool`   | `true` → `IsFatal=true` + `REPLACE_VM`; `false` → diagnostic context only  |
-| `recommendedAction` | `string` | Action attached to emitted health events (e.g., `REPLACE_VM`, `NONE`)       |
-| `description`       | `string` | Human-readable explanation of the pattern                                   |
+| Field                | Type     | Description                                                                                                                 |
+|----------------------|----------|-----------------------------------------------------------------------------------------------------------------------------|
+| `name`               | `string` | Unique identifier for the pattern                                                                                           |
+| `regex`              | `string` | Regular expression matched against kernel log lines                                                                         |
+| `enabled`            | `bool`   | Whether the pattern is active; set `false` to disable without removing                                                      |
+| `isFatal`            | `bool`   | `true` → `IsFatal=true` + `REPLACE_VM`; `false` → diagnostic context only                                                   |
+| `recommendedAction`  | `string` | Action attached to emitted health events (e.g., `REPLACE_VM`, `NONE`)                                                       |
+| `processingStrategy` | `string` | Optional per-pattern override (`EXECUTE_REMEDIATION` or `STORE_ONLY`); falls back to the monitor-wide strategy when omitted |
+| `description`        | `string` | Human-readable explanation of the pattern                                                                                   |
 
 > **Custom patterns should be NIC/mlx5-specific.** Generic PCIe/AER patterns such as `PCIe Bus Error.*Fatal` are intentionally not shipped because they can match GPUs, NVMe, or root ports. The handler does not BDF-gate generic patterns; if you add one, ensure its regex includes an mlx5-specific prefix (`mlx5_core`, `mlx5_cmd_out_err`, etc.) so it cannot match other devices. This follows gpud's same-decision approach in `kmsg_matcher.go`.
 >
@@ -660,29 +665,29 @@ Events are emitted with severity based on their determinism of failure:
 
 **Example Event Fields (Fatal - command timeout resource leak):**
 
-| Field             | Value                                                   |
-|-------------------|---------------------------------------------------------|
-| Agent             | `syslog-health-monitor`                                 |
-| CheckName         | `SysLogsNICDriverError`                                 |
-| ComponentClass    | `NIC`                                                   |
+| Field             | Value                                                                                        |
+|-------------------|----------------------------------------------------------------------------------------------|
+| Agent             | `syslog-health-monitor`                                                                      |
+| CheckName         | `SysLogsNICDriverError`                                                                      |
+| ComponentClass    | `NIC`                                                                                        |
 | Message           | "mlx5_core 0000:3b:00.0: ENABLE_HCA(0x104) timeout. Will cause a leak of a command resource" |
-| IsFatal           | `true`                                                  |
-| IsHealthy         | `false`                                                 |
-| RecommendedAction | `REPLACE_VM`                                            |
-| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}]`          |
+| IsFatal           | `true`                                                                                       |
+| IsHealthy         | `false`                                                                                      |
+| RecommendedAction | `REPLACE_VM`                                                                                 |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}]`                                               |
 
 **Example Event Fields (Non-Fatal - module unplugged):**
 
-| Field             | Value                                                         |
-|-------------------|---------------------------------------------------------------|
-| Agent             | `syslog-health-monitor`                                       |
-| CheckName         | `SysLogsNICDriverError`                                       |
-| ComponentClass    | `NIC`                                                         |
+| Field             | Value                                                                  |
+|-------------------|------------------------------------------------------------------------|
+| Agent             | `syslog-health-monitor`                                                |
+| CheckName         | `SysLogsNICDriverError`                                                |
+| ComponentClass    | `NIC`                                                                  |
 | Message           | "mlx5_core 0000:12:00.0: Port module event: module 0, Cable unplugged" |
-| IsFatal           | `false`                                                       |
-| IsHealthy         | `false`                                                       |
-| RecommendedAction | `NONE` (informational)                                        |
-| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}]`                |
+| IsFatal           | `false`                                                                |
+| IsHealthy         | `false`                                                                |
+| RecommendedAction | `NONE` (informational)                                                 |
+| EntitiesImpacted  | `[{EntityType: "NIC", EntityValue: "mlx5_0"}]`                         |
 
 ### 9.2 Event Purpose
 
@@ -722,26 +727,26 @@ The syslog monitoring capability operates at the **driver and kernel level only*
 
 The following table shows which hardware failures this monitor detects and how they may impact applications:
 
-| Hardware Failure    | Detection Method                      | Potential Application Impact  |
-|---------------------|---------------------------------------|-------------------------------|
-| **Firmware freeze** | Kernel log: `timeout. Will cause a leak of a command resource` | All NIC operations stall      |
-| **Driver crash**    | Kernel log: `device's health compromised - reached miss count` | NIC becomes unusable          |
-| **TX stall**        | Kernel log: `NETDEV WATCHDOG`         | Network transmission fails    |
+| Hardware Failure    | Detection Method                                               | Potential Application Impact |
+|---------------------|----------------------------------------------------------------|------------------------------|
+| **Firmware freeze** | Kernel log: `timeout. Will cause a leak of a command resource` | All NIC operations stall     |
+| **Driver crash**    | Kernel log: `device's health compromised - reached miss count` | NIC becomes unusable         |
+| **TX stall**        | Kernel log: `NETDEV WATCHDOG`                                  | Network transmission fails   |
 
 ### 10.4 Event Severity Classification
 
 Kernel log events are classified by their determinism of failure:
 
-| Kernel Log Event               | Severity      | Purpose                       | Recommended Action |
-|--------------------------------|---------------|-------------------------------|--------------------|
-| `mlx5_core.*timeout. Will cause a leak` | **Fatal**     | Control plane broken          | `REPLACE_VM`       |
+| Kernel Log Event                         | Severity      | Purpose                       | Recommended Action |
+|------------------------------------------|---------------|-------------------------------|--------------------|
+| `mlx5_core.*timeout. Will cause a leak`  | **Fatal**     | Control plane broken          | `REPLACE_VM`       |
 | `mlx5_core.*device's health compromised` | **Fatal**     | Firmware heartbeat lost       | `REPLACE_VM`       |
-| `mlx5_core unrecoverable`      | **Fatal**     | Hardware admission of failure | `REPLACE_VM`       |
-| `NETDEV WATCHDOG`              | **Non-Fatal** | TX stall with auto-recovery   | `NONE`             |
-| `Detected insufficient power`  | **Non-Fatal** | Power negotiation status      | `NONE`             |
-| `High Temperature`             | **Non-Fatal** | Thermal warning               | `NONE`             |
-| `module unplugged`             | **Non-Fatal** | SFP unplugged                 | `NONE`             |
-| `ACCESS_REG failed`            | **Non-Fatal** | Monitoring noise              | `NONE`             |
+| `mlx5_core unrecoverable`                | **Fatal**     | Hardware admission of failure | `REPLACE_VM`       |
+| `NETDEV WATCHDOG`                        | **Non-Fatal** | TX stall with auto-recovery   | `NONE`             |
+| `Detected insufficient power`            | **Non-Fatal** | Power negotiation status      | `NONE`             |
+| `High Temperature`                       | **Non-Fatal** | Thermal warning               | `NONE`             |
+| `module unplugged`                       | **Non-Fatal** | SFP unplugged                 | `NONE`             |
+| `ACCESS_REG failed`                      | **Non-Fatal** | Monitoring noise              | `NONE`             |
 
 > **Key Principle**: Deterministically fatal events in logs trigger `REPLACE_VM`. Diagnostic logs remain as Non-Fatal (`IsFatal=false`) for diagnostic context.
 
@@ -753,16 +758,16 @@ The following patterns are monitored in the kernel ring buffer (dmesg/kmsg):
 
 ### Kernel Log Pattern Summary
 
-| Pattern                                   | Severity      | Meaning                         | Action                        |
-|-------------------------------------------|---------------|---------------------------------|-------------------------------|
-| `mlx5_core.*timeout\. Will cause a leak of a command resource` | **Fatal**     | Firmware/driver command timeout | `REPLACE_VM`                  |
-| `mlx5_core.*device's health compromised.*reached miss count` | **Fatal**     | Health check missed             | `REPLACE_VM`                  |
-| `mlx5_core.*unrecoverable hardware error`  | **Fatal**     | Hardware error detected         | `REPLACE_VM`                  |
-| `NETDEV WATCHDOG:.*mlx5_core.*timed out`  | **Non-Fatal** | TX queue timeout                | Investigate; persistent stalls caught by link-state-detection |
-| `mlx5_core.*Detected insufficient power`  | **Non-Fatal** | Power negotiation status        | Investigate; can be transient |
-| `mlx5_core.*Port module event.*High Temp` | **Non-Fatal** | Thermal warning                 | Investigate; check cooling    |
-| `mlx5_cmd_out_err.*ACCESS_REG.*failed`    | **Non-Fatal** | Restricted PF access            | Filter/Ignore                 |
-| `mlx5_core.*Port module event.*Cable unplugged` | **Non-Fatal** | SFP/transceiver unplugged       | Monitor port state            |
+| Pattern                                                        | Severity      | Meaning                         | Action                                                        |
+|----------------------------------------------------------------|---------------|---------------------------------|---------------------------------------------------------------|
+| `mlx5_core.*timeout\. Will cause a leak of a command resource` | **Fatal**     | Firmware/driver command timeout | `REPLACE_VM`                                                  |
+| `mlx5_core.*device's health compromised.*reached miss count`   | **Fatal**     | Health check missed             | `REPLACE_VM`                                                  |
+| `mlx5_core.*unrecoverable hardware error`                      | **Fatal**     | Hardware error detected         | `REPLACE_VM`                                                  |
+| `NETDEV WATCHDOG:.*mlx5_core.*timed out`                       | **Non-Fatal** | TX queue timeout                | Investigate; persistent stalls caught by link-state-detection |
+| `mlx5_core.*Detected insufficient power`                       | **Non-Fatal** | Power negotiation status        | Investigate; can be transient                                 |
+| `mlx5_core.*Port module event.*High Temp`                      | **Non-Fatal** | Thermal warning                 | Investigate; check cooling                                    |
+| `mlx5_cmd_out_err.*ACCESS_REG.*failed`                         | **Non-Fatal** | Restricted PF access            | Filter/Ignore                                                 |
+| `mlx5_core.*Port module event.*Cable unplugged`                | **Non-Fatal** | SFP/transceiver unplugged       | Monitor port state                                            |
 
 ### Design Principle
 

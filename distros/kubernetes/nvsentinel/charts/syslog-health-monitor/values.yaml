@@ -81,6 +81,7 @@ nicDriverDetection:
       enabled: true
       isFatal: true
       recommendedAction: REPLACE_VM
+      processingStrategy: EXECUTE_REMEDIATION
       description: "Firmware/driver command timeout - control plane broken"
 
     - name: health_poll_failed
@@ -88,6 +89,7 @@ nicDriverDetection:
       enabled: true
       isFatal: true
       recommendedAction: REPLACE_VM
+      processingStrategy: EXECUTE_REMEDIATION
       description: "Firmware heartbeat lost - device health compromised"
 
     - name: unrecoverable_err
@@ -95,6 +97,7 @@ nicDriverDetection:
       enabled: true
       isFatal: true
       recommendedAction: REPLACE_VM
+      processingStrategy: EXECUTE_REMEDIATION
       description: "Unrecoverable hardware error (syndrome 0x8)"
 
     #--------------------------------------------------------------------------
@@ -106,6 +109,7 @@ nicDriverDetection:
       enabled: true
       isFatal: false
       recommendedAction: NONE
+      processingStrategy: EXECUTE_REMEDIATION
       description: "TX queue timeout - mlx5 driver has auto-recovery"
 
     - name: pci_power_insufficient
@@ -113,6 +117,7 @@ nicDriverDetection:
       enabled: true
       isFatal: false
       recommendedAction: NONE
+      processingStrategy: EXECUTE_REMEDIATION
       description: "PCIe slot power negotiation issue"
 
     - name: port_module_high_temp
@@ -120,6 +125,7 @@ nicDriverDetection:
       enabled: true
       isFatal: false
       recommendedAction: NONE
+      processingStrategy: EXECUTE_REMEDIATION
       description: "Port module high temperature warning"
 
     - name: access_reg_failed
@@ -127,6 +133,7 @@ nicDriverDetection:
       enabled: true
       isFatal: false
       recommendedAction: NONE
+      processingStrategy: EXECUTE_REMEDIATION
       description: "ACCESS_REG command failed - restricted PF access noise"
 
     - name: module_unplugged
@@ -134,4 +141,5 @@ nicDriverDetection:
       enabled: true
       isFatal: false
       recommendedAction: NONE
+      processingStrategy: EXECUTE_REMEDIATION
       description: "SFP/transceiver cable unplugged"

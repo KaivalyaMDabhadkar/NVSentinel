@@ -55,52 +55,68 @@ func (m *mockResolver) Resolve(bdf string) (string, string, bool) {
 
 var defaultTestPatterns = []CompiledPattern{
 	{
-		Name:              "cmd_exec_timeout",
-		Re:                regexp.MustCompile(`mlx5_core.*timeout\. Will cause a leak of a command resource`),
-		IsFatal:           true,
-		RecommendedAction: pb.RecommendedAction_REPLACE_VM,
+		Name:                  "cmd_exec_timeout",
+		Re:                    regexp.MustCompile(`mlx5_core.*timeout\. Will cause a leak of a command resource`),
+		IsFatal:               true,
+		RecommendedAction:     pb.RecommendedAction_REPLACE_VM,
+		ProcessingStrategy:    pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		HasProcessingStrategy: true,
 	},
 	{
-		Name:              "health_poll_failed",
-		Re:                regexp.MustCompile(`mlx5_core.*device's health compromised.*reached miss count`),
-		IsFatal:           true,
-		RecommendedAction: pb.RecommendedAction_REPLACE_VM,
+		Name:                  "health_poll_failed",
+		Re:                    regexp.MustCompile(`mlx5_core.*device's health compromised.*reached miss count`),
+		IsFatal:               true,
+		RecommendedAction:     pb.RecommendedAction_REPLACE_VM,
+		ProcessingStrategy:    pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		HasProcessingStrategy: true,
 	},
 	{
-		Name:              "unrecoverable_err",
-		Re:                regexp.MustCompile(`mlx5_core.*unrecoverable hardware error`),
-		IsFatal:           true,
-		RecommendedAction: pb.RecommendedAction_REPLACE_VM,
+		Name:                  "unrecoverable_err",
+		Re:                    regexp.MustCompile(`mlx5_core.*unrecoverable hardware error`),
+		IsFatal:               true,
+		RecommendedAction:     pb.RecommendedAction_REPLACE_VM,
+		ProcessingStrategy:    pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		HasProcessingStrategy: true,
 	},
 	{
-		Name:              "netdev_watchdog",
-		Re:                regexp.MustCompile(`NETDEV WATCHDOG.*mlx5_core.*transmit queue.*timed out`),
-		IsFatal:           false,
-		RecommendedAction: pb.RecommendedAction_NONE,
+		Name:                  "netdev_watchdog",
+		Re:                    regexp.MustCompile(`NETDEV WATCHDOG.*mlx5_core.*transmit queue.*timed out`),
+		IsFatal:               false,
+		RecommendedAction:     pb.RecommendedAction_NONE,
+		ProcessingStrategy:    pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		HasProcessingStrategy: true,
 	},
 	{
-		Name:              "pci_power_insufficient",
-		Re:                regexp.MustCompile(`mlx5_core.*Detected insufficient power on the PCIe slot`),
-		IsFatal:           false,
-		RecommendedAction: pb.RecommendedAction_NONE,
+		Name:                  "pci_power_insufficient",
+		Re:                    regexp.MustCompile(`mlx5_core.*Detected insufficient power on the PCIe slot`),
+		IsFatal:               false,
+		RecommendedAction:     pb.RecommendedAction_NONE,
+		ProcessingStrategy:    pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		HasProcessingStrategy: true,
 	},
 	{
-		Name:              "port_module_high_temp",
-		Re:                regexp.MustCompile(`mlx5_core.*Port module event.*High Temperature`),
-		IsFatal:           false,
-		RecommendedAction: pb.RecommendedAction_NONE,
+		Name:                  "port_module_high_temp",
+		Re:                    regexp.MustCompile(`mlx5_core.*Port module event.*High Temperature`),
+		IsFatal:               false,
+		RecommendedAction:     pb.RecommendedAction_NONE,
+		ProcessingStrategy:    pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		HasProcessingStrategy: true,
 	},
 	{
-		Name:              "access_reg_failed",
-		Re:                regexp.MustCompile(`mlx5_cmd_out_err.*ACCESS_REG.*failed`),
-		IsFatal:           false,
-		RecommendedAction: pb.RecommendedAction_NONE,
+		Name:                  "access_reg_failed",
+		Re:                    regexp.MustCompile(`mlx5_cmd_out_err.*ACCESS_REG.*failed`),
+		IsFatal:               false,
+		RecommendedAction:     pb.RecommendedAction_NONE,
+		ProcessingStrategy:    pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		HasProcessingStrategy: true,
 	},
 	{
-		Name:              "module_unplugged",
-		Re:                regexp.MustCompile(`mlx5_core.*Port module event.*Cable unplugged`),
-		IsFatal:           false,
-		RecommendedAction: pb.RecommendedAction_NONE,
+		Name:                  "module_unplugged",
+		Re:                    regexp.MustCompile(`mlx5_core.*Port module event.*Cable unplugged`),
+		IsFatal:               false,
+		RecommendedAction:     pb.RecommendedAction_NONE,
+		ProcessingStrategy:    pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		HasProcessingStrategy: true,
 	},
 }
 
@@ -291,6 +307,25 @@ func TestProcessLine_ProcessingStrategyPassthrough(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, events)
 	assert.Equal(t, pb.ProcessingStrategy_STORE_ONLY, events.Events[0].ProcessingStrategy)
+}
+
+func TestProcessLine_PatternProcessingStrategyOverridesHandlerDefault(t *testing.T) {
+	pattern := []CompiledPattern{{
+		Name:                  "test",
+		Re:                    regexp.MustCompile(`test_pattern`),
+		IsFatal:               false,
+		RecommendedAction:     pb.RecommendedAction_NONE,
+		ProcessingStrategy:    pb.ProcessingStrategy_EXECUTE_REMEDIATION,
+		HasProcessingStrategy: true,
+	}}
+
+	h := newWithDeps("node", "agent", "check", pattern, newMockResolver(nil),
+		pb.ProcessingStrategy_STORE_ONLY)
+
+	events, err := h.ProcessLine("test_pattern")
+	require.NoError(t, err)
+	require.NotNil(t, events)
+	assert.Equal(t, pb.ProcessingStrategy_EXECUTE_REMEDIATION, events.Events[0].ProcessingStrategy)
 }
 
 func TestProcessLine_FirstMatchWins(t *testing.T) {

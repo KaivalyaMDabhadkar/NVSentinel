@@ -28,5 +28,6 @@ data:
     enabled = {{ .enabled }}
     isFatal = {{ .isFatal }}
     recommendedAction = {{ .recommendedAction | quote }}
+    processingStrategy = {{ .processingStrategy | quote }}
     description = {{ .description | quote }}
     {{- end }}

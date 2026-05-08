@@ -43,6 +43,7 @@ regex = '''mlx5_core.*timeout\. Will cause a leak'''
 enabled = true
 isFatal = true
 recommendedAction = "REPLACE_VM"
+processingStrategy = "EXECUTE_REMEDIATION"
 description = "test fatal pattern"
 
 [[nicDriverDetection.patterns]]
@@ -51,6 +52,7 @@ regex = '''Detected insufficient power'''
 enabled = true
 isFatal = false
 recommendedAction = "NONE"
+processingStrategy = "STORE_ONLY"
 description = "test non-fatal pattern"
 `)
 
@@ -61,10 +63,14 @@ description = "test non-fatal pattern"
 	assert.Equal(t, "test_fatal", patterns[0].Name)
 	assert.True(t, patterns[0].IsFatal)
 	assert.Equal(t, pb.RecommendedAction_REPLACE_VM, patterns[0].RecommendedAction)
+	assert.True(t, patterns[0].HasProcessingStrategy)
+	assert.Equal(t, pb.ProcessingStrategy_EXECUTE_REMEDIATION, patterns[0].ProcessingStrategy)
 
 	assert.Equal(t, "test_nonfatal", patterns[1].Name)
 	assert.False(t, patterns[1].IsFatal)
 	assert.Equal(t, pb.RecommendedAction_NONE, patterns[1].RecommendedAction)
+	assert.True(t, patterns[1].HasProcessingStrategy)
+	assert.Equal(t, pb.ProcessingStrategy_STORE_ONLY, patterns[1].ProcessingStrategy)
 }
 
 func TestLoadConfig_DisabledPatternsFiltered(t *testing.T) {
@@ -161,6 +167,42 @@ description = "unknown action"
 	_, err := LoadConfig(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not a known RecommendedAction")
+}
+
+func TestLoadConfig_UnknownProcessingStrategyRejected(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `
+[[nicDriverDetection.patterns]]
+name = "bad_strategy"
+regex = "test"
+enabled = true
+isFatal = false
+recommendedAction = "NONE"
+processingStrategy = "TYPO_STRATEGY"
+description = "unknown strategy"
+`)
+
+	_, err := LoadConfig(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a known ProcessingStrategy")
+}
+
+func TestLoadConfig_MissingProcessingStrategyAllowed(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTOML(t, dir, `
+[[nicDriverDetection.patterns]]
+name = "missing_strategy"
+regex = "test"
+enabled = true
+isFatal = false
+recommendedAction = "NONE"
+description = "missing strategy"
+`)
+
+	patterns, err := LoadConfig(path)
+	require.NoError(t, err)
+	require.Len(t, patterns, 1)
+	assert.False(t, patterns[0].HasProcessingStrategy)
 }
 
 func TestLoadConfig_EmptyDescriptionRejected(t *testing.T) {
