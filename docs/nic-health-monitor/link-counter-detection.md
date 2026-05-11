@@ -444,7 +444,7 @@ ibdiagnet -o /tmp/ibdiag_output
 
 ### 4.5 Consolidated Deterministic Failure Thresholds (Defaults)
 
-> **Configuration Note**: All thresholds and severity levels are configurable. The values below are **defaults** based on industry specifications and vendor recommendations. See [Section 10: Configuration](#10-configuration) for customization options.
+> **Configuration Note**: Thresholds are configurable. Counter severity, sysfs path, recommended action, and event description are owned by the monitor's hardcoded counter definitions. See [Section 10: Configuration](#10-configuration) for customization options.
 
 **Table 1: Absolute Deterministic Failure Thresholds (Default: Fatal - IsFatal=true)**
 
@@ -909,11 +909,10 @@ NICs and Ports are modeled as separate entity types to enable precise fault loca
 
 ## 10. Configuration
 
-The counter monitoring system is configurable within a hardcoded allowlist of NIC error/degradation counters, allowing operators to:
+The counter monitoring system is configurable within a hardcoded allowlist of NIC error/degradation counters. Counter paths, default severity, recommended action, and event descriptions are owned by code. Operators can:
 
 - Define which allowed counters to monitor
 - Configure threshold types (delta-based or velocity-based)
-- Set fatal/non-fatal severity levels per counter
 - Override default thresholds for specific environments
 
 ### 10.1 Configuration Schema
@@ -927,13 +926,10 @@ counterDetection:
   # Counter definitions - configurable for allowed counters only
   # Each counter can specify:
   #   - name:           Allowed counter identifier (used in events)
-  #   - path:           Matching allowed sysfs path relative to device/interface
   #   - enabled:        Enable/disable this counter (default: true)
-  #   - isFatal:        Whether threshold breach triggers Fatal event (default: false)
   #   - thresholdType:  "delta" (absolute change) or "velocity" (rate per time unit)
   #   - threshold:      Numeric threshold value
   #   - velocityUnit:   For velocity thresholds: "second", "minute", "hour"
-  #   - description:    Human-readable description for event messages
 
   counters: []  # See defaults below
 ```
@@ -947,7 +943,7 @@ counterDetection:
 
 ### 10.2 Default Counter Configuration
 
-The following counters are monitored by default. Operators can override any setting or add additional counters from the allowed set.
+The following counters are monitored by default. Operators can override enablement and threshold settings, or add additional counters from the allowed set. The monitor resolves each `name` to its sysfs path, severity, recommended action, and event description.
 
 ```yaml
 counterDetection:
@@ -955,168 +951,120 @@ counterDetection:
 
   counters:
     #--------------------------------------------------------------------------
-    # FATAL COUNTERS (Default: IsFatal=true, RecommendedAction=REPLACE_VM)
+    # FATAL COUNTER PROFILES (severity/action owned by code)
     # These counters indicate deterministic workload failure
     #--------------------------------------------------------------------------
 
     - name: link_downed
-      path: counters/link_downed
       enabled: true
-      isFatal: true
       thresholdType: delta
       threshold: 0              # Any increment (> 0) is fatal
-      description: "Port Training State Machine failed - QP disconnect"
       
     - name: excessive_buffer_overrun_errors
-      path: counters/excessive_buffer_overrun_errors
       enabled: true
-      isFatal: true
       thresholdType: delta
       threshold: 0              # Any increment is fatal
-      description: "HCA internal buffer overflow - lossless contract violated"
       
     - name: local_link_integrity_errors
-      path: counters/local_link_integrity_errors
       enabled: true
-      isFatal: true
       thresholdType: delta
       threshold: 0              # Any increment is fatal
-      description: "Physical errors exceed LocalPhyErrors hardware cap"
       
     - name: rnr_nak_retry_err
-      path: hw_counters/rnr_nak_retry_err
       enabled: true
-      isFatal: true
       thresholdType: delta
       threshold: 0              # Any increment is fatal
-      description: "Receiver Not Ready NAK retry exhausted - connection severed"
     
     #--------------------------------------------------------------------------
-    # NON-FATAL COUNTERS (Default: IsFatal=false, RecommendedAction=NONE)
+    # NON-FATAL COUNTER PROFILES (severity/action owned by code)
     # These counters indicate degradation requiring monitoring
     #--------------------------------------------------------------------------
     
     # Physical Layer (PHY) - two-tier symbol_error monitoring
     - name: symbol_error
-      path: counters/symbol_error
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 10.0
       velocityUnit: second
-      description: "PHY bit errors before FEC - physical layer degradation"
 
     - name: symbol_error_fatal
-      path: counters/symbol_error
       enabled: true
-      isFatal: true
       thresholdType: velocity
       threshold: 120.0
       velocityUnit: hour
-      description: "Symbol errors exceed IBTA BER threshold (10E-12) - link outside spec"
       
     - name: link_error_recovery
-      path: counters/link_error_recovery
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 5.0
       velocityUnit: minute
-      description: "Link retraining events - micro-flapping"
     
     # Transport Layer
     - name: port_rcv_errors
-      path: counters/port_rcv_errors
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 10.0
       velocityUnit: second
-      description: "Malformed packets received"
       
     - name: out_of_sequence
-      path: hw_counters/out_of_sequence
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 100.0
       velocityUnit: second
-      description: "Fabric routing issues - out of sequence packets"
       
     - name: local_ack_timeout_err
-      path: hw_counters/local_ack_timeout_err
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 1.0
       velocityUnit: second
-      description: "ACK timeout - potential fabric black hole"
     
     # Congestion Indicators
     - name: port_xmit_discards
-      path: counters/port_xmit_discards
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 100.0
       velocityUnit: second
-      description: "TX discards due to congestion"
       
     - name: port_xmit_wait
-      path: counters/port_xmit_wait
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 10000.0
       velocityUnit: second
-      description: "TX wait ticks - congestion backpressure"
     
     # RoCE-specific
     - name: roce_slow_restart
-      path: hw_counters/roce_slow_restart
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 10.0
       velocityUnit: second
-      description: "Victim flow oscillation"
     
     # Interface Level
     - name: carrier_changes
-      path: statistics/carrier_changes
       enabled: true
-      isFatal: false
       thresholdType: delta
       threshold: 2               # > 2 changes per interval
-      description: "Link instability - carrier state changes"
 ```
 
 ### 10.3 Allowed Counter Customization
 
-The monitor rejects arbitrary counter names and paths at startup. Operators can add entries from the allowlist or override thresholds/severity for existing entries:
+The monitor rejects arbitrary counter names at startup. Operators can add entries from the allowlist or override thresholds for existing entries:
 
 ```yaml
 counterDetection:
   counters:
     # Override: Make the documented fatal symbol_error profile more sensitive.
     - name: symbol_error_fatal
-      path: counters/symbol_error
       enabled: true
-      isFatal: true
       thresholdType: velocity
-      threshold: 120.0                 # IBTA spec: 120/hour
+      threshold: 60.0                  # Stricter than the default 120/hour
       velocityUnit: hour
-      description: "Symbol errors exceed IBTA BER threshold"
     
     # Add: monitor an allowed Linux interface-level error counter.
     - name: rx_missed_errors
-      path: statistics/rx_missed_errors
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 10.0
       velocityUnit: second
-      description: "RX packets missed due to receive-side capacity pressure"
     
     # Disable: Turn off a default counter
     - name: port_xmit_wait
@@ -1296,7 +1244,7 @@ The monitor validates configuration at startup:
 
 ## Appendix A: Quick Reference - Default Counter Thresholds
 
-> **Note**: All counters, thresholds, and severity levels are configurable via the monitor configuration. The values below are the **defaults** that apply when no custom configuration is provided. See [Section 10: Configuration](#10-configuration) for customization options.
+> **Note**: Supported counter names and thresholds are configurable via the monitor configuration. Severity, sysfs path, recommended action, and event description come from the monitor's hardcoded counter definitions. See [Section 10: Configuration](#10-configuration) for customization options.
 
 ### Fatal Counters (Default: IsFatal = true)
 
@@ -1324,7 +1272,7 @@ For kernel log pattern details (fatal and non-fatal classifications, regex patte
 | `local_ack_timeout_err` | `hw_counters/` | > 1/sec           | Monitor        | Yes          |
 | `carrier_changes`       | interface      | > 2/interval      | Monitor        | Yes          |
 
-> **Note**: `rnr_nak_retry_err` is **FATAL** by default (see Fatal Counters table above). All counters can have their severity and threshold overridden via configuration.
+> **Note**: `rnr_nak_retry_err` is **FATAL** by default (see Fatal Counters table above). Counter thresholds can be overridden via configuration; severity changes should use platform connector / analyzer overrides.
 
 ### Design Principle
 

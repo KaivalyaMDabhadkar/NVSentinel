@@ -26,10 +26,8 @@ data:
 
     [[nicDriverDetection.patterns]]
     name = {{ .name | quote }}
-    regex = '''{{ .regex }}'''
     enabled = {{ .enabled }}
-    isFatal = {{ .isFatal }}
-    recommendedAction = {{ .recommendedAction | quote }}
+    {{ if .processingStrategy }}
     processingStrategy = {{ .processingStrategy | quote }}
-    description = {{ .description | quote }}
+    {{ end }}
     {{- end }}

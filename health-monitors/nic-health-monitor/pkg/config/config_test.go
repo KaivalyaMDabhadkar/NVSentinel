@@ -24,23 +24,19 @@ import (
 func validDeltaCounter() CounterConfig {
 	return CounterConfig{
 		Name:          "link_downed",
-		Path:          "counters/link_downed",
 		Enabled:       true,
 		ThresholdType: "delta",
 		Threshold:     0,
-		Description:   "Port Training State Machine failed",
 	}
 }
 
 func validVelocityCounter() CounterConfig {
 	return CounterConfig{
 		Name:          "symbol_error",
-		Path:          "counters/symbol_error",
 		Enabled:       true,
 		ThresholdType: "velocity",
 		VelocityUnit:  "second",
 		Threshold:     10.0,
-		Description:   "PHY bit errors before FEC",
 	}
 }
 
@@ -89,111 +85,75 @@ func TestValidateCounterDetection_AllVelocityUnits(t *testing.T) {
 func TestValidateCounter_EmptyName(t *testing.T) {
 	c := validDeltaCounter()
 	c.Name = ""
-	err := validateCounter(c)
+	err := validateCounter(&c)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "name must not be empty")
-}
-
-func TestValidateCounter_EmptyPath(t *testing.T) {
-	c := validDeltaCounter()
-	c.Path = ""
-	err := validateCounter(c)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "path must not be empty")
-}
-
-func TestValidateCounter_UnsupportedPath(t *testing.T) {
-	c := validDeltaCounter()
-	c.Path = "ports/1/counters/link_downed"
-	err := validateCounter(c)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "path")
-	assert.Contains(t, err.Error(), "not allowed")
 }
 
 func TestValidateCounter_UnknownCounterName(t *testing.T) {
 	c := validDeltaCounter()
 	c.Name = "custom_vendor_error"
-	c.Path = "hw_counters/local_ack_timeout_err"
-	err := validateCounter(c)
+	err := validateCounter(&c)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "counter name")
 	assert.Contains(t, err.Error(), "not allowed")
 }
 
-func TestValidateCounter_NamePathMismatch(t *testing.T) {
+func TestValidateCounter_AppliesCounterDefinition(t *testing.T) {
 	c := validDeltaCounter()
 	c.Name = "link_downed"
-	c.Path = "counters/symbol_error"
-	err := validateCounter(c)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "path")
-	assert.Contains(t, err.Error(), "allowed path(s)")
+	require.NoError(t, validateCounter(&c))
+	assert.Equal(t, "counters/link_downed", c.Path)
+	assert.True(t, c.IsFatal)
+	assert.NotEmpty(t, c.Description)
 }
 
 func TestValidateCounter_RemovedNoisyCountersRejected(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		path string
-	}{
-		{"np_cnp_sent", "hw_counters/np_cnp_sent"},
-		{"req_cqe_error", "hw_counters/req_cqe_error"},
-		{"resp_cqe_flush_error", "hw_counters/resp_cqe_flush_error"},
-		{"rx_dropped", "statistics/rx_dropped"},
-		{"tx_fifo_errors", "statistics/tx_fifo_errors"},
-		{"collisions", "statistics/collisions"},
+	for _, name := range []string{
+		"np_cnp_sent",
+		"req_cqe_error",
+		"resp_cqe_flush_error",
+		"rx_dropped",
+		"tx_fifo_errors",
+		"collisions",
 	} {
 		c := validDeltaCounter()
-		c.Name = tc.name
-		c.Path = tc.path
-		err := validateCounter(c)
-		require.Error(t, err, "counter %q path %q should be rejected", tc.name, tc.path)
+		c.Name = name
+		err := validateCounter(&c)
+		require.Error(t, err, "counter %q should be rejected", name)
 		assert.Contains(t, err.Error(), "counter name")
 		assert.Contains(t, err.Error(), "not allowed")
 	}
 }
 
-func TestValidateCounter_PathPrefixOnlyRejected(t *testing.T) {
-	for _, prefix := range []string{"counters/", "hw_counters/", "statistics/"} {
-		c := validDeltaCounter()
-		c.Path = prefix
-		err := validateCounter(c)
-		require.Error(t, err, "bare prefix %q should be rejected (no counter name)", prefix)
-		assert.Contains(t, err.Error(), "path")
-	}
-}
-
 func TestValidateCounter_AllowedCounterSelections(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		path string
-	}{
-		{"link_downed", "counters/link_downed"},
-		{"symbol_error", "counters/symbol_error"},
-		{"symbol_error_fatal", "counters/symbol_error"},
-		{"port_xmit_wait", "counters/port_xmit_wait"},
-		{"rnr_nak_retry_err", "hw_counters/rnr_nak_retry_err"},
-		{"implied_nak_seq_err", "hw_counters/implied_nak_seq_err"},
-		{"out_of_sequence", "hw_counters/out_of_sequence"},
-		{"packet_seq_err", "hw_counters/packet_seq_err"},
-		{"req_transport_retries_exceeded", "hw_counters/req_transport_retries_exceeded"},
-		{"roce_slow_restart", "hw_counters/roce_slow_restart"},
-		{"carrier_changes", "statistics/carrier_changes"},
-		{"rx_crc_errors", "statistics/rx_crc_errors"},
-		{"rx_missed_errors", "statistics/rx_missed_errors"},
-		{"tx_carrier_errors", "statistics/tx_carrier_errors"},
+	for _, name := range []string{
+		"link_downed",
+		"symbol_error",
+		"symbol_error_fatal",
+		"port_xmit_wait",
+		"rnr_nak_retry_err",
+		"implied_nak_seq_err",
+		"out_of_sequence",
+		"packet_seq_err",
+		"req_transport_retries_exceeded",
+		"roce_slow_restart",
+		"carrier_changes",
+		"rx_crc_errors",
+		"rx_missed_errors",
+		"tx_carrier_errors",
 	} {
 		c := validDeltaCounter()
-		c.Name = tc.name
-		c.Path = tc.path
-		assert.NoError(t, validateCounter(c), "counter %q path %q should be valid", tc.name, tc.path)
+		c.Name = name
+		assert.NoError(t, validateCounter(&c), "counter %q should be valid", name)
+		assert.NotEmpty(t, c.Path, "counter %q should get a path from code definitions", name)
 	}
 }
 
 func TestValidateCounter_InvalidThresholdType(t *testing.T) {
 	c := validDeltaCounter()
 	c.ThresholdType = "absolute"
-	err := validateCounter(c)
+	err := validateCounter(&c)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "thresholdType")
 }
@@ -201,7 +161,7 @@ func TestValidateCounter_InvalidThresholdType(t *testing.T) {
 func TestValidateCounter_VelocityMissingUnit(t *testing.T) {
 	c := validVelocityCounter()
 	c.VelocityUnit = ""
-	err := validateCounter(c)
+	err := validateCounter(&c)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "velocityUnit")
 }
@@ -209,17 +169,9 @@ func TestValidateCounter_VelocityMissingUnit(t *testing.T) {
 func TestValidateCounter_VelocityInvalidUnit(t *testing.T) {
 	c := validVelocityCounter()
 	c.VelocityUnit = "day"
-	err := validateCounter(c)
+	err := validateCounter(&c)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "velocityUnit")
-}
-
-func TestValidateCounter_EmptyDescription(t *testing.T) {
-	c := validDeltaCounter()
-	c.Description = ""
-	err := validateCounter(c)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "description")
 }
 
 func TestValidateDescription_SemicolonRejected(t *testing.T) {

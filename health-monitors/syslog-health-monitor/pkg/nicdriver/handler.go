@@ -91,9 +91,7 @@ func (h *NICDriverHandler) buildEvent(
 	var entities []*pb.Entity
 
 	// Best-effort NIC entity enrichment. Defensive guard: only attach a NIC
-	// entity if the BDF actually resolves to mlx5_core. This prevents an
-	// operator-supplied generic regex from accidentally tagging a GPU/NVMe
-	// BDF with a NIC entity.
+	// entity if the BDF actually resolves to mlx5_core.
 	if hasBDF {
 		if driver, device, ok := h.resolver.Resolve(bdf); ok && driver == mlx5CoreDriver && device != "" {
 			entities = append(entities, &pb.Entity{

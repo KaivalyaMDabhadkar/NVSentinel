@@ -208,7 +208,7 @@ This monitor uses a binary severity model based on **workload impact**:
 |-------------------------|------------------------------------------------------------------------------------------------------------------------------------|----------------------------------|
 | **Degradation Monitor** | `link_downed` (Delta > 0), `excessive_buffer_overrun_errors` (any), `local_link_integrity_errors` (any), `rnr_nak_retry_err` (any) | **RecommendedAction_REPLACE_VM** |
 
-> **Note**: Counter thresholds and severity levels are configurable for the hardcoded allowed counter set. See [Link Counter Detection](./link-counter-detection.md#10-configuration) for customization options.
+> **Note**: Counter thresholds are configurable for the hardcoded allowed counter set. Severity and sysfs paths are owned by the monitor definitions. See [Link Counter Detection](./link-counter-detection.md#10-configuration) for customization options.
 
 ### Syslog Detection (Fatal & Non-Fatal)
 

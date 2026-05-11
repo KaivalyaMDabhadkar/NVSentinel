@@ -395,17 +395,18 @@ The `NICDriverErrorHandler` follows the same pattern as the existing XID handler
 
 1. **Receive kernel log line** from journald stream
 2. **Match against NIC error patterns** (see Section 5 for pattern list):
-   - Patterns are loaded from a configurable TOML file (see Section 8.3), not hardcoded in source
+   - Pattern definitions (regex, severity, recommended action, description) are owned by Go code
+   - The TOML file only selects supported pattern names and enables/disables them (see Section 8.3)
    - Check if line matches any regex pattern (e.g., `mlx5_core.*timeout\. Will cause a leak of a command resource`)
    - If no match → skip line, return nil
 3. **Determine severity**:
-   - Look up pattern in severity table (Section 5.2)
+   - Look up the pattern definition in code (summarized in Section 5.2)
    - Set `IsFatal` accordingly
 4. **Extract PCI address** from message using regex (e.g., `0000:3b:00.0`)
 5. **Best-effort NIC entity enrichment** by resolving `/sys/bus/pci/devices/<BDF>/driver` symlink
    - If the driver is `mlx5_core` → attach NIC entity (e.g., `mlx5_0`) to the event
    - Otherwise → emit the event with no NIC entity attached
-   - The handler does **not** drop events based on driver type. All shipped patterns are mlx5-specific by regex (e.g., they require `mlx5_core` or `mlx5_cmd_out_err` in the message), so non-mlx5 matches are not expected for built-in patterns. Custom patterns must follow the same convention; see Section 8.3.
+   - The handler does **not** drop events based on driver type. Supported patterns are mlx5-specific by regex (e.g., they require `mlx5_core` or `mlx5_cmd_out_err` in the message), so non-mlx5 matches are not expected.
 6. **Generate HealthEvent** with:
    - `Agent = "syslog-health-monitor"`
    - `CheckName = "SysLogsNICDriverError"`
@@ -615,45 +616,31 @@ enableNICDriverErrorCorrelationRule: true
 
 ### 8.3 NIC Driver Pattern Configuration
 
-NIC driver error patterns are defined in a TOML configuration file, allowing operators to disable, add, or reclassify patterns without code changes.
+NIC driver error pattern definitions are hardcoded in the syslog-health-monitor. Configuration selects supported pattern names, enables/disables them, and can optionally override the processing strategy. Regexes, severity, recommended action, and descriptions are intentionally not user-configurable.
 
 **TOML Shape:**
 
 ```toml
 [[nicDriverDetection.patterns]]
 name = "cmd_exec_timeout"
-regex = 'mlx5_core.*timeout\. Will cause a leak of a command resource'
 enabled = true
-isFatal = true
-recommendedAction = "REPLACE_VM"
 processingStrategy = "EXECUTE_REMEDIATION"
-description = "Firmware command timeout with resource leak"
 
 [[nicDriverDetection.patterns]]
 name = "netdev_watchdog"
-regex = 'NETDEV WATCHDOG:.*mlx5_core.*transmit queue.*timed out'
 enabled = true
-isFatal = false
-recommendedAction = "NONE"
 processingStrategy = "EXECUTE_REMEDIATION"
-description = "TX queue stall with auto-recovery via mlx5e_tx_timeout"
 ```
 
 **Fields:**
 
 | Field                | Type     | Description                                                                                                                 |
 |----------------------|----------|-----------------------------------------------------------------------------------------------------------------------------|
-| `name`               | `string` | Unique identifier for the pattern                                                                                           |
-| `regex`              | `string` | Regular expression matched against kernel log lines                                                                         |
+| `name`               | `string` | Supported pattern identifier; must exist in the Go-owned pattern registry                                                   |
 | `enabled`            | `bool`   | Whether the pattern is active; set `false` to disable without removing                                                      |
-| `isFatal`            | `bool`   | `true` → `IsFatal=true` + `REPLACE_VM`; `false` → diagnostic context only                                                   |
-| `recommendedAction`  | `string` | Action attached to emitted health events (e.g., `REPLACE_VM`, `NONE`)                                                       |
 | `processingStrategy` | `string` | Optional per-pattern override (`EXECUTE_REMEDIATION` or `STORE_ONLY`); falls back to the monitor-wide strategy when omitted |
-| `description`        | `string` | Human-readable explanation of the pattern                                                                                   |
 
-> **Custom patterns should be NIC/mlx5-specific.** Generic PCIe/AER patterns such as `PCIe Bus Error.*Fatal` are intentionally not shipped because they can match GPUs, NVMe, or root ports. The handler does not BDF-gate generic patterns; if you add one, ensure its regex includes an mlx5-specific prefix (`mlx5_core`, `mlx5_cmd_out_err`, etc.) so it cannot match other devices. This follows gpud's same-decision approach in `kmsg_matcher.go`.
->
-> **Operational Note**: Operators can disable noisy patterns, add site-specific patterns, or reclassify severity (e.g., promote a Non-Fatal pattern to Fatal) by editing the TOML file and restarting the syslog-health-monitor pod. No code changes required.
+> **Operational Note**: Operators can disable noisy supported patterns or use `STORE_ONLY` for observability-only collection. Severity and recommended action changes should be handled through platform connector / analyzer overrides rather than by changing monitor regex definitions.
 
 ---
 

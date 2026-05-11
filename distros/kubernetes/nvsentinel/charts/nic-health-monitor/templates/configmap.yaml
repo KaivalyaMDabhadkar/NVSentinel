@@ -31,13 +31,10 @@ data:
 
     [[counterDetection.counters]]
     name = {{ .name | quote }}
-    path = {{ .path | quote }}
     enabled = {{ .enabled }}
-    isFatal = {{ .isFatal }}
     thresholdType = {{ .thresholdType | quote }}
     threshold = {{ .threshold }}
     {{- if .velocityUnit }}
     velocityUnit = {{ .velocityUnit | quote }}
     {{- end }}
-    description = {{ .description | quote }}
     {{- end }}

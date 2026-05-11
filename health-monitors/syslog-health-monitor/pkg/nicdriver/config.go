@@ -18,13 +18,10 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/configmanager"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 )
-
-const recommendedActionMarker = "Recommended Action="
 
 // Config is the top-level TOML structure for NIC driver syslog patterns.
 type Config struct {
@@ -39,12 +36,8 @@ type PatternDetectionConfig struct {
 // PatternConfig defines a single kernel log pattern to match.
 type PatternConfig struct {
 	Name               string `toml:"name"`
-	Regex              string `toml:"regex"`
 	Enabled            bool   `toml:"enabled"`
-	IsFatal            bool   `toml:"isFatal"`
-	RecommendedAction  string `toml:"recommendedAction"`
 	ProcessingStrategy string `toml:"processingStrategy"`
-	Description        string `toml:"description"`
 }
 
 // CompiledPattern is a validated, ready-to-evaluate pattern produced by LoadConfig.
@@ -58,8 +51,66 @@ type CompiledPattern struct {
 	Description           string
 }
 
+type patternDefinition struct {
+	re                *regexp.Regexp
+	isFatal           bool
+	recommendedAction pb.RecommendedAction
+	description       string
+}
+
+var patternDefinitions = map[string]patternDefinition{
+	"cmd_exec_timeout": {
+		re:                regexp.MustCompile(`mlx5_core.*timeout\. Will cause a leak of a command resource`),
+		isFatal:           true,
+		recommendedAction: pb.RecommendedAction_REPLACE_VM,
+		description:       "Firmware/driver command timeout - control plane broken",
+	},
+	"health_poll_failed": {
+		re:                regexp.MustCompile(`mlx5_core.*device's health compromised.*reached miss count`),
+		isFatal:           true,
+		recommendedAction: pb.RecommendedAction_REPLACE_VM,
+		description:       "Firmware heartbeat lost - device health compromised",
+	},
+	"unrecoverable_err": {
+		re:                regexp.MustCompile(`mlx5_core.*unrecoverable hardware error`),
+		isFatal:           true,
+		recommendedAction: pb.RecommendedAction_REPLACE_VM,
+		description:       "Unrecoverable hardware error (syndrome 0x8)",
+	},
+	"netdev_watchdog": {
+		re:                regexp.MustCompile(`NETDEV WATCHDOG.*mlx5_core.*transmit queue.*timed out`),
+		isFatal:           false,
+		recommendedAction: pb.RecommendedAction_NONE,
+		description:       "TX queue timeout - mlx5 driver has auto-recovery",
+	},
+	"pci_power_insufficient": {
+		re:                regexp.MustCompile(`mlx5_core.*Detected insufficient power on the PCIe slot`),
+		isFatal:           false,
+		recommendedAction: pb.RecommendedAction_NONE,
+		description:       "PCIe slot power negotiation issue",
+	},
+	"port_module_high_temp": {
+		re:                regexp.MustCompile(`mlx5_core.*Port module event.*High Temperature`),
+		isFatal:           false,
+		recommendedAction: pb.RecommendedAction_NONE,
+		description:       "Port module high temperature warning",
+	},
+	"access_reg_failed": {
+		re:                regexp.MustCompile(`mlx5_cmd_out_err.*ACCESS_REG.*failed`),
+		isFatal:           false,
+		recommendedAction: pb.RecommendedAction_NONE,
+		description:       "ACCESS_REG command failed - restricted PF access noise",
+	},
+	"module_unplugged": {
+		re:                regexp.MustCompile(`mlx5_core.*Port module event.*Cable unplugged`),
+		isFatal:           false,
+		recommendedAction: pb.RecommendedAction_NONE,
+		description:       "SFP/transceiver cable unplugged",
+	},
+}
+
 // LoadConfig reads and validates the TOML configuration, returning only the
-// enabled patterns with pre-compiled regexes and resolved proto enums.
+// enabled pattern definitions requested by name.
 func LoadConfig(path string) ([]CompiledPattern, error) {
 	cfg := &Config{}
 	if err := configmanager.LoadTOMLConfig(path, cfg); err != nil {
@@ -89,14 +140,9 @@ func compilePatterns(raw []PatternConfig) ([]CompiledPattern, error) {
 
 		seen[p.Name] = struct{}{}
 
-		re, err := regexp.Compile(p.Regex)
-		if err != nil {
-			return nil, fmt.Errorf("patterns[%d] (%q): invalid regex: %w", i, p.Name, err)
-		}
-
-		action, err := resolveAction(p.RecommendedAction)
-		if err != nil {
-			return nil, fmt.Errorf("patterns[%d] (%q): %w", i, p.Name, err)
+		def, ok := patternDefinitions[p.Name]
+		if !ok {
+			return nil, fmt.Errorf("patterns[%d]: pattern name %q is not supported", i, p.Name)
 		}
 
 		processingStrategy, hasProcessingStrategy, err := resolveProcessingStrategy(p.ProcessingStrategy)
@@ -106,12 +152,12 @@ func compilePatterns(raw []PatternConfig) ([]CompiledPattern, error) {
 
 		compiled = append(compiled, CompiledPattern{
 			Name:                  p.Name,
-			Re:                    re,
-			IsFatal:               p.IsFatal,
-			RecommendedAction:     action,
+			Re:                    def.re,
+			IsFatal:               def.isFatal,
+			RecommendedAction:     def.recommendedAction,
 			ProcessingStrategy:    processingStrategy,
 			HasProcessingStrategy: hasProcessingStrategy,
-			Description:           p.Description,
+			Description:           def.description,
 		})
 	}
 
@@ -123,28 +169,7 @@ func validatePattern(p PatternConfig) error {
 		return fmt.Errorf("name must not be empty")
 	}
 
-	if p.Regex == "" {
-		return fmt.Errorf("regex must not be empty")
-	}
-
-	if err := validateDescription(p.Description); err != nil {
-		return fmt.Errorf("description: %w", err)
-	}
-
 	return nil
-}
-
-// resolveAction is intentionally strict: configuration typos should fail
-// startup instead of being coerced to a different remediation action.
-func resolveAction(action string) (pb.RecommendedAction, error) {
-	upper := strings.ToUpper(strings.TrimSpace(action))
-
-	val, ok := pb.RecommendedAction_value[upper]
-	if !ok {
-		return 0, fmt.Errorf("recommendedAction %q is not a known RecommendedAction enum value", action)
-	}
-
-	return pb.RecommendedAction(val), nil
 }
 
 func resolveProcessingStrategy(strategy string) (pb.ProcessingStrategy, bool, error) {
@@ -160,27 +185,4 @@ func resolveProcessingStrategy(strategy string) (pb.ProcessingStrategy, bool, er
 	}
 
 	return pb.ProcessingStrategy(val), true, nil
-}
-
-func validateDescription(desc string) error {
-	if desc == "" {
-		return fmt.Errorf("must not be empty")
-	}
-
-	if !utf8.ValidString(desc) {
-		return fmt.Errorf("contains invalid UTF-8")
-	}
-
-	if strings.Contains(desc, ";") {
-		return fmt.Errorf("must not contain %q (used as message delimiter by platform-connectors)", ";")
-	}
-
-	if strings.Contains(desc, recommendedActionMarker) {
-		return fmt.Errorf(
-			"must not contain %q (used as message parser marker by platform-connectors)",
-			recommendedActionMarker,
-		)
-	}
-
-	return nil
 }

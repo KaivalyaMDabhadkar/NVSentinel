@@ -63,9 +63,9 @@ sysClassInfinibandPath: "/nvsentinel/sys/class/infiniband"
 # Counter detection configuration
 counterDetection:
   enabled: true
-  # Counter entries are validated against a hardcoded allowlist in the monitor.
-  # Operators may tune thresholds/severity or add entries from the allowed set,
-  # but arbitrary sysfs counters are rejected at startup.
+  # Counter names are validated against hardcoded definitions in the monitor.
+  # Operators may enable/disable supported counters and tune thresholds, but
+  # sysfs paths, severity, and event descriptions are owned by code.
   #
   # Allowed counters:
   #   counters/: excessive_buffer_overrun_errors, link_downed,
@@ -78,121 +78,92 @@ counterDetection:
   #     rnr_nak_retry_err, roce_slow_restart
   #   statistics/: carrier_changes, rx_crc_errors, rx_errors,
   #     rx_missed_errors, tx_carrier_errors, tx_errors
+  #
+  # Example allowed-counter customization:
+  #   - name: rx_missed_errors
+  #     enabled: true
+  #     thresholdType: velocity
+  #     threshold: 10.0
+  #     velocityUnit: second
   counters:
     #--------------------------------------------------------------------------
-    # FATAL COUNTERS (isFatal=true → RecommendedAction=REPLACE_VM)
+    # FATAL COUNTER PROFILES (severity/action owned by code)
     #--------------------------------------------------------------------------
     - name: link_downed
-      path: counters/link_downed
       enabled: true
-      isFatal: true
       thresholdType: delta
       threshold: 0
-      description: "Port Training State Machine failed - QP disconnect"
 
     - name: excessive_buffer_overrun_errors
-      path: counters/excessive_buffer_overrun_errors
       enabled: true
-      isFatal: true
       thresholdType: delta
       threshold: 0
-      description: "HCA internal buffer overflow - lossless contract violated"
 
     - name: local_link_integrity_errors
-      path: counters/local_link_integrity_errors
       enabled: true
-      isFatal: true
       thresholdType: delta
       threshold: 0
-      description: "Physical errors exceed LocalPhyErrors hardware cap"
 
     - name: rnr_nak_retry_err
-      path: hw_counters/rnr_nak_retry_err
       enabled: true
-      isFatal: true
       thresholdType: delta
       threshold: 0
-      description: "Receiver Not Ready NAK retry exhausted - connection severed"
 
     #--------------------------------------------------------------------------
-    # NON-FATAL COUNTERS (isFatal=false → RecommendedAction=NONE)
+    # NON-FATAL COUNTER PROFILES (severity/action owned by code)
     #--------------------------------------------------------------------------
 
     # Physical Layer (PHY)
     - name: symbol_error
-      path: counters/symbol_error
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 10.0
       velocityUnit: second
-      description: "PHY bit errors before FEC - physical layer degradation"
 
     - name: symbol_error_fatal
-      path: counters/symbol_error
       enabled: true
-      isFatal: true
       thresholdType: velocity
       threshold: 120.0
       velocityUnit: hour
-      description: "Symbol errors exceed IBTA BER threshold (10E-12) - link outside spec"
 
     - name: link_error_recovery
-      path: counters/link_error_recovery
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 5.0
       velocityUnit: minute
-      description: "Link retraining events - micro-flapping"
 
     # Transport Layer
     - name: port_rcv_errors
-      path: counters/port_rcv_errors
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 10.0
       velocityUnit: second
-      description: "Malformed packets received"
 
     - name: local_ack_timeout_err
-      path: hw_counters/local_ack_timeout_err
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 1.0
       velocityUnit: second
-      description: "ACK timeout - potential fabric black hole"
 
     # Congestion Indicators
     - name: port_xmit_discards
-      path: counters/port_xmit_discards
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 100.0
       velocityUnit: second
-      description: "TX discards due to congestion"
 
     # RoCE-specific
     - name: roce_slow_restart
-      path: hw_counters/roce_slow_restart
       enabled: true
-      isFatal: false
       thresholdType: velocity
       threshold: 10.0
       velocityUnit: second
-      description: "Victim flow oscillation"
 
     # Interface Level
     - name: carrier_changes
-      path: statistics/carrier_changes
       enabled: true
-      isFatal: false
       thresholdType: delta
       threshold: 2
-      description: "Link instability - carrier state changes"
 
 # Scheduling configuration
 nodeSelector: {}
