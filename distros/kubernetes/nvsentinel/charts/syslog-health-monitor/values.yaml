@@ -57,3 +57,27 @@ logLevel: info
 # EXECUTE_REMEDIATION: normal behavior; downstream modules may update cluster state.
 # STORE_ONLY: observability-only behavior; event should be persisted/exported but should not modify cluster resources (i.e., no node conditions, no quarantine, no drain, no remediation).
 processingStrategy: EXECUTE_REMEDIATION
+
+# NIC driver syslog pattern detection configuration.
+# Pattern definitions (regex, severity, recommended action, description) are
+# owned by code. Operators may enable/disable supported names and optionally
+# set per-pattern processingStrategy.
+# Only consumed when SysLogsNICDriverError is added to enabledChecks.
+nicDriverDetection:
+  patterns:
+    - name: cmd_exec_timeout
+      enabled: false
+    - name: health_poll_failed
+      enabled: false
+    - name: unrecoverable_err
+      enabled: false
+    - name: netdev_watchdog
+      enabled: false
+    - name: pci_power_insufficient
+      enabled: false
+    - name: port_module_high_temp
+      enabled: false
+    - name: access_reg_failed
+      enabled: false
+    - name: module_unplugged
+      enabled: false
