@@ -302,8 +302,8 @@ func validateCounter(c *CounterConfig) error {
 		return err
 	}
 
-	if math.IsNaN(c.Threshold) || math.IsInf(c.Threshold, 0) || c.Threshold < 0 {
-		return fmt.Errorf("threshold %v is invalid; must be a finite value >= 0", c.Threshold)
+	if err := validateThreshold(c.Threshold); err != nil {
+		return err
 	}
 
 	switch c.ThresholdType {
@@ -319,6 +319,14 @@ func validateCounter(c *CounterConfig) error {
 
 	if err := validateDescription(c.Description); err != nil {
 		return fmt.Errorf("description: %w", err)
+	}
+
+	return nil
+}
+
+func validateThreshold(threshold float64) error {
+	if math.IsNaN(threshold) || math.IsInf(threshold, 0) || threshold < 0 {
+		return fmt.Errorf("threshold %v is invalid; must be a finite value >= 0", threshold)
 	}
 
 	return nil

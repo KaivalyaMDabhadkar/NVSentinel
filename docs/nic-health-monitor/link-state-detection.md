@@ -9,7 +9,7 @@
 3. [State Monitoring Specification](#3-state-monitoring-specification)
 4. [Management NIC Exclusion, NIC Role Classification, and Uncabled Port Detection](#4-management-nic-exclusion-and-uncabled-port-detection)
 5. [Device Discovery and Parsing](#5-device-discovery-and-parsing)
-6. [State Change and Flap Detection](#6-state-change-and-flap-detection)
+6. [State Change Handling](#6-state-change-handling)
 7. [Device Disappearance Handling](#7-device-disappearance-handling)
 8. [SR-IOV Virtual Function Handling](#8-sr-iov-virtual-function-handling)
 9. [RoCE State Monitoring](#9-roce-state-monitoring)
@@ -209,7 +209,9 @@ Emits: Raw STATE_CHANGE events → Platform Connector → MongoDB
 │  │                                                                          │  │
 │  │  NIC CORRELATION RULES:                                                  │  │
 │  │  • RepeatedNICDegradation: 3 non-fatal degradation events in 1h          │  │
+│  │    (same NIC + same NICPort)                                             │  │
 │  │  • RepeatedNICDriverError: 3 selected non-fatal syslog events in 1h      │  │
+│  │    (same node + same pattern)                                             │  │
 │  └──────────────────────────────────────────────────────────────────────────┘  │
 │                                                                                │
 └────────────────────────────────────────────────────────────────────────────────┘
@@ -1091,13 +1093,12 @@ The key question: **"Will the workload fail because of this?"**
 
 ### Fatal State Conditions (IsFatal = true)
 
-| Condition                     | Recommended Action               | Rationale                                                  |
-|-------------------------------|----------------------------------|------------------------------------------------------------|
-| **NIC state = DOWN**          | **RecommendedAction_REPLACE_VM** | No network connectivity, workloads will timeout            |
-| **Device disappeared**        | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure                    |
-| **phys_state = Disabled**     | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible                   |
-| **Uncabled port anomaly**     | **RecommendedAction_REPLACE_VM** | Card has fewer active ports than peers (homogeneity check) |
-| **Port flapping (3+ cycles)** | **RecommendedAction_REPLACE_VM** | Intermittent hardware/cable instability                    |
+| Condition                 | Recommended Action               | Rationale                                                  |
+|---------------------------|----------------------------------|------------------------------------------------------------|
+| **NIC state = DOWN**      | **RecommendedAction_REPLACE_VM** | No network connectivity, workloads will timeout            |
+| **Device disappeared**    | **RecommendedAction_REPLACE_VM** | Hardware failure, immediate job failure                    |
+| **phys_state = Disabled** | **RecommendedAction_REPLACE_VM** | Port disabled, no communication possible                   |
+| **Uncabled port anomaly** | **RecommendedAction_REPLACE_VM** | Card has fewer active ports than peers (homogeneity check) |
 
 ### Non-Fatal State Conditions (IsFatal = false)
 
@@ -1118,6 +1119,10 @@ The key question: **"Will the workload fail because of this?"**
 ### Driver/Firmware Logs
 
 For kernel log pattern details (fatal and non-fatal classifications, regex patterns, log line examples, and kernel source references), see [Syslog Detection & Correlation](./syslog-detection-correlation.md). This document focuses on link state detection; syslog monitoring is covered in its own dedicated document to keep each document focused on a single problem.
+
+### Repeated Non-Fatal Analyzer Escalation
+
+Repeated non-fatal NIC degradation and selected non-fatal NIC driver syslog signals are escalated by the Health Events Analyzer with `CONTACT_SUPPORT`, not immediate `REPLACE_VM`. Use `RepeatedNICDegradation` for repeated degradation on the same `NIC` + `NICPort`, and `RepeatedNICDriverError` for repeated selected syslog patterns on the same node.
 
 ### State Detection Paths
 

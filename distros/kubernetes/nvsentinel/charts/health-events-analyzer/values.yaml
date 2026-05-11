@@ -158,39 +158,45 @@ config: |
     '''
     {
       "$match": {
+        "healthevent.checkname": "SysLogsXIDError",
         "healthevent.ishealthy": false,
         "healthevent.nodename": "this.healthevent.nodename",
         "$expr": {
-          "$gt": [
+          "$and": [
+            {"$ne": [{"$arrayElemAt": ["$healthevent.errorcode", 0]}, "31"]},
             {
-              "$size": {
-                "$setIntersection": [
-                  {
-                    "$map": {
-                      "input": {
-                        "$filter": {
-                          "input": {"$ifNull": ["$healthevent.entitiesimpacted", []]},
-                          "cond": {"$eq": ["$$this.entitytype", "GPU_UUID"]}
+              "$gt": [
+                {
+                  "$size": {
+                    "$setIntersection": [
+                      {
+                        "$map": {
+                          "input": {
+                            "$filter": {
+                              "input": {"$ifNull": ["$healthevent.entitiesimpacted", []]},
+                              "cond": {"$eq": ["$$this.entitytype", "GPU_UUID"]}
+                            }
+                          },
+                          "in": "$$this.entityvalue"
                         }
                       },
-                      "in": "$$this.entityvalue"
-                    }
-                  },
-                  {
-                    "$map": {
-                      "input": {
-                        "$filter": {
-                          "input": "this.healthevent.entitiesimpacted",
-                          "cond": {"$eq": ["$$this.entitytype", "GPU_UUID"]}
+                      {
+                        "$map": {
+                          "input": {
+                            "$filter": {
+                              "input": "this.healthevent.entitiesimpacted",
+                              "cond": {"$eq": ["$$this.entitytype", "GPU_UUID"]}
+                            }
+                          },
+                          "in": "$$this.entityvalue"
                         }
-                      },
-                      "in": "$$this.entityvalue"
-                    }
+                      }
+                    ]
                   }
-                ]
-              }
-            },
-            0
+                },
+                0
+              ]
+            }
           ]
         }
       }
@@ -1801,6 +1807,7 @@ config: |
               {"$eq": ["this.healthevent.agent", "syslog-health-monitor"]},
               {"$eq": ["this.healthevent.checkname", "SysLogsNICDriverError"]},
               {"$eq": ["this.healthevent.isfatal", false]},
+              {"$eq": ["this.healthevent.ishealthy", false]},
               {
                 "$in": [
                   "this.healthevent.errorcode.0",
