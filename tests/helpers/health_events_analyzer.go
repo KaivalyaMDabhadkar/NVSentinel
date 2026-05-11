@@ -172,6 +172,28 @@ func clearHealthEventsAnalyzerConditions(ctx context.Context, t *testing.T, node
 
 	event.EntitiesImpacted = []EntityImpacted{}
 	SendHealthEvent(ctx, t, event)
+
+	event = NewHealthEvent(nodeName).
+		WithAgent(HEALTH_EVENTS_ANALYZER_AGENT).
+		WithHealthy(true).
+		WithFatal(false).
+		WithMessage("No health failures").
+		WithComponentClass("NIC").
+		WithCheckName("RepeatedNICDriverError")
+
+	event.EntitiesImpacted = []EntityImpacted{}
+	SendHealthEvent(ctx, t, event)
+
+	event = NewHealthEvent(nodeName).
+		WithAgent(HEALTH_EVENTS_ANALYZER_AGENT).
+		WithHealthy(true).
+		WithFatal(false).
+		WithMessage("No health failures").
+		WithComponentClass("NIC").
+		WithCheckName("RepeatedNICDegradation")
+
+	event.EntitiesImpacted = []EntityImpacted{}
+	SendHealthEvent(ctx, t, event)
 }
 
 func TriggerMultipleRemediationsCycle(ctx context.Context, t *testing.T, client klient.Client, nodeName string) {

@@ -16,6 +16,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
 	"strings"
@@ -299,6 +300,10 @@ func validateCounter(c *CounterConfig) error {
 
 	if err := applyCounterDefinition(c); err != nil {
 		return err
+	}
+
+	if math.IsNaN(c.Threshold) || math.IsInf(c.Threshold, 0) || c.Threshold < 0 {
+		return fmt.Errorf("threshold %v is invalid; must be a finite value >= 0", c.Threshold)
 	}
 
 	switch c.ThresholdType {
