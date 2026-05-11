@@ -3819,7 +3819,11 @@ syslog-health-monitor:
     - SysLogsXIDError
     - SysLogsSXIDError
     - SysLogsGPUFallenOff
+    # Tilt-only: production defaults intentionally leave SysLogsNICDriverError
+    # disabled. Enable it here so e2e tests can exercise NIC driver syslog detection.
     - SysLogsNICDriverError
+  # Tilt-only: production defaults intentionally ship no NIC driver patterns.
+  # Provide the test pattern config here without changing production defaults.
   nicDriverDetection:
     patterns:
       - name: cmd_exec_timeout

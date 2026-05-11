@@ -131,6 +131,28 @@ func TestValidateCounter_NamePathMismatch(t *testing.T) {
 	assert.Contains(t, err.Error(), "allowed path(s)")
 }
 
+func TestValidateCounter_RemovedNoisyCountersRejected(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"np_cnp_sent", "hw_counters/np_cnp_sent"},
+		{"req_cqe_error", "hw_counters/req_cqe_error"},
+		{"resp_cqe_flush_error", "hw_counters/resp_cqe_flush_error"},
+		{"rx_dropped", "statistics/rx_dropped"},
+		{"tx_fifo_errors", "statistics/tx_fifo_errors"},
+		{"collisions", "statistics/collisions"},
+	} {
+		c := validDeltaCounter()
+		c.Name = tc.name
+		c.Path = tc.path
+		err := validateCounter(c)
+		require.Error(t, err, "counter %q path %q should be rejected", tc.name, tc.path)
+		assert.Contains(t, err.Error(), "counter name")
+		assert.Contains(t, err.Error(), "not allowed")
+	}
+}
+
 func TestValidateCounter_PathPrefixOnlyRejected(t *testing.T) {
 	for _, prefix := range []string{"counters/", "hw_counters/", "statistics/"} {
 		c := validDeltaCounter()
@@ -151,9 +173,13 @@ func TestValidateCounter_AllowedCounterSelections(t *testing.T) {
 		{"symbol_error_fatal", "counters/symbol_error"},
 		{"port_xmit_wait", "counters/port_xmit_wait"},
 		{"rnr_nak_retry_err", "hw_counters/rnr_nak_retry_err"},
+		{"implied_nak_seq_err", "hw_counters/implied_nak_seq_err"},
+		{"out_of_sequence", "hw_counters/out_of_sequence"},
+		{"packet_seq_err", "hw_counters/packet_seq_err"},
 		{"req_transport_retries_exceeded", "hw_counters/req_transport_retries_exceeded"},
-		{"roce_slow_restart_trans", "hw_counters/roce_slow_restart_trans"},
+		{"roce_slow_restart", "hw_counters/roce_slow_restart"},
 		{"carrier_changes", "statistics/carrier_changes"},
+		{"rx_crc_errors", "statistics/rx_crc_errors"},
 		{"rx_missed_errors", "statistics/rx_missed_errors"},
 		{"tx_carrier_errors", "statistics/tx_carrier_errors"},
 	} {
