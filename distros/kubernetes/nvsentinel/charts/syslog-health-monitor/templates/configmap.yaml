@@ -20,7 +20,9 @@ metadata:
     {{- include "syslog-health-monitor.labels" . | nindent 4 }}
 data:
   config.toml: |
-    {{- range .Values.nicDriverDetection.patterns }}
+    [nicDriverDetection]
+    {{- $patterns := (default (list) ((default dict .Values.nicDriverDetection).patterns)) }}
+    {{- range $patterns }}
 
     [[nicDriverDetection.patterns]]
     name = {{ .name | quote }}

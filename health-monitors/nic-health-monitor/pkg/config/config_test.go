@@ -23,24 +23,24 @@ import (
 
 func validDeltaCounter() CounterConfig {
 	return CounterConfig{
-		Name:              "link_downed",
-		Path:              "counters/link_downed",
-		Enabled:           true,
-		ThresholdType:     "delta",
-		Threshold:         0,
-		Description: "Port Training State Machine failed",
+		Name:          "link_downed",
+		Path:          "counters/link_downed",
+		Enabled:       true,
+		ThresholdType: "delta",
+		Threshold:     0,
+		Description:   "Port Training State Machine failed",
 	}
 }
 
 func validVelocityCounter() CounterConfig {
 	return CounterConfig{
-		Name:              "symbol_error",
-		Path:              "counters/symbol_error",
-		Enabled:           true,
-		ThresholdType:     "velocity",
-		VelocityUnit:      "second",
-		Threshold:         10.0,
-		Description: "PHY bit errors before FEC",
+		Name:          "symbol_error",
+		Path:          "counters/symbol_error",
+		Enabled:       true,
+		ThresholdType: "velocity",
+		VelocityUnit:  "second",
+		Threshold:     10.0,
+		Description:   "PHY bit errors before FEC",
 	}
 }
 
@@ -102,13 +102,33 @@ func TestValidateCounter_EmptyPath(t *testing.T) {
 	assert.Contains(t, err.Error(), "path must not be empty")
 }
 
-func TestValidateCounter_UnsupportedPathPrefix(t *testing.T) {
+func TestValidateCounter_UnsupportedPath(t *testing.T) {
 	c := validDeltaCounter()
 	c.Path = "ports/1/counters/link_downed"
 	err := validateCounter(c)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "path")
-	assert.Contains(t, err.Error(), "must start with")
+	assert.Contains(t, err.Error(), "not allowed")
+}
+
+func TestValidateCounter_UnknownCounterName(t *testing.T) {
+	c := validDeltaCounter()
+	c.Name = "custom_vendor_error"
+	c.Path = "hw_counters/local_ack_timeout_err"
+	err := validateCounter(c)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "counter name")
+	assert.Contains(t, err.Error(), "not allowed")
+}
+
+func TestValidateCounter_NamePathMismatch(t *testing.T) {
+	c := validDeltaCounter()
+	c.Name = "link_downed"
+	c.Path = "counters/symbol_error"
+	err := validateCounter(c)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path")
+	assert.Contains(t, err.Error(), "allowed path(s)")
 }
 
 func TestValidateCounter_PathPrefixOnlyRejected(t *testing.T) {
@@ -121,16 +141,26 @@ func TestValidateCounter_PathPrefixOnlyRejected(t *testing.T) {
 	}
 }
 
-func TestValidateCounter_SupportedPathPrefixes(t *testing.T) {
-	for _, path := range []string{
-		"counters/link_downed",
-		"hw_counters/rnr_nak_retry_err",
-		"statistics/carrier_changes",
-		"statistics/rx_missed_errors",
+func TestValidateCounter_AllowedCounterSelections(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"link_downed", "counters/link_downed"},
+		{"symbol_error", "counters/symbol_error"},
+		{"symbol_error_fatal", "counters/symbol_error"},
+		{"port_xmit_wait", "counters/port_xmit_wait"},
+		{"rnr_nak_retry_err", "hw_counters/rnr_nak_retry_err"},
+		{"req_transport_retries_exceeded", "hw_counters/req_transport_retries_exceeded"},
+		{"roce_slow_restart_trans", "hw_counters/roce_slow_restart_trans"},
+		{"carrier_changes", "statistics/carrier_changes"},
+		{"rx_missed_errors", "statistics/rx_missed_errors"},
+		{"tx_carrier_errors", "statistics/tx_carrier_errors"},
 	} {
 		c := validDeltaCounter()
-		c.Path = path
-		assert.NoError(t, validateCounter(c), "path %q should be valid", path)
+		c.Name = tc.name
+		c.Path = tc.path
+		assert.NoError(t, validateCounter(c), "counter %q path %q should be valid", tc.name, tc.path)
 	}
 }
 

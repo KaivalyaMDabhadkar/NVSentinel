@@ -68,10 +68,8 @@ func newWithDeps(
 // ProcessLine evaluates the kernel log message against configured patterns.
 // First match wins. Returns nil when no pattern matches.
 //
-// All shipped default patterns include an mlx5-specific prefix in the regex
-// (mlx5_core, mlx5_cmd_out_err, NETDEV WATCHDOG.*mlx5_core, etc.), so they
-// cannot match other devices. The BDF lookup that follows is best-effort
-// entity enrichment only; it does not gate event emission.
+// BDF lookup is best-effort entity enrichment only; it does not gate event
+// emission because some mlx5 log lines do not include a PCI address.
 func (h *NICDriverHandler) ProcessLine(message string) (*pb.HealthEvents, error) {
 	for i := range h.patterns {
 		p := &h.patterns[i]

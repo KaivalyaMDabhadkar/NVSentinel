@@ -3820,6 +3820,71 @@ syslog-health-monitor:
     - SysLogsSXIDError
     - SysLogsGPUFallenOff
     - SysLogsNICDriverError
+  nicDriverDetection:
+    patterns:
+      - name: cmd_exec_timeout
+        regex: 'mlx5_core.*timeout\. Will cause a leak of a command resource'
+        enabled: true
+        isFatal: true
+        recommendedAction: REPLACE_VM
+        processingStrategy: EXECUTE_REMEDIATION
+        description: "Firmware/driver command timeout - control plane broken"
+
+      - name: health_poll_failed
+        regex: "mlx5_core.*device's health compromised.*reached miss count"
+        enabled: true
+        isFatal: true
+        recommendedAction: REPLACE_VM
+        processingStrategy: EXECUTE_REMEDIATION
+        description: "Firmware heartbeat lost - device health compromised"
+
+      - name: unrecoverable_err
+        regex: 'mlx5_core.*unrecoverable hardware error'
+        enabled: true
+        isFatal: true
+        recommendedAction: REPLACE_VM
+        processingStrategy: EXECUTE_REMEDIATION
+        description: "Unrecoverable hardware error (syndrome 0x8)"
+
+      - name: netdev_watchdog
+        regex: 'NETDEV WATCHDOG.*mlx5_core.*transmit queue.*timed out'
+        enabled: true
+        isFatal: false
+        recommendedAction: NONE
+        processingStrategy: EXECUTE_REMEDIATION
+        description: "TX queue timeout - mlx5 driver has auto-recovery"
+
+      - name: pci_power_insufficient
+        regex: 'mlx5_core.*Detected insufficient power on the PCIe slot'
+        enabled: true
+        isFatal: false
+        recommendedAction: NONE
+        processingStrategy: EXECUTE_REMEDIATION
+        description: "PCIe slot power negotiation issue"
+
+      - name: port_module_high_temp
+        regex: 'mlx5_core.*Port module event.*High Temperature'
+        enabled: true
+        isFatal: false
+        recommendedAction: NONE
+        processingStrategy: EXECUTE_REMEDIATION
+        description: "Port module high temperature warning"
+
+      - name: access_reg_failed
+        regex: 'mlx5_cmd_out_err.*ACCESS_REG.*failed'
+        enabled: true
+        isFatal: false
+        recommendedAction: NONE
+        processingStrategy: EXECUTE_REMEDIATION
+        description: "ACCESS_REG command failed - restricted PF access noise"
+
+      - name: module_unplugged
+        regex: 'mlx5_core.*Port module event.*Cable unplugged'
+        enabled: true
+        isFatal: false
+        recommendedAction: NONE
+        processingStrategy: EXECUTE_REMEDIATION
+        description: "SFP/transceiver cable unplugged"
 
 csp-health-monitor:
   logLevel: debug

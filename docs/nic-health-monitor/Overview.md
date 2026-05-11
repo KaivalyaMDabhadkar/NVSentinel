@@ -183,7 +183,7 @@ This monitor uses a binary severity model based on **workload impact**:
 ## Key Capabilities
 
 1. **Deterministic failure thresholds** from IBTA specifications, cloud provider heuristics (Azure, AWS), and vendor documentation
-2. **Fully configurable counters and thresholds** - operators can define which counters to monitor, set custom thresholds (delta or velocity-based), and configure fatal/non-fatal severity per counter
+2. **Allowlisted counter configuration** - operators can choose from NIC-relevant counters, set custom thresholds (delta or velocity-based), and configure fatal/non-fatal severity per counter
 3. **Rate-based degradation detection** via centralized Health Events Analyzer rules
 4. **Pre-failure prediction** by detecting BER climbing before FEC exhaustion (IBTA 10E-12 BER threshold: 120 errors/hour)
 5. **Kernel log monitoring** integrated into the existing syslog-health-monitor with NIC-specific check patterns
@@ -208,7 +208,7 @@ This monitor uses a binary severity model based on **workload impact**:
 |-------------------------|------------------------------------------------------------------------------------------------------------------------------------|----------------------------------|
 | **Degradation Monitor** | `link_downed` (Delta > 0), `excessive_buffer_overrun_errors` (any), `local_link_integrity_errors` (any), `rnr_nak_retry_err` (any) | **RecommendedAction_REPLACE_VM** |
 
-> **Note**: All counter thresholds and severity levels are configurable. See [Link Counter Detection](./link-counter-detection.md#10-configuration) for customization options.
+> **Note**: Counter thresholds and severity levels are configurable for the hardcoded allowed counter set. See [Link Counter Detection](./link-counter-detection.md#10-configuration) for customization options.
 
 ### Syslog Detection (Fatal & Non-Fatal)
 

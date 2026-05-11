@@ -909,8 +909,9 @@ NICs and Ports are modeled as separate entity types to enable precise fault loca
 
 ## 10. Configuration
 
-The counter monitoring system is fully configurable, allowing operators to:
-- Define which counters to monitor
+The counter monitoring system is configurable within a hardcoded allowlist of NIC error/degradation counters, allowing operators to:
+
+- Define which allowed counters to monitor
 - Configure threshold types (delta-based or velocity-based)
 - Set fatal/non-fatal severity levels per counter
 - Override default thresholds for specific environments
@@ -923,10 +924,10 @@ counterDetection:
   # Enable/disable counter monitoring
   enabled: true
 
-  # Counter definitions - fully configurable
+  # Counter definitions - configurable for allowed counters only
   # Each counter can specify:
-  #   - name:           Counter identifier (used in events)
-  #   - path:           Sysfs path relative to device (supports standard and hw_counters)
+  #   - name:           Allowed counter identifier (used in events)
+  #   - path:           Matching allowed sysfs path relative to device/interface
   #   - enabled:        Enable/disable this counter (default: true)
   #   - isFatal:        Whether threshold breach triggers Fatal event (default: false)
   #   - thresholdType:  "delta" (absolute change) or "velocity" (rate per time unit)
@@ -946,7 +947,7 @@ counterDetection:
 
 ### 10.2 Default Counter Configuration
 
-The following counters are monitored by default. Operators can override any setting or add custom counters.
+The following counters are monitored by default. Operators can override any setting or add additional counters from the allowed set.
 
 ```yaml
 counterDetection:
@@ -1082,7 +1083,7 @@ counterDetection:
     
     # Interface Level
     - name: carrier_changes
-      path: /sys/class/net/{interface}/statistics/carrier_changes
+      path: statistics/carrier_changes
       enabled: true
       isFatal: false
       thresholdType: delta
@@ -1090,36 +1091,43 @@ counterDetection:
       description: "Link instability - carrier state changes"
 ```
 
-### 10.3 Custom Counter Example
+### 10.3 Allowed Counter Customization
 
-Operators can add custom counters or override defaults:
+The monitor rejects arbitrary counter names and paths at startup. Operators can add entries from the allowlist or override thresholds/severity for existing entries:
 
 ```yaml
 counterDetection:
   counters:
-    # Override: Make symbol_error fatal for strict environments
-    - name: symbol_error
+    # Override: Make the documented fatal symbol_error profile more sensitive.
+    - name: symbol_error_fatal
       path: counters/symbol_error
       enabled: true
-      isFatal: true                    # Override: make fatal
+      isFatal: true
       thresholdType: velocity
       threshold: 120.0                 # IBTA spec: 120/hour
-      velocityUnit: hour               # Changed from second
+      velocityUnit: hour
       description: "Symbol errors exceed IBTA BER threshold"
     
-    # Custom: Add vendor-specific counter
-    - name: custom_vendor_error
-      path: hw_counters/vendor_specific_err
+    # Add: monitor an allowed Linux interface-level error counter.
+    - name: rx_missed_errors
+      path: statistics/rx_missed_errors
       enabled: true
       isFatal: false
-      thresholdType: delta
-      threshold: 100
-      description: "Vendor-specific error counter"
+      thresholdType: velocity
+      threshold: 10.0
+      velocityUnit: second
+      description: "RX packets missed due to receive-side capacity pressure"
     
     # Disable: Turn off a default counter
     - name: port_xmit_wait
       enabled: false
 ```
+
+Allowed counter selections are hardcoded in `pkg/config/config.go`. They include:
+
+- Standard IB error/degradation counters under `counters/`, such as `symbol_error`, `link_error_recovery`, `link_downed`, `port_rcv_errors`, `port_xmit_discards`, and `port_xmit_wait`.
+- mlx5/RDMA hardware error, retry, and RoCE congestion counters under `hw_counters/`, such as `rnr_nak_retry_err`, `local_ack_timeout_err`, `req_transport_retries_exceeded`, `out_of_sequence`, and `roce_slow_restart`.
+- Linux interface-level error counters under `statistics/`, such as `carrier_changes`, `rx_errors`, `rx_crc_errors`, `rx_missed_errors`, `tx_errors`, and `tx_carrier_errors`.
 
 ### 10.4 Threshold Processing Algorithm
 
@@ -1218,6 +1226,7 @@ The monitor validates configuration at startup:
 
 | Validation            | Requirement                           | Action on Failure         |
 |-----------------------|---------------------------------------|---------------------------|
+| Counter selection     | Allowed `name`/`path` pair            | Reject configuration      |
 | Counter path exists   | Path must be readable in sysfs        | Log warning, skip counter |
 | Threshold is positive | threshold >= 0                        | Reject configuration      |
 | velocityUnit valid    | Must be `second`, `minute`, or `hour` | Reject configuration      |

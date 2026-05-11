@@ -17,6 +17,7 @@ package config
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -34,10 +35,69 @@ const (
 	recommendedActionMarker = "Recommended Action="
 )
 
-var supportedCounterPathPrefixes = []string{
-	"counters/",
-	"hw_counters/",
-	"statistics/",
+var allowedCounterPathsByName = map[string][]string{
+	// /sys/class/infiniband/<dev>/ports/<port>/counters/
+	"excessive_buffer_overrun_errors": {"counters/excessive_buffer_overrun_errors"},
+	"link_downed":                     {"counters/link_downed"},
+	"link_error_recovery":             {"counters/link_error_recovery"},
+	"local_link_integrity_errors":     {"counters/local_link_integrity_errors"},
+	"port_rcv_constraint_errors":      {"counters/port_rcv_constraint_errors"},
+	"port_rcv_discards":               {"counters/port_rcv_discards"},
+	"port_rcv_errors":                 {"counters/port_rcv_errors"},
+	"port_rcv_remote_physical_errors": {"counters/port_rcv_remote_physical_errors"},
+	"port_rcv_switch_relay_errors":    {"counters/port_rcv_switch_relay_errors"},
+	"port_xmit_constraint_errors":     {"counters/port_xmit_constraint_errors"},
+	"port_xmit_discards":              {"counters/port_xmit_discards"},
+	"port_xmit_wait":                  {"counters/port_xmit_wait"},
+	"symbol_error":                    {"counters/symbol_error"},
+	"symbol_error_fatal":              {"counters/symbol_error"},
+
+	// /sys/class/infiniband/<dev>/ports/<port>/hw_counters/
+	"duplicate_request":              {"hw_counters/duplicate_request"},
+	"implied_nak_seq_err":            {"hw_counters/implied_nak_seq_err"},
+	"local_ack_timeout_err":          {"hw_counters/local_ack_timeout_err"},
+	"out_of_sequence":                {"hw_counters/out_of_sequence"},
+	"packet_seq_err":                 {"hw_counters/packet_seq_err"},
+	"req_cqe_error":                  {"hw_counters/req_cqe_error"},
+	"req_cqe_flush_error":            {"hw_counters/req_cqe_flush_error"},
+	"req_remote_access_errors":       {"hw_counters/req_remote_access_errors"},
+	"req_remote_invalid_request":     {"hw_counters/req_remote_invalid_request"},
+	"req_rnr_retries_exceeded":       {"hw_counters/req_rnr_retries_exceeded"},
+	"req_transport_retries_exceeded": {"hw_counters/req_transport_retries_exceeded"},
+	"resp_cqe_error":                 {"hw_counters/resp_cqe_error"},
+	"resp_cqe_flush_error":           {"hw_counters/resp_cqe_flush_error"},
+	"resp_local_length_error":        {"hw_counters/resp_local_length_error"},
+	"resp_remote_access_errors":      {"hw_counters/resp_remote_access_errors"},
+	"rnr_nak_retry_err":              {"hw_counters/rnr_nak_retry_err"},
+	"roce_adp_retrans":               {"hw_counters/roce_adp_retrans"},
+	"roce_adp_retrans_to":            {"hw_counters/roce_adp_retrans_to"},
+	"roce_slow_restart":              {"hw_counters/roce_slow_restart"},
+	"roce_slow_restart_cnps":         {"hw_counters/roce_slow_restart_cnps"},
+	"roce_slow_restart_trans":        {"hw_counters/roce_slow_restart_trans"},
+	"rp_cnp_handled":                 {"hw_counters/rp_cnp_handled"},
+	"rp_cnp_ignored":                 {"hw_counters/rp_cnp_ignored"},
+	"np_cnp_sent":                    {"hw_counters/np_cnp_sent"},
+	"np_ecn_marked_roce_packets":     {"hw_counters/np_ecn_marked_roce_packets"},
+
+	// /sys/class/net/<iface>/statistics/
+	"carrier_changes":     {"statistics/carrier_changes"},
+	"collisions":          {"statistics/collisions"},
+	"rx_crc_errors":       {"statistics/rx_crc_errors"},
+	"rx_dropped":          {"statistics/rx_dropped"},
+	"rx_errors":           {"statistics/rx_errors"},
+	"rx_fifo_errors":      {"statistics/rx_fifo_errors"},
+	"rx_frame_errors":     {"statistics/rx_frame_errors"},
+	"rx_length_errors":    {"statistics/rx_length_errors"},
+	"rx_missed_errors":    {"statistics/rx_missed_errors"},
+	"rx_nohandler":        {"statistics/rx_nohandler"},
+	"rx_over_errors":      {"statistics/rx_over_errors"},
+	"tx_aborted_errors":   {"statistics/tx_aborted_errors"},
+	"tx_carrier_errors":   {"statistics/tx_carrier_errors"},
+	"tx_dropped":          {"statistics/tx_dropped"},
+	"tx_errors":           {"statistics/tx_errors"},
+	"tx_fifo_errors":      {"statistics/tx_fifo_errors"},
+	"tx_heartbeat_errors": {"statistics/tx_heartbeat_errors"},
+	"tx_window_errors":    {"statistics/tx_window_errors"},
 }
 
 // Config represents the NIC Health Monitor configuration loaded from TOML.
@@ -167,8 +227,8 @@ func validateCounter(c CounterConfig) error {
 		return fmt.Errorf("path must not be empty")
 	}
 
-	if err := validateCounterPath(c.Path); err != nil {
-		return fmt.Errorf("path: %w", err)
+	if err := validateCounterSelection(c.Name, c.Path); err != nil {
+		return err
 	}
 
 	switch c.ThresholdType {
@@ -189,17 +249,51 @@ func validateCounter(c CounterConfig) error {
 	return nil
 }
 
-func validateCounterPath(path string) error {
-	for _, prefix := range supportedCounterPathPrefixes {
-		if strings.HasPrefix(path, prefix) && len(path) > len(prefix) {
-			return nil
-		}
+func validateCounterSelection(name, path string) error {
+	allowedPaths, ok := allowedCounterPathsByName[name]
+	if !ok {
+		return fmt.Errorf(
+			"counter name %q is not allowed; allowed counters: %s",
+			name, strings.Join(allowedCounterNames(), ", "),
+		)
+	}
+
+	if containsString(allowedPaths, path) {
+		return nil
 	}
 
 	return fmt.Errorf(
-		"%q is invalid; must start with one of: %s",
-		path, strings.Join(supportedCounterPathPrefixes, ", "),
+		"path %q is not allowed for counter %q; allowed path(s): %s",
+		path, name, strings.Join(sortedStrings(allowedPaths), ", "),
 	)
+}
+
+func allowedCounterNames() []string {
+	names := make([]string, 0, len(allowedCounterPathsByName))
+	for name := range allowedCounterPathsByName {
+		names = append(names, name)
+	}
+
+	sort.Strings(names)
+
+	return names
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+
+	return false
+}
+
+func sortedStrings(values []string) []string {
+	out := append([]string(nil), values...)
+	sort.Strings(out)
+
+	return out
 }
 
 func validateDescription(desc string) error {

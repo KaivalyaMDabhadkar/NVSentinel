@@ -63,6 +63,32 @@ sysClassInfinibandPath: "/nvsentinel/sys/class/infiniband"
 # Counter detection configuration
 counterDetection:
   enabled: true
+  # Counter entries are validated against a hardcoded allowlist in the monitor.
+  # Operators may tune thresholds/severity or add entries from the allowed set,
+  # but arbitrary sysfs counters are rejected at startup.
+  #
+  # Allowed counters:
+  #   counters/: excessive_buffer_overrun_errors, link_downed,
+  #     link_error_recovery, local_link_integrity_errors,
+  #     port_rcv_constraint_errors, port_rcv_discards, port_rcv_errors,
+  #     port_rcv_remote_physical_errors, port_rcv_switch_relay_errors,
+  #     port_xmit_constraint_errors, port_xmit_discards, port_xmit_wait,
+  #     symbol_error, symbol_error_fatal
+  #   hw_counters/: duplicate_request, implied_nak_seq_err,
+  #     local_ack_timeout_err, out_of_sequence, packet_seq_err,
+  #     req_cqe_error, req_cqe_flush_error, req_remote_access_errors,
+  #     req_remote_invalid_request, req_rnr_retries_exceeded,
+  #     req_transport_retries_exceeded, resp_cqe_error,
+  #     resp_cqe_flush_error, resp_local_length_error,
+  #     resp_remote_access_errors, rnr_nak_retry_err, roce_adp_retrans,
+  #     roce_adp_retrans_to, roce_slow_restart, roce_slow_restart_cnps,
+  #     roce_slow_restart_trans, rp_cnp_handled, rp_cnp_ignored,
+  #     np_cnp_sent, np_ecn_marked_roce_packets
+  #   statistics/: carrier_changes, collisions, rx_crc_errors, rx_dropped,
+  #     rx_errors, rx_fifo_errors, rx_frame_errors, rx_length_errors,
+  #     rx_missed_errors, rx_nohandler, rx_over_errors, tx_aborted_errors,
+  #     tx_carrier_errors, tx_dropped, tx_errors, tx_fifo_errors,
+  #     tx_heartbeat_errors, tx_window_errors
   counters:
     #--------------------------------------------------------------------------
     # FATAL COUNTERS (isFatal=true → RecommendedAction=REPLACE_VM)
