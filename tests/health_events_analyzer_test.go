@@ -163,7 +163,7 @@ func TestRepeatedNICRules_RepeatedNonFatalSignals_TriggersExpectedEscalations(t 
 
 	feature.Assess("Repeated selected non-fatal NIC driver errors trigger analyzer escalation", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
-		assert.NoError(t, err, "failed to create client")
+		require.NoError(t, err, "failed to create client")
 
 		for range 3 {
 			helpers.SendHealthEvent(ctx, t, helpers.NewHealthEvent(testNodeName).
@@ -204,7 +204,7 @@ func TestRepeatedNICRules_RepeatedNonFatalSignals_TriggersExpectedEscalations(t 
 
 	feature.Assess("Repeated non-fatal NIC degradation on same port triggers analyzer escalation", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
-		assert.NoError(t, err, "failed to create client")
+		require.NoError(t, err, "failed to create client")
 
 		port1Entities := []helpers.EntityImpacted{
 			{EntityType: "NIC", EntityValue: "mlx5_0"},
