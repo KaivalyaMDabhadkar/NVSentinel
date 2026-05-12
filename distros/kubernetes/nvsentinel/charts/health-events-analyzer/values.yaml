@@ -138,6 +138,9 @@ config: |
       }
     }
     ''',
+      # Gate current event: only XID events carry GPU_UUID entities; without
+      # this guard, non-GPU events (e.g. NIC diagnostics) would reach the
+      # $setIntersection stage below and hit "$size on null".
       '''
     {
       "$match": {
@@ -155,6 +158,8 @@ config: |
       }
     }
     ''',
+    # Candidate docs must also be XID events so non-XID unhealthy events on
+    # the same node are not merged into GPU burst counts.
     '''
     {
       "$match": {

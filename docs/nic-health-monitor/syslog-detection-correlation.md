@@ -774,7 +774,7 @@ The Health Events Analyzer should only add value where the raw monitors do not a
 
 > **Design Note**: The count threshold of 3 is externally grounded by the Linux mlx5 health-poll miss threshold (`MAX_MISSES = 3`) and gpud's InfiniBand flap threshold of 3 reverts-to-active. The 1-hour window is an NVSentinel operational choice to catch clustered recurrence while avoiding stale daily maintenance or boot noise.
 
-### B.1 Final Rules
+### B.1 Minimal Repeated NIC Escalation Rules
 
 `RepeatedNICDriverError`:
 

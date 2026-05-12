@@ -216,13 +216,13 @@ func TestRepeatedNICRules_RepeatedNonFatalSignals_TriggersExpectedEscalations(t 
 		}
 
 		for range 2 {
-			sendNICDegradationEvent(ctx, t, testNodeName, port1Entities)
+			helpers.SendNICDegradationEvent(ctx, t, testNodeName, port1Entities)
 		}
 
-		sendNICDegradationEvent(ctx, t, testNodeName, port2Entities)
+		helpers.SendNICDegradationEvent(ctx, t, testNodeName, port2Entities)
 		helpers.EnsureNodeConditionNotPresent(ctx, t, client, testNodeName, "RepeatedNICDegradation")
 
-		sendNICDegradationEvent(ctx, t, testNodeName, port1Entities)
+		helpers.SendNICDegradationEvent(ctx, t, testNodeName, port1Entities)
 		helpers.WaitForNodeConditionWithCheckName(ctx, t, client, testNodeName, "RepeatedNICDegradation",
 			"NIC:mlx5_0;NICPort:1;Recommended Action=CONTACT_SUPPORT;",
 			"RepeatedNICDegradationIsNotHealthy", v1.ConditionTrue)
@@ -231,7 +231,7 @@ func TestRepeatedNICRules_RepeatedNonFatalSignals_TriggersExpectedEscalations(t 
 	})
 
 	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
-		sendNICDriverHealthyEvent(ctx, t, testNodeName)
+		helpers.SendNICDriverHealthyEvent(ctx, t, testNodeName)
 		for _, entities := range [][]helpers.EntityImpacted{
 			{
 				{EntityType: "NIC", EntityValue: "mlx5_0"},
@@ -242,86 +242,13 @@ func TestRepeatedNICRules_RepeatedNonFatalSignals_TriggersExpectedEscalations(t 
 				{EntityType: "NICPort", EntityValue: "2"},
 			},
 		} {
-			sendNICDegradationHealthyEvent(ctx, t, testNodeName, entities)
+			helpers.SendNICDegradationHealthyEvent(ctx, t, testNodeName, entities)
 		}
 
 		return helpers.TeardownHealthEventsAnalyzer(ctx, t, c, testNodeName, testCtx.ConfigMapBackup)
 	})
 
 	testEnv.Test(t, feature.Feature())
-}
-
-func sendNICDegradationEvent(
-	ctx context.Context,
-	t *testing.T,
-	nodeName string,
-	entities []helpers.EntityImpacted,
-) {
-	t.Helper()
-
-	nic, port := nicAndPortFromEntities(entities)
-
-	helpers.SendHealthEvent(ctx, t, helpers.NewHealthEvent(nodeName).
-		WithAgent("nic-health-monitor").
-		WithCheckName("InfiniBandDegradationCheck").
-		WithComponentClass("NIC").
-		WithEntitiesImpacted(entities).
-		WithFatal(false).
-		WithHealthy(false).
-		WithMessage(fmt.Sprintf("Port %s port %s: symbol_error - PHY bit errors before FEC (value=11, delta=11, rate=11.00/sec)", nic, port)).
-		WithRecommendedAction(int(pb.RecommendedAction_NONE)).
-		WithProcessingStrategy(int(pb.ProcessingStrategy_EXECUTE_REMEDIATION)))
-}
-
-func sendNICDriverHealthyEvent(ctx context.Context, t *testing.T, nodeName string) {
-	t.Helper()
-
-	helpers.SendHealthEvent(ctx, t, helpers.NewHealthEvent(nodeName).
-		WithAgent(helpers.SYSLOG_HEALTH_MONITOR_AGENT).
-		WithCheckName("SysLogsNICDriverError").
-		WithComponentClass("NIC").
-		WithEntitiesImpacted([]helpers.EntityImpacted{}).
-		WithFatal(false).
-		WithHealthy(true).
-		WithMessage("No health failures").
-		WithRecommendedAction(int(pb.RecommendedAction_NONE)).
-		WithProcessingStrategy(int(pb.ProcessingStrategy_EXECUTE_REMEDIATION)))
-}
-
-func sendNICDegradationHealthyEvent(
-	ctx context.Context,
-	t *testing.T,
-	nodeName string,
-	entities []helpers.EntityImpacted,
-) {
-	t.Helper()
-
-	helpers.SendHealthEvent(ctx, t, helpers.NewHealthEvent(nodeName).
-		WithAgent("nic-health-monitor").
-		WithCheckName("InfiniBandDegradationCheck").
-		WithComponentClass("NIC").
-		WithEntitiesImpacted(entities).
-		WithFatal(false).
-		WithHealthy(true).
-		WithMessage("No health failures").
-		WithRecommendedAction(int(pb.RecommendedAction_NONE)).
-		WithProcessingStrategy(int(pb.ProcessingStrategy_EXECUTE_REMEDIATION)))
-}
-
-func nicAndPortFromEntities(entities []helpers.EntityImpacted) (string, string) {
-	nic := "mlx5_0"
-	port := "1"
-
-	for _, entity := range entities {
-		switch entity.EntityType {
-		case "NIC":
-			nic = entity.EntityValue
-		case "NICPort":
-			port = entity.EntityValue
-		}
-	}
-
-	return nic, port
 }
 
 func TestRepeatedXIDOnSameGPU(t *testing.T) {
