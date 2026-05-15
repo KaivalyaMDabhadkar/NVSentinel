@@ -153,6 +153,14 @@ func TearDownNICHealthMonitor(ctx context.Context, t *testing.T,
 		t.Logf("Clearing stale NIC conditions from node %s", state.NodeName)
 		clearNICConditions(ctx, t, state.NodeName)
 
+		t.Logf("Waiting for node %s to be uncordoned after NIC condition cleanup", state.NodeName)
+		AssertQuarantineState(ctx, t, client, state.NodeName, QuarantineAssertion{
+			ExpectCordoned: false,
+			AnnotationChecks: []AnnotationCheck{
+				{Key: QuarantineHealthEventAnnotationKey, ShouldExist: false},
+			},
+		})
+
 		t.Logf("Removing ManagedByNVSentinel label from node %s", state.NodeName)
 
 		if err := RemoveNodeManagedByNVSentinelLabel(ctx, client, state.NodeName); err != nil {
