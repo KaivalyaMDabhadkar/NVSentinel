@@ -759,6 +759,8 @@ func (r *Reconciler) executeUpdateStatus(ctx context.Context, healthEvent model.
 			attribute.String("node_drainer.error.type", "label_update_error"),
 			attribute.String("node_drainer.error.message", err.Error()),
 		)
+
+		return fmt.Errorf("failed to update node %s label to %s: %w", nodeName, nodeDrainLabelValue, err)
 	}
 
 	return r.updateNodeUserPodsEvictedStatus(ctx, database, event, podsEvictionStatus,
