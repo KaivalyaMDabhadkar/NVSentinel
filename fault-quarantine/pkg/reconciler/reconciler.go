@@ -29,6 +29,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	corev1 "k8s.io/api/core/v1"
 
+	annotationutil "github.com/nvidia/nvsentinel/commons/pkg/annotation"
 	"github.com/nvidia/nvsentinel/commons/pkg/statemanager"
 	"github.com/nvidia/nvsentinel/commons/pkg/tracing"
 	"github.com/nvidia/nvsentinel/data-models/pkg/model"
@@ -600,8 +601,7 @@ func (r *Reconciler) hasExistingQuarantine(ctx context.Context, nodeName string)
 }
 
 func isEmptyHealthEventAnnotation(annotationVal string) bool {
-	trimmed := strings.TrimSpace(annotationVal)
-	return trimmed == "" || trimmed == "[]"
+	return annotationutil.IsEmptyValue(annotationVal)
 }
 
 func (r *Reconciler) sourceDocIDsFromAnnotation(ctx context.Context, nodeName string) []string {

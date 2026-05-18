@@ -20,6 +20,7 @@ import (
 	"strings"
 	"testing"
 
+	annotationutil "github.com/nvidia/nvsentinel/commons/pkg/annotation"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
@@ -441,8 +442,7 @@ func checkAnnotationStates(t *testing.T, node *v1.Node, nodeName string, checks 
 }
 
 func isEmptyAnnotationValue(value string) bool {
-	trimmed := strings.TrimSpace(value)
-	return trimmed == "" || trimmed == "[]"
+	return annotationutil.IsEmptyValue(value)
 }
 
 func SetCircuitBreakerState(ctx context.Context, t *testing.T, c *envconf.Config, state, cursorMode string) {

@@ -482,7 +482,7 @@ func nicQuarantineMetadataCleared(t *testing.T, node *corev1.Node) bool {
 			return false
 		}
 
-		if value := node.Annotations[QuarantineHealthEventIsCordonedAnnotationKey]; value != "" {
+		if value := node.Annotations[QuarantineHealthEventIsCordonedAnnotationKey]; !isEmptyAnnotationValue(value) {
 			t.Logf("node %s still has quarantine cordon annotation: %s", node.Name, value)
 			return false
 		}
