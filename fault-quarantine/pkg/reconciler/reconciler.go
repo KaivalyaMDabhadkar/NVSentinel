@@ -596,7 +596,12 @@ func (r *Reconciler) hasExistingQuarantine(ctx context.Context, nodeName string)
 
 	annotationVal, exists := annotations[common.QuarantineHealthEventAnnotationKey]
 
-	return annotations, exists && annotationVal != ""
+	return annotations, exists && !isEmptyHealthEventAnnotation(annotationVal)
+}
+
+func isEmptyHealthEventAnnotation(annotationVal string) bool {
+	trimmed := strings.TrimSpace(annotationVal)
+	return trimmed == "" || trimmed == "[]"
 }
 
 func (r *Reconciler) sourceDocIDsFromAnnotation(ctx context.Context, nodeName string) []string {

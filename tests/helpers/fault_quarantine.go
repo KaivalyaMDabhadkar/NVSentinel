@@ -40,6 +40,9 @@ const (
 // QuarantineHealthEventAnnotationKey is the annotation key for health events set by fault-quarantine.
 const QuarantineHealthEventAnnotationKey = "quarantineHealthEvent"
 
+// QuarantineHealthEventIsCordonedAnnotationKey records that fault-quarantine cordoned the node.
+const QuarantineHealthEventIsCordonedAnnotationKey = "quarantineHealthEventIsCordoned"
+
 type faultQuarantineConfig struct {
 	LabelPrefix    string               `toml:"label-prefix"`
 	CircuitBreaker circuitBreakerConfig `toml:"circuitBreaker"`
@@ -337,13 +340,13 @@ func checkAnnotation(t *testing.T, nodeName string, check AnnotationCheck, annot
 
 	if check.Pattern == "" {
 		// Just check for annotation existence
-		if check.ShouldExist && annotationValue == "" {
+		if check.ShouldExist && isEmptyAnnotationValue(annotationValue) {
 			t.Logf("waiting for annotation %q on node %s", check.Key, nodeName)
 
 			return false
 		}
 
-		if !check.ShouldExist && annotationValue != "" {
+		if !check.ShouldExist && !isEmptyAnnotationValue(annotationValue) {
 			t.Logf("annotation %q should NOT exist on node %s (current: %s)",
 				check.Key, nodeName, annotationValue)
 
@@ -435,6 +438,11 @@ func checkAnnotationStates(t *testing.T, node *v1.Node, nodeName string, checks 
 	}
 
 	return true
+}
+
+func isEmptyAnnotationValue(value string) bool {
+	trimmed := strings.TrimSpace(value)
+	return trimmed == "" || trimmed == "[]"
 }
 
 func SetCircuitBreakerState(ctx context.Context, t *testing.T, c *envconf.Config, state, cursorMode string) {
