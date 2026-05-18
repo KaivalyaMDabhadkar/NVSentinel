@@ -527,6 +527,10 @@ func (r *Reconciler) handleEvent(
 	annotations, quarantineAnnotationExists := r.hasExistingQuarantine(ctx, event.HealthEvent.NodeName)
 
 	if quarantineAnnotationExists {
+		slog.DebugContext(ctx, "Node already has active quarantine annotation, skipping fresh quarantine",
+			"node", event.HealthEvent.NodeName,
+			"checkName", event.HealthEvent.CheckName)
+
 		return r.handleAlreadyQuarantinedNode(ctx, event.HealthEvent, ruleSetEvals)
 	}
 
