@@ -428,7 +428,7 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 		return ctrl.Result{}, fmt.Errorf("failed to write completion marker for cancellation event: %w", err)
 	}
 
-	if err := safeMarkProcessed(context.Background(), watcherInstance, eventWithToken.ResumeToken, nodeName); err != nil {
+	if err := safeMarkProcessed(ctx, watcherInstance, eventWithToken.ResumeToken, nodeName); err != nil {
 		return ctrl.Result{}, err
 	}
 
