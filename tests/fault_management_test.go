@@ -19,6 +19,8 @@ package tests
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,6 +30,8 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/e2e-framework/klient"
 	"sigs.k8s.io/e2e-framework/pkg/envconf"
 	"sigs.k8s.io/e2e-framework/pkg/features"
 
@@ -547,13 +551,19 @@ func TestManualUncordonWithFaultRemediation(t *testing.T) {
 		WithLabel("suite", "fault-management-manual-intervention-fr")
 
 	var testCtx *helpers.RemediationTestContext
+	var mongoPod string
 	var podNames []string
 	testNamespace := "immediate-test"
+	const cancellationMarkerMessage = "XID 79 fatal error for FR cancellation marker"
 
 	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		var newCtx context.Context
 		newCtx, testCtx = helpers.SetupFaultRemediationTest(ctx, t, c, testNamespace)
 		newCtx = helpers.ApplyNodeDrainerConfig(newCtx, t, c, "data/nd-all-modes.yaml")
+
+		client, err := c.NewClient()
+		require.NoError(t, err)
+		mongoPod = helpers.GetMongoDBPrimaryPodName(ctx, t, client)
 
 		return newCtx
 	})
@@ -569,7 +579,7 @@ func TestManualUncordonWithFaultRemediation(t *testing.T) {
 		t.Log("Sending fatal health event to trigger quarantine")
 		fatalEvent := helpers.NewHealthEvent(testCtx.NodeName).
 			WithErrorCode("79").
-			WithMessage("XID 79 fatal error").
+			WithMessage(cancellationMarkerMessage).
 			WithRecommendedAction(24)
 		helpers.SendHealthEvent(ctx, t, fatalEvent)
 
@@ -639,6 +649,20 @@ func TestManualUncordonWithFaultRemediation(t *testing.T) {
 		return ctx
 	})
 
+	feature.Assess("verify FR marks cancelled event remediated", func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		client, err := c.NewClient()
+		require.NoError(t, err)
+
+		t.Log("Waiting for FR to write faultRemediated=true on the Cancelled HealthEvent")
+		require.Eventually(t, func() bool {
+			return faultRemediatedMarkerWritten(ctx, t, client.RESTConfig(), client, mongoPod,
+				testCtx.NodeName, cancellationMarkerMessage)
+		}, helpers.EventuallyWaitTimeout, helpers.WaitInterval,
+			"FR should write faultRemediated=true for the cancelled HealthEvent")
+
+		return ctx
+	})
+
 	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
 		require.NoError(t, err)
@@ -655,4 +679,37 @@ func TestManualUncordonWithFaultRemediation(t *testing.T) {
 	})
 
 	testEnv.Test(t, feature.Feature())
+}
+
+func faultRemediatedMarkerWritten(
+	ctx context.Context,
+	t *testing.T,
+	restConfig *rest.Config,
+	client klient.Client,
+	mongoPod, nodeName, message string,
+) bool {
+	t.Helper()
+
+	js := fmt.Sprintf(`
+		db = db.getSiblingDB("%s");
+		const doc = db.HealthEvents.findOne({
+			"healthevent.nodename": %q,
+			"healthevent.message": %q,
+			"healtheventstatus.nodequarantined": "Cancelled"
+		});
+		if (doc && doc.healtheventstatus &&
+			doc.healtheventstatus.faultremediated &&
+			doc.healtheventstatus.faultremediated.value === true) {
+			print("FAULT_REMEDIATED_TRUE");
+		} else {
+			print("NOT_READY");
+			if (doc) {
+				printjson(doc.healtheventstatus);
+			}
+		}
+	`, helpers.MongoDBDatabase, nodeName, message)
+
+	stdout, _ := helpers.ExecMongosh(ctx, t, restConfig, client, mongoPod, js)
+
+	return strings.Contains(stdout, "FAULT_REMEDIATED_TRUE")
 }

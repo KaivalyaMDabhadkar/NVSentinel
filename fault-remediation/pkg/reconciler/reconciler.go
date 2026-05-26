@@ -424,6 +424,7 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 			"node", nodeName,
 			"error", err)
 		tracing.RecordError(span, err)
+
 		return ctrl.Result{}, fmt.Errorf("failed to write completion marker for cancellation event: %w", err)
 	}
 
