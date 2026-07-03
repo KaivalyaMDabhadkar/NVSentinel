@@ -159,9 +159,10 @@ class MockDCGMErrors:
     DCGM_FR_PCI_REPLAY_RATE = 1
     DCGM_FR_NVLINK_DOWN = 2
     DCGM_FR_THERMAL_VIOLATIONS = 3
+    DCGM_FR_CLOCK_THROTTLE_POWER = 4
 
-    # Add more error codes as needed by tests (4 manual + 109 generated = 113 total)
-    for i in range(4, 113):
+    # Add more error codes as needed by tests (5 manual + 108 generated = 113 total)
+    for i in range(5, 113):
         locals()[f"DCGM_FR_ERROR_{i}"] = i
 
 

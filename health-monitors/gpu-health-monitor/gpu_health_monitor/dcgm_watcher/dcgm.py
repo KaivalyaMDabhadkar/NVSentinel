@@ -67,10 +67,14 @@ class DCGMWatcher:
         thermal_margin_enabled: bool = False,
         metadata_reader: MetadataReader | None = None,
         dcgm_mode: str = "remote",
+        suppressed_error_codes: frozenset[str] | None = None,
     ) -> None:
         self._addr = addr
         self._poll_interval_seconds = poll_interval_seconds
         self._callbacks = callbacks
+        self._suppressed_error_codes = frozenset(suppressed_error_codes or ())
+        if self._suppressed_error_codes:
+            log.info(f"Suppressing DCGM incidents for error codes: {sorted(self._suppressed_error_codes)}")
         thermal_margin_supported = "gputemplimitmonitoringenabled" in DCGM_FIELDS_MONITORING
         self._thermal_margin_enabled = thermal_margin_enabled and thermal_margin_supported
         if thermal_margin_enabled and not thermal_margin_supported:
@@ -148,6 +152,29 @@ class DCGMWatcher:
         for system_name in self._health_watches.values():
             health_status[system_name] = types.HealthDetails(status=types.HealthStatus.PASS, entity_failures={})
         return health_status
+
+    def _suppress_configured_error_codes(self, health_status: dict[str, types.HealthDetails]) -> None:
+        if not self._suppressed_error_codes:
+            return
+
+        for watch_name, details in health_status.items():
+            suppressed_gpu_ids = [
+                gpu_id
+                for gpu_id, failure in details.entity_failures.items()
+                if failure.code in self._suppressed_error_codes
+            ]
+            for gpu_id in suppressed_gpu_ids:
+                error_code = details.entity_failures[gpu_id].code
+                log.debug(
+                    f"Suppressing incident for watch={watch_name} entity={gpu_id} "
+                    f"error_code={error_code}: high-frequency non-actionable event"
+                )
+                metrics.dcgm_health_check_suppressed_incidents.labels(error_code).inc()
+                del details.entity_failures[gpu_id]
+
+            # A watch with no remaining failures is healthy again.
+            if suppressed_gpu_ids and not details.entity_failures:
+                details.status = types.HealthStatus.PASS
 
     def _fire_callback_funcs(self, func_name: str, args: list[any]):
         def done_callback(class_name: str, func_name: str, future):
@@ -555,6 +582,7 @@ class DCGMWatcher:
                                 health_status[DCGM_FIELDS_MONITORING["gputemplimitmonitoringenabled"].watch_name] = (
                                     margin_details
                                 )
+                            self._suppress_configured_error_codes(health_status)
                             log.debug("Publish DCGM health checks")
                             self._fire_callback_funcs(
                                 types.CallbackInterface.health_event_occurred.__name__,

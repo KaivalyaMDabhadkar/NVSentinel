@@ -49,6 +49,12 @@ dcgmFieldsMonitoring:
   # events are emitted with processingStrategy=STORE_ONLY
   gpuTempLimitStoreOnly: true
 
+# DCGM health check incident suppression
+dcgmHealthCheck:
+  # DCGM error codes to drop before they become health events
+  # Example: ["DCGM_FR_CLOCK_THROTTLE_POWER"]
+  suppressedErrorCodes: []
+
 # Use host networking for GPU health monitor pods. external-hostengine mode
 # enables host networking automatically because the configured endpoint is
 # node-local by contract. This value is an opt-in for other modes.

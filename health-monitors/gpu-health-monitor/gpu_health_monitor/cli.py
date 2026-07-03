@@ -165,6 +165,15 @@ def cli(
     # or cordon) while every other DCGM check keeps the process-wide strategy.
     store_only_checks = frozenset({"GpuThermalMarginWatch"}) if thermal_margin_store_only else frozenset()
 
+    suppressed_error_codes = frozenset()
+    if config.has_section("dcgmhealthcheck"):
+        suppressed_error_codes_raw = config["dcgmhealthcheck"].get("SuppressedErrorCodes", fallback="")
+        suppressed_error_codes = frozenset(
+            code.strip() for code in suppressed_error_codes_raw.split(",") if code.strip()
+        )
+        if suppressed_error_codes:
+            log.info(f"DCGM error codes suppressed via config: {sorted(suppressed_error_codes)}")
+
     enabled_event_processor_names = cli_config["EnabledEventProcessors"].split(",")
     enabled_event_processors = []
     for event_processor in enabled_event_processor_names:
@@ -202,6 +211,7 @@ def cli(
         thermal_margin_enabled=thermal_margin_enabled,
         metadata_reader=metadata_reader,
         dcgm_mode=dcgm_mode,
+        suppressed_error_codes=suppressed_error_codes,
     )
     dcgm_watcher.start([], exit)
 
