@@ -1030,9 +1030,7 @@ func TestDCGMBootstrapCompletedAnnotation(t *testing.T) {
 		// The nvidia-dcgm pod restart leaves the gpu-health-monitor with a stale
 		// DCGM handle, so its next poll emits a fatal GpuDcgmConnectivityFailure.
 		// Before handing the node back as managed, wait for that failure to show
-		// up and for the monitor to reconnect and report healthy again — otherwise
-		// the fatal lands after this test ends and cordons the node under the
-		// next test (see the TestNICCounterIBDegradation flake).
+		// up and for the monitor to reconnect and report healthy again
 		t.Logf("Waiting up to %v for GpuDcgmConnectivityFailure to appear on node %s",
 			dcgmConnectivityFailureObserveWindow, testNodeName)
 		sawConnectivityFailure := false
