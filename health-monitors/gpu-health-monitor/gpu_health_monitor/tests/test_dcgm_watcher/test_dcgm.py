@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 import dcgm_structs, dcgm_errors, dcgm_fields
 from threading import Event
 from ctypes import pointer
+import copy
 import json
 import pytest
 
@@ -335,6 +336,175 @@ class TestDCGMHealthChecks:
 
         assert response == expected_response
         assert connectivity_success == True
+
+    def _get_power_throttle_incident(self, group_id, entity_id):
+        """Helper to create a DCGM_FR_CLOCK_THROTTLE_POWER incident for testing."""
+        incident = dcgm_structs.c_dcgmIncidentInfo_t()
+        incident.system = dcgm_structs.DCGM_HEALTH_WATCH_POWER
+        incident.health = dcgm_structs.DCGM_HEALTH_RESULT_WARN
+        incident.error = dcgm_structs.c_dcgmDiagErrorDetail_t()
+        incident.error.msg = f"ErrorCode:DCGM_FR_CLOCK_THROTTLE_POWER GPU:{entity_id} Recommended Action=NONE;"
+        incident.error.code = dcgm_errors.DCGM_FR_CLOCK_THROTTLE_POWER
+        incident.entityInfo = dcgm_structs.c_dcgmGroupEntityPair_t()
+        incident.entityInfo.entityGroupId = group_id
+        incident.entityInfo.entityId = entity_id
+        return incident
+
+    def test_perform_health_check_reports_clock_throttle_power(self):
+        """_perform_health_check itself never suppresses; suppression is applied later
+        against the fully assembled health_status (see _suppress_configured_error_codes)."""
+        watcher = dcgm.DCGMWatcher(
+            addr="localhost:5555",
+            poll_interval_seconds=10,
+            callbacks=[],
+            dcgm_k8s_service_enabled=False,
+        )
+        dcgm_group_mock = MagicMock()
+        mock_response = dcgm_structs.c_dcgmHealthResponse_v4
+        mock_response.version = dcgm_structs.dcgmHealthResponse_version4
+        mock_response.overallHealth = dcgm_structs.DCGM_HEALTH_RESULT_WARN
+        mock_response.incidentCount = 1
+        mock_response.incidents = (dcgm_structs.c_dcgmIncidentInfo_t * dcgm_structs.DCGM_HEALTH_WATCH_MAX_INCIDENTS)()
+        mock_response.incidents[0] = self._get_power_throttle_incident(0, 1)
+        dcgm_group_mock.health.Check.return_value = mock_response()
+
+        response, connectivity_success = watcher._perform_health_check(dcgm_group_mock)
+
+        expected_response = watcher._get_health_status_dict()
+        expected_response["DCGM_HEALTH_WATCH_POWER"] = dcgm.types.HealthDetails(
+            status=dcgm.types.HealthStatus.WARN,
+            entity_failures={
+                1: dcgm.types.ErrorDetails(
+                    code="DCGM_FR_CLOCK_THROTTLE_POWER",
+                    message="ErrorCode:DCGM_FR_CLOCK_THROTTLE_POWER GPU:1 Recommended Action=NONE;",
+                )
+            },
+        )
+        assert response == expected_response
+        assert connectivity_success == True
+
+    def test_suppress_configured_error_codes_noop_by_default(self):
+        """With no suppressed_error_codes configured, health_status is left untouched."""
+        watcher = dcgm.DCGMWatcher(
+            addr="localhost:5555",
+            poll_interval_seconds=10,
+            callbacks=[],
+            dcgm_k8s_service_enabled=False,
+        )
+        health_status = watcher._get_health_status_dict()
+        health_status["DCGM_HEALTH_WATCH_POWER"] = dcgm.types.HealthDetails(
+            status=dcgm.types.HealthStatus.WARN,
+            entity_failures={
+                1: dcgm.types.ErrorDetails(
+                    code="DCGM_FR_CLOCK_THROTTLE_POWER",
+                    message="ErrorCode:DCGM_FR_CLOCK_THROTTLE_POWER GPU:1 Recommended Action=NONE;",
+                )
+            },
+        )
+        expected = copy.deepcopy(health_status)
+
+        watcher._suppress_configured_error_codes(health_status)
+
+        assert health_status == expected
+
+    def test_suppress_configured_error_codes_clears_matching_dcgm_watch(self):
+        """A DCGM health-watch incident (e.g. GpuPowerWatch) matching a suppressed
+        error code is dropped and the watch reverts to PASS."""
+        watcher = dcgm.DCGMWatcher(
+            addr="localhost:5555",
+            poll_interval_seconds=10,
+            callbacks=[],
+            dcgm_k8s_service_enabled=False,
+            suppressed_error_codes=frozenset({"DCGM_FR_CLOCK_THROTTLE_POWER"}),
+        )
+        health_status = watcher._get_health_status_dict()
+        health_status["DCGM_HEALTH_WATCH_POWER"] = dcgm.types.HealthDetails(
+            status=dcgm.types.HealthStatus.WARN,
+            entity_failures={
+                1: dcgm.types.ErrorDetails(
+                    code="DCGM_FR_CLOCK_THROTTLE_POWER",
+                    message="ErrorCode:DCGM_FR_CLOCK_THROTTLE_POWER GPU:1 Recommended Action=NONE;",
+                )
+            },
+        )
+
+        watcher._suppress_configured_error_codes(health_status)
+
+        expected_response = watcher._get_health_status_dict()
+        assert health_status == expected_response
+
+    def test_suppress_configured_error_codes_only_suppresses_matching_entities(self):
+        """A genuine (non-suppressed) incident on another GPU/watch must still be reported."""
+        watcher = dcgm.DCGMWatcher(
+            addr="localhost:5555",
+            poll_interval_seconds=10,
+            callbacks=[],
+            dcgm_k8s_service_enabled=False,
+            suppressed_error_codes=frozenset({"DCGM_FR_CLOCK_THROTTLE_POWER"}),
+        )
+        health_status = watcher._get_health_status_dict()
+        health_status["DCGM_HEALTH_WATCH_POWER"] = dcgm.types.HealthDetails(
+            status=dcgm.types.HealthStatus.WARN,
+            entity_failures={
+                1: dcgm.types.ErrorDetails(
+                    code="DCGM_FR_CLOCK_THROTTLE_POWER",
+                    message="ErrorCode:DCGM_FR_CLOCK_THROTTLE_POWER GPU:1 Recommended Action=NONE;",
+                )
+            },
+        )
+        health_status["DCGM_HEALTH_WATCH_PCIE"] = dcgm.types.HealthDetails(
+            status=dcgm.types.HealthStatus.WARN,
+            entity_failures={
+                2: dcgm.types.ErrorDetails(
+                    code="DCGM_FR_PCI_REPLAY_RATE",
+                    message="Detected more than 8 PCIe replays per minute for GPU 1.",
+                )
+            },
+        )
+
+        watcher._suppress_configured_error_codes(health_status)
+
+        expected_response = watcher._get_health_status_dict()
+        expected_response["DCGM_HEALTH_WATCH_PCIE"] = dcgm.types.HealthDetails(
+            status=dcgm.types.HealthStatus.WARN,
+            entity_failures={
+                2: dcgm.types.ErrorDetails(
+                    code="DCGM_FR_PCI_REPLAY_RATE",
+                    message="Detected more than 8 PCIe replays per minute for GPU 1.",
+                )
+            },
+        )
+        assert health_status == expected_response
+
+    def test_suppress_configured_error_codes_applies_to_custom_field_monitors(self):
+        """Suppression is generalized: it also applies to non-DCGM-health-watch entries
+        such as GpuThermalMarginWatch (custom field monitoring), not just native
+        DCGM health check incidents."""
+        watcher = dcgm.DCGMWatcher(
+            addr="localhost:5555",
+            poll_interval_seconds=10,
+            callbacks=[],
+            dcgm_k8s_service_enabled=False,
+            suppressed_error_codes=frozenset({"GPU_TEMP_HW_SLOWDOWN_VIOLATION"}),
+        )
+        health_status = watcher._get_health_status_dict()
+        health_status["DCGM_HEALTH_WATCH_THERMAL_MARGIN"] = dcgm.types.HealthDetails(
+            status=dcgm.types.HealthStatus.WARN,
+            entity_failures={
+                0: dcgm.types.ErrorDetails(
+                    code="GPU_TEMP_HW_SLOWDOWN_VIOLATION",
+                    message="GPU 0 thermal margin below HW slowdown T.Limit",
+                )
+            },
+        )
+
+        watcher._suppress_configured_error_codes(health_status)
+
+        expected_response = watcher._get_health_status_dict()
+        expected_response["DCGM_HEALTH_WATCH_THERMAL_MARGIN"] = dcgm.types.HealthDetails(
+            status=dcgm.types.HealthStatus.PASS, entity_failures={}
+        )
+        assert health_status == expected_response
 
     def _get_nvlink_incident(self, group_id, entity_id, link_id):
         """Helper to create NvLink down incident for testing."""
