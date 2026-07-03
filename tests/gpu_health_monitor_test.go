@@ -954,6 +954,8 @@ func TestDCGMBootstrapCompletedAnnotation(t *testing.T) {
 
 	var testNodeName string
 	var dcgmPodName string
+	var originalManagedLabel string
+	var hadManagedLabel bool
 
 	feature.Setup(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
 		client, err := c.NewClient()
@@ -966,16 +968,20 @@ func TestDCGMBootstrapCompletedAnnotation(t *testing.T) {
 		testNodeName = gpuHealthMonitorPod.Spec.NodeName
 		t.Logf("Using node: %s", testNodeName)
 
+		// Capture original label state so teardown can restore it exactly.
+		node, err := helpers.GetNodeByName(ctx, client, testNodeName)
+		require.NoError(t, err, "failed to get node %s", testNodeName)
+		originalManagedLabel, hadManagedLabel = node.Labels["k8saas.nvidia.com/ManagedByNVSentinel"]
+
 		// Deleting the nvidia-dcgm pod below breaks the gpu-health-monitor's DCGM
 		// connection; its next poll emits a fatal GpuDcgmConnectivityFailure, which
 		// would quarantine this node and leak a cordon into whichever test runs
 		// next. Mark the node unmanaged so fault-quarantine ignores that event.
-		t.Logf("Setting ManagedByNVSentinel=false on node %s", testNodeName)
+		t.Logf("Setting ManagedByNVSentinel=false on node %s (original: present=%v, value=%q)",
+			testNodeName, hadManagedLabel, originalManagedLabel)
 		err = helpers.SetNodeManagedByNVSentinel(ctx, client, testNodeName, false)
 		require.NoError(t, err, "failed to set ManagedByNVSentinel label")
 
-		node, err := helpers.GetNodeByName(ctx, client, testNodeName)
-		require.NoError(t, err, "failed to get node %s", testNodeName)
 		require.NotEmpty(t, node.Annotations[dcgmBootstrapAnnotation],
 			"node %s should have annotation %s set", testNodeName, dcgmBootstrapAnnotation)
 		t.Logf("Node %s has annotation %s: %s", testNodeName, dcgmBootstrapAnnotation,
@@ -1030,30 +1036,46 @@ func TestDCGMBootstrapCompletedAnnotation(t *testing.T) {
 		// The nvidia-dcgm pod restart leaves the gpu-health-monitor with a stale
 		// DCGM handle, so its next poll emits a fatal GpuDcgmConnectivityFailure.
 		// Before handing the node back as managed, wait for that failure to show
-		// up and for the monitor to reconnect and report healthy again
+		// up and for the monitor to reconnect and report healthy again.
 		t.Logf("Waiting up to %v for GpuDcgmConnectivityFailure to appear on node %s",
 			dcgmConnectivityFailureObserveWindow, testNodeName)
 		sawConnectivityFailure := false
-		deadline := time.Now().Add(dcgmConnectivityFailureObserveWindow)
-		for time.Now().Before(deadline) {
-			condition, err := helpers.CheckNodeConditionExists(ctx, client, testNodeName,
-				"GpuDcgmConnectivityFailure", "GpuDcgmConnectivityFailureIsNotHealthy")
-			if err != nil {
-				t.Logf("Error checking condition: %v", err)
-			} else if condition != nil && condition.Status == v1.ConditionTrue {
-				sawConnectivityFailure = true
-				break
+		hadSuccessfulCheck := false
+		ticker := time.NewTicker(helpers.WaitInterval)
+		defer ticker.Stop()
+		deadline := time.After(dcgmConnectivityFailureObserveWindow)
+	observeLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				t.Logf("Context canceled while waiting for GpuDcgmConnectivityFailure on node %s", testNodeName)
+				break observeLoop
+			case <-deadline:
+				break observeLoop
+			case <-ticker.C:
+				condition, checkErr := helpers.CheckNodeConditionExists(ctx, client, testNodeName,
+					"GpuDcgmConnectivityFailure", "GpuDcgmConnectivityFailureIsNotHealthy")
+				if checkErr != nil {
+					t.Logf("Error checking condition: %v", checkErr)
+					continue
+				}
+				hadSuccessfulCheck = true
+				if condition != nil && condition.Status == v1.ConditionTrue {
+					sawConnectivityFailure = true
+					break observeLoop
+				}
 			}
-			time.Sleep(helpers.WaitInterval)
 		}
+		require.True(t, hadSuccessfulCheck,
+			"never got a successful condition check for node %s during observe window", testNodeName)
 
 		if sawConnectivityFailure {
 			t.Logf("Waiting for GpuDcgmConnectivityFailure to become healthy on node %s", testNodeName)
 			require.Eventually(t, func() bool {
-				condition, err := helpers.CheckNodeConditionExists(ctx, client, testNodeName,
+				condition, checkErr := helpers.CheckNodeConditionExists(ctx, client, testNodeName,
 					"GpuDcgmConnectivityFailure", "GpuDcgmConnectivityFailureIsHealthy")
-				if err != nil {
-					t.Logf("Error checking condition: %v", err)
+				if checkErr != nil {
+					t.Logf("Error checking condition: %v", checkErr)
 					return false
 				}
 				return condition != nil && condition.Status == v1.ConditionFalse
@@ -1066,20 +1088,25 @@ func TestDCGMBootstrapCompletedAnnotation(t *testing.T) {
 		}
 
 		require.Never(t, func() bool {
-			condition, err := helpers.CheckNodeConditionExists(ctx, client, testNodeName,
+			condition, checkErr := helpers.CheckNodeConditionExists(ctx, client, testNodeName,
 				"GpuDcgmConnectivityFailure", "GpuDcgmConnectivityFailureIsNotHealthy")
-			if err != nil {
-				t.Logf("Error checking condition during stability check: %v", err)
+			if checkErr != nil {
+				t.Logf("Error checking condition during stability check: %v", checkErr)
 				return false
 			}
 			return condition != nil && condition.Status == v1.ConditionTrue
 		}, helpers.NeverWaitTimeout, helpers.WaitInterval,
 			"GpuDcgmConnectivityFailure should stay healthy on node %s", testNodeName)
 
-		t.Logf("Removing ManagedByNVSentinel label from node %s", testNodeName)
-		err = helpers.RemoveNodeManagedByNVSentinelLabel(ctx, client, testNodeName)
-		if err != nil {
-			t.Logf("Warning: failed to remove ManagedByNVSentinel label: %v", err)
+		// Restore the original ManagedByNVSentinel label state.
+		if hadManagedLabel {
+			t.Logf("Restoring ManagedByNVSentinel=%s on node %s", originalManagedLabel, testNodeName)
+			require.NoError(t, helpers.SetNodeManagedByNVSentinel(ctx, client, testNodeName, originalManagedLabel == "true"),
+				"failed to restore ManagedByNVSentinel label on node %s", testNodeName)
+		} else {
+			t.Logf("Removing ManagedByNVSentinel label from node %s (was not present before test)", testNodeName)
+			require.NoError(t, helpers.RemoveNodeManagedByNVSentinelLabel(ctx, client, testNodeName),
+				"failed to remove ManagedByNVSentinel label from node %s", testNodeName)
 		}
 
 		return ctx
