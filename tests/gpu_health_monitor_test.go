@@ -1071,32 +1071,16 @@ func TestDCGMBootstrapCompletedAnnotation(t *testing.T) {
 
 		if sawConnectivityFailure {
 			t.Logf("Waiting for GpuDcgmConnectivityFailure to become healthy on node %s", testNodeName)
-			require.Eventually(t, func() bool {
-				condition, checkErr := helpers.CheckNodeConditionExists(ctx, client, testNodeName,
-					"GpuDcgmConnectivityFailure", "GpuDcgmConnectivityFailureIsHealthy")
-				if checkErr != nil {
-					t.Logf("Error checking condition: %v", checkErr)
-					return false
-				}
-				return condition != nil && condition.Status == v1.ConditionFalse
-			}, helpers.EventuallyWaitTimeout, helpers.WaitInterval,
-				"GpuDcgmConnectivityFailure should become healthy on node %s", testNodeName)
+			helpers.WaitForNodeConditionWithCheckName(ctx, t, client, testNodeName,
+				"GpuDcgmConnectivityFailure", "", "GpuDcgmConnectivityFailureIsHealthy", v1.ConditionFalse)
 		} else {
 			t.Logf("No GpuDcgmConnectivityFailure observed within %v on node %s; "+
 				"gpu-health-monitor connection survived the nvidia-dcgm restart",
 				dcgmConnectivityFailureObserveWindow, testNodeName)
 		}
 
-		require.Never(t, func() bool {
-			condition, checkErr := helpers.CheckNodeConditionExists(ctx, client, testNodeName,
-				"GpuDcgmConnectivityFailure", "GpuDcgmConnectivityFailureIsNotHealthy")
-			if checkErr != nil {
-				t.Logf("Error checking condition during stability check: %v", checkErr)
-				return false
-			}
-			return condition != nil && condition.Status == v1.ConditionTrue
-		}, helpers.NeverWaitTimeout, helpers.WaitInterval,
-			"GpuDcgmConnectivityFailure should stay healthy on node %s", testNodeName)
+		t.Logf("Verifying GpuDcgmConnectivityFailure stays healthy on node %s", testNodeName)
+		helpers.EnsureNodeConditionNotPresent(ctx, t, client, testNodeName, "GpuDcgmConnectivityFailure")
 
 		// Restore the original ManagedByNVSentinel label state.
 		if hadManagedLabel {
