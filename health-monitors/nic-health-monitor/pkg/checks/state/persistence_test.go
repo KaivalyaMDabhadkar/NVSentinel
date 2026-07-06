@@ -69,8 +69,9 @@ func TestIBState_Persistence_RecoveryAcrossPodRestart(t *testing.T) {
 
 	events, err := firstPod.Run()
 	require.NoError(t, err)
-	require.Len(t, events, 1, "DOWN port on first poll should emit fatal event")
-	assert.True(t, events[0].IsFatal)
+	// Singleton card: no peer evidence the port should be up, so the
+	// first-poll unhealthy state is logged locally and suppressed.
+	assert.Empty(t, events, "DOWN port on first poll without peer evidence should not emit an event")
 
 	// The port snapshot should now be on disk.
 	persisted := mgr.PortStatesFor("InfiniBand")
@@ -128,9 +129,11 @@ func TestIBState_Persistence_BootIDChangedEmitsHealthyBaseline(t *testing.T) {
 	assert.Empty(t, events, "second poll after a baseline should be silent unless something changes")
 }
 
-func TestIBState_Persistence_BootIDChangedStillEmitsFatalForUnhealthy(t *testing.T) {
-	// On a boot-ID change, unhealthy ports still produce fatal events so
-	// operators learn about hardware that didn't come back clean.
+func TestIBState_Persistence_BootIDChangedSuppressesUnhealthyWithoutPeerEvidence(t *testing.T) {
+	// On a boot-ID change, singleton unhealthy ports still update
+	// persisted state, but without peer evidence they do not emit an
+	// external event. A below-mode card in a >=2 group would stay fatal
+	// (see TestIBState_FirstPollDownBelowModeStaysFatal).
 	mgr, _, _ := newStateManagerForTest(t, "boot-2")
 
 	node := newStubNode().addIB("mlx5_0", &stubDevice{
@@ -150,8 +153,7 @@ func TestIBState_Persistence_BootIDChangedStillEmitsFatalForUnhealthy(t *testing
 
 	events, err := check.Run()
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.True(t, events[0].IsFatal, "DOWN port after reboot should still fire fatal")
+	assert.Empty(t, events, "singleton card has no peer evidence; post-reboot DOWN should be suppressed")
 }
 
 func TestIBState_Persistence_DeviceDisappearanceAcrossRestart(t *testing.T) {

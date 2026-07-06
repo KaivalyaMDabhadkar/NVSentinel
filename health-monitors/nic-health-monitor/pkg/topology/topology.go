@@ -437,14 +437,20 @@ func formatIntSet(s map[int]struct{}) string {
 }
 
 // CheckCardHomogeneity scans per-role groups of cards and flags any card
-// whose active-port count is below its role's mode. The returned anomaly
-// map is keyed by card (PCI bus:device) for use as sticky state across
-// poll cycles.
+// whose active-port count is below its role's decisive mode. The returned
+// anomaly map is keyed by card (PCI bus:device) for use as sticky state
+// across poll cycles. An entry in the map is positive peer evidence that
+// the card has failed ports: the per-port state checks use it to decide
+// whether a first-poll DOWN port is fatal (card anomalous) or merely
+// informational (no peer evidence — uncabled or unprovisioned port).
 //
 // Groups with fewer than two cards are skipped (nothing to compare
-// against); groups whose mode is zero (every card has no active ports)
-// are also skipped because the mode is not meaningful and we would
-// otherwise flag every card in the group.
+// against — e.g., a lone storage NIC left over after its twin was
+// excluded as the default-route management NIC); groups whose mode is
+// zero (every card has no active ports) or tied (no majority pattern,
+// e.g., an asymmetric Prime/Aux frontend pair) are also skipped because
+// the mode is not meaningful and we would otherwise flag healthy-by-design
+// cards.
 func (c *Classifier) CheckCardHomogeneity(
 	cardActive map[string]int,
 	cardTotal map[string]int,
@@ -486,46 +492,6 @@ func (c *Classifier) CheckCardHomogeneity(
 	return anomalies
 }
 
-// ExpectedDownCards returns the set of cards whose active port count
-// matches their role's mode — DOWN ports on these cards are expected (e.g.,
-// uncabled second port on a dual-port NIC) and should not be reported as
-// fatal on the first poll cycle.
-func (c *Classifier) ExpectedDownCards(
-	cardActive map[string]int,
-	cardTotal map[string]int,
-	cardRole map[string]Role,
-) map[string]struct{} {
-	expected := make(map[string]struct{})
-
-	if len(cardTotal) < 2 {
-		return expected
-	}
-
-	byRole := make(map[Role][]string)
-	for card := range cardTotal {
-		byRole[cardRole[card]] = append(byRole[cardRole[card]], card)
-	}
-
-	for _, cards := range byRole {
-		if len(cards) < 2 {
-			continue
-		}
-
-		mode := modeActiveCount(cardActive, cards)
-		if mode == 0 {
-			continue
-		}
-
-		for _, card := range cards {
-			if cardActive[card] >= mode {
-				expected[card] = struct{}{}
-			}
-		}
-	}
-
-	return expected
-}
-
 // CardAnomaly describes a card whose active-port count is below the mode
 // for its role group.
 type CardAnomaly struct {
@@ -535,8 +501,12 @@ type CardAnomaly struct {
 }
 
 // modeActiveCount returns the most common active-port count among a
-// group of cards, breaking ties toward the higher value so a fleet with
-// mixed dual-/single-port cards conservatively expects dual-port behaviour.
+// group of cards, or 0 when there is no decisive mode. A tie between two
+// distinct counts means the group has no majority pattern to learn from —
+// numerically, an intentionally-idle card (e.g., the unused Aux port of a
+// Prime/Aux frontend pair) is indistinguishable from a failed one — so the
+// callers must skip the group rather than guess. Returning 0 reuses the
+// existing "mode is meaningless" skip path.
 func modeActiveCount(cardActive map[string]int, cards []string) int {
 	freq := make(map[int]int)
 	for _, card := range cards {
@@ -545,12 +515,21 @@ func modeActiveCount(cardActive map[string]int, cards []string) int {
 
 	mode := 0
 	modeFreq := 0
+	tied := false
 
 	for count, f := range freq {
-		if f > modeFreq || (f == modeFreq && count > mode) {
+		switch {
+		case f > modeFreq:
 			mode = count
 			modeFreq = f
+			tied = false
+		case f == modeFreq && count != mode:
+			tied = true
 		}
+	}
+
+	if tied {
+		return 0
 	}
 
 	return mode

@@ -225,38 +225,48 @@ func (c *InfiniBandStateCheck) recordPort(
 func (c *InfiniBandStateCheck) buildEventsForPoll(
 	st *ibPollState, firstPoll, baselineRun bool,
 ) []*pb.HealthEvent {
-	expectedCards := c.classifier.ExpectedDownCards(st.cardActive, st.cardTotal, st.cardRole)
-	events := c.portTransitionEvents(st, firstPoll, baselineRun, expectedCards)
+	// Computed only on the first poll: the set of cards with positive
+	// peer evidence of failure (active-port count below their role
+	// group's decisive mode). This one map drives both the per-port
+	// severity decision and the card-level homogeneity events.
+	var anomalousCards map[string]topology.CardAnomaly
+	if firstPoll {
+		anomalousCards = c.classifier.CheckCardHomogeneity(st.cardActive, st.cardTotal, st.cardRole)
+	}
+
+	events := c.portTransitionEvents(st, firstPoll, baselineRun, anomalousCards)
 	events = append(events, c.detectDeviceDisappearance(st.seenDevices)...)
 	events = append(events, c.detectPortDisappearance(st.currentDevices, st.currentPorts)...)
 
 	if firstPoll {
-		events = append(events, c.runCardHomogeneityCheck(st.cardActive, st.cardTotal, st.cardRole)...)
+		events = append(events, c.runCardHomogeneityCheck(anomalousCards)...)
 	}
 
 	return events
 }
 
 // portTransitionEvents produces the boundary-crossing events for every
-// port in the current poll, applying the first-poll suppression for
-// cards whose active count matches their role's mode (uncabled-port
-// convention).
+// port in the current poll. On the first poll, unhealthy ports are emitted
+// only when the emitting card is positively anomalous (below its role
+// group's decisive mode); otherwise they are logged and suppressed.
 func (c *InfiniBandStateCheck) portTransitionEvents(
-	st *ibPollState, firstPoll, baselineRun bool, expectedCards map[string]struct{},
+	st *ibPollState, firstPoll, baselineRun bool, anomalousCards map[string]topology.CardAnomaly,
 ) []*pb.HealthEvent {
 	var events []*pb.HealthEvent
 
 	for _, port := range st.ibPorts {
 		key := portKey(port.Device, port.Port)
 		prev, hasPrev := c.previousPorts[key]
+		current := st.currentPorts[key]
+		card := st.portCard[key]
 
-		evt := c.evaluatePortTransition(st.currentPorts[key], prev, hasPrev, baselineRun)
-		if evt == nil {
+		if c.shouldSuppressFirstPollWithoutPeerEvidence(firstPoll, current, port, card, anomalousCards) {
 			continue
 		}
 
-		if firstPoll && !evt.IsHealthy {
-			c.applyFirstPollSuppression(evt, port, st.portCard[key], expectedCards)
+		evt := c.evaluatePortTransition(current, prev, hasPrev, baselineRun)
+		if evt == nil {
+			continue
 		}
 
 		events = append(events, evt)
@@ -265,21 +275,45 @@ func (c *InfiniBandStateCheck) portTransitionEvents(
 	return events
 }
 
-// applyFirstPollSuppression downgrades a first-poll fatal event to
-// non-fatal when the emitting card matches the role's expected-down
-// mode (e.g., dual-port card with only one port cabled by convention).
-func (c *InfiniBandStateCheck) applyFirstPollSuppression(
-	evt *pb.HealthEvent, port discovery.IBPort, card string, expected map[string]struct{},
-) {
-	if _, ok := expected[card]; !ok {
-		return
+// shouldSuppressFirstPollWithoutPeerEvidence reports whether a first-poll
+// unhealthy port should be kept local to monitor logs because there is no
+// positive peer evidence that the port should be up.
+//
+// A port that has never been observed healthy carries no evidence that it
+// is supposed to be up: it may be the uncabled second port of a dual-port
+// card, or an intentionally-disabled/unprovisioned port (e.g., the unused
+// Aux frontend port on OCI BM.GPU.H100.8, which is Disabled by design and
+// has no peer left once its Prime twin is excluded as the default-route
+// NIC). Peer comparison is the only safe evidence at this point, so no
+// external HealthEvent is emitted without it. Singleton role groups, tied
+// modes, and all-down groups therefore suppress first-poll unhealthy
+// ports; runtime healthy→unhealthy transitions are unaffected because
+// firstPoll is false once previous state exists.
+func (c *InfiniBandStateCheck) shouldSuppressFirstPollWithoutPeerEvidence(
+	firstPoll bool,
+	current portSnapshot,
+	port discovery.IBPort,
+	card string,
+	anomalousCards map[string]topology.CardAnomaly,
+) bool {
+	if !firstPoll {
+		return false
 	}
 
-	slog.Info("Suppressing first-poll fatal for expected-down card",
-		"device", port.Device, "port", port.Port, "card", card)
+	isHealthy := current.State == checks.IBStateActive && current.PhysicalState == checks.IBPhysLinkUp
+	if isHealthy {
+		return false
+	}
 
-	evt.IsFatal = false
-	evt.RecommendedAction = pb.RecommendedAction_NONE
+	if _, anomalous := anomalousCards[card]; anomalous {
+		return false
+	}
+
+	slog.Info("Suppressing first-poll unhealthy IB port: no peer evidence of failure",
+		"device", port.Device, "port", port.Port, "card", card,
+		"state", current.State, "physState", current.PhysicalState)
+
+	return true
 }
 
 // logDiscoverySummaryIfChanged emits a one-line summary whenever the
@@ -370,10 +404,10 @@ func (c *InfiniBandStateCheck) healthyBaselineEvent(current portSnapshot) *pb.He
 // cannot reach the fabric; INIT and ARMED are non-fatal because they
 // are normal transient states during Subnet Manager configuration;
 // Polling and LinkErrorRecovery are non-fatal because the driver is
-// already attempting to recover. The card homogeneity check (see
-// CheckCardHomogeneity) converts "stuck in a non-fatal intermediate
-// state" into a fatal event by observing that the card has fewer
-// active ports than its peers.
+// already attempting to recover. On the first poll, the card
+// homogeneity check (see CheckCardHomogeneity) escalates "stuck in a
+// non-fatal intermediate state" to fatal when the card has fewer
+// active ports than its role peers.
 func (c *InfiniBandStateCheck) unhealthyPortEvent(snap portSnapshot) *pb.HealthEvent {
 	isFatal := snap.State == checks.IBStateDown
 

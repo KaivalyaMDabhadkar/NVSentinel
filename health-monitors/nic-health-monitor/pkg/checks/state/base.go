@@ -125,15 +125,14 @@ func (b *baseStateCheck) portEvent(
 	)
 }
 
-// runCardHomogeneityCheck runs the per-role active-ports mode
-// comparison and emits FATAL events for cards whose active-port count
-// falls below their role's mode. Only called on the first poll.
+// runCardHomogeneityCheck emits FATAL events for cards whose active-port
+// count falls below their role's decisive mode. Only called on the first
+// poll. The anomalies map is computed once by the caller (via
+// classifier.CheckCardHomogeneity) and shared with the per-port severity
+// decision so both views of "peer evidence" always agree.
 func (b *baseStateCheck) runCardHomogeneityCheck(
-	cardActive, cardTotal map[string]int,
-	cardRole map[string]topology.Role,
+	anomalies map[string]topology.CardAnomaly,
 ) []*pb.HealthEvent {
-	anomalies := b.classifier.CheckCardHomogeneity(cardActive, cardTotal, cardRole)
-
 	var events []*pb.HealthEvent
 
 	for card, a := range anomalies {
