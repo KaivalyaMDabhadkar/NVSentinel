@@ -42,6 +42,23 @@ fault-remediation:
   logLevel: info  # Options: debug, info, warn, error
 ```
 
+### Change Stream Resume Token
+
+To make fault-remediation skip accumulated events and start from the current stream head, scale it to zero, set its key in the shared resume-control ConfigMap to `CREATE`, then restore its replicas. Fault-remediation deletes only its own resume token, records a cold-start cutoff timestamp, skips startup cold-start recovery for that run, and resets the key back to `RESUME` during startup. Future restarts still run cold-start recovery, but only for records newer than the recorded cutoff.
+
+```bash
+REPLICAS=$(kubectl -n nvsentinel get deployment fault-remediation -o jsonpath='{.spec.replicas}')
+kubectl -n nvsentinel scale deployment/fault-remediation --replicas=0
+kubectl -n nvsentinel rollout status deployment/fault-remediation --timeout=180s
+kubectl -n nvsentinel get configmap resume-control >/dev/null 2>&1 || \
+  kubectl -n nvsentinel create configmap resume-control
+kubectl -n nvsentinel patch configmap resume-control \
+  --type merge \
+  -p '{"data":{"fault-remediation":"CREATE"}}'
+kubectl -n nvsentinel scale deployment/fault-remediation --replicas="${REPLICAS:-1}"
+kubectl -n nvsentinel rollout status deployment/fault-remediation --timeout=180s
+```
+
 ## Maintenance Resource Configuration
 
 Defines the Custom Resource that will be created to trigger remediation actions.

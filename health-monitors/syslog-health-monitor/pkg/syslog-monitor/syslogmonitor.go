@@ -639,6 +639,26 @@ func (sm *SyslogMonitor) configureTagFilters(journal Journal, check CheckDefinit
 			if err := journal.AddMatch(matchExpr); err != nil {
 				return fmt.Errorf("check '%s': failed to add kernel match ('%s'): %w", check.Name, matchExpr, err)
 			}
+
+			// GPU reset acknowledgements are emitted through logger rather than
+			// the kernel. Keep them visible to the XID handler without admitting
+			// unrelated userspace logs:
+			// (_TRANSPORT=kernel) OR (SYSLOG_IDENTIFIER=nvsentinel-gpu-reset).
+			if check.Name == XIDErrorCheck {
+				if err := journal.AddDisjunction(); err != nil {
+					return fmt.Errorf("check '%s': failed to add GPU reset filter disjunction: %w", check.Name, err)
+				}
+
+				resetMatchExpr := FieldSyslogID + "=" + GPUResetSyslogID
+				slog.Info("Adding GPU reset acknowledgement filter",
+					"check", check.Name,
+					"match", resetMatchExpr)
+
+				if err := journal.AddMatch(resetMatchExpr); err != nil {
+					return fmt.Errorf("check '%s': failed to add GPU reset match ('%s'): %w",
+						check.Name, resetMatchExpr, err)
+				}
+			}
 		case "-b", "--boot":
 			slog.Info("Processing explicit boot tag",
 				"check", check.Name,

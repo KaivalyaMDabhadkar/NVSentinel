@@ -292,6 +292,16 @@ platformConnector:
     # Burst: Maximum burst size above QPS
     burst: 10
 
+  # Health event deduplication transformer
+  # Marks repeated events for configured high-volume checks as STORE_AND_ANALYSE.
+  dedup:
+    enabled: false
+    suppressionWindow: "3m"
+    cleanupInterval: "60s"
+    includeChecks:
+      - SysLogsXIDError
+      - SysLogsSXIDError
+
   # Health event transformers pipeline
   # Transformers process health events before storage and propagation
   # They execute in the order specified in the pipeline

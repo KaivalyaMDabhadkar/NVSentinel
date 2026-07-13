@@ -16,6 +16,7 @@ package informer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -30,10 +31,13 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/util/retry"
 
+	annotationutil "github.com/nvidia/nvsentinel/commons/pkg/annotation"
 	"github.com/nvidia/nvsentinel/commons/pkg/auditlogger"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/breaker"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/common"
 	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/config"
+	"github.com/nvidia/nvsentinel/fault-quarantine/pkg/healthEventsAnnotation"
 )
 
 var customBackoff = wait.Backoff{
@@ -286,8 +290,12 @@ func (c *FaultQuarantineClient) QuarantineNodeAndSetAnnotations(
 	isCordon bool,
 	annotations map[string]string,
 	labels map[string]string,
-) error {
+) (bool, error) {
+	alreadyQuarantined := false
+
 	updateFn := func(node *v1.Node) error {
+		alreadyQuarantined = hasNonEmptyQuarantineHealthEvent(node)
+
 		if len(taints) > 0 {
 			if err := c.applyTaints(ctx, node, taints, nodename); err != nil {
 				return fmt.Errorf("failed to apply taints to node %s: %w", nodename, err)
@@ -295,13 +303,13 @@ func (c *FaultQuarantineClient) QuarantineNodeAndSetAnnotations(
 		}
 
 		if isCordon {
-			if shouldSkip := c.handleCordon(ctx, node, nodename); shouldSkip {
-				return nil
-			}
+			c.handleCordon(ctx, node, nodename)
 		}
 
 		if len(annotations) > 0 {
-			c.applyAnnotations(ctx, node, annotations, nodename)
+			if err := c.applyAnnotations(ctx, node, annotations, nodename); err != nil {
+				return err
+			}
 		}
 
 		if len(labels) > 0 {
@@ -311,7 +319,9 @@ func (c *FaultQuarantineClient) QuarantineNodeAndSetAnnotations(
 		return nil
 	}
 
-	return c.UpdateNode(ctx, nodename, updateFn)
+	err := c.UpdateNode(ctx, nodename, updateFn)
+
+	return alreadyQuarantined, err
 }
 
 func (c *FaultQuarantineClient) applyTaints(
@@ -348,13 +358,13 @@ func (c *FaultQuarantineClient) applyTaints(
 	return nil
 }
 
-func (c *FaultQuarantineClient) handleCordon(ctx context.Context, node *v1.Node, nodename string) bool {
+func (c *FaultQuarantineClient) handleCordon(ctx context.Context, node *v1.Node, nodename string) {
 	_, exist := node.Annotations[common.QuarantineHealthEventAnnotationKey]
 
 	if node.Spec.Unschedulable {
 		if exist {
-			slog.InfoContext(ctx, "Node already cordoned by FQM; skipping taint/annotation updates", "node", nodename)
-			return true
+			slog.InfoContext(ctx, "Node already cordoned by FQM; preserving cordon while applying updates", "node", nodename)
+			return
 		}
 
 		slog.InfoContext(ctx, "Node is cordoned manually; applying FQM taints/annotations", "node", nodename)
@@ -365,13 +375,11 @@ func (c *FaultQuarantineClient) handleCordon(ctx context.Context, node *v1.Node,
 			node.Spec.Unschedulable = true
 		}
 	}
-
-	return false
 }
 
 func (c *FaultQuarantineClient) applyAnnotations(
 	ctx context.Context, node *v1.Node, annotations map[string]string, nodename string,
-) {
+) error {
 	if node.Annotations == nil {
 		node.Annotations = make(map[string]string)
 	}
@@ -379,8 +387,146 @@ func (c *FaultQuarantineClient) applyAnnotations(
 	slog.InfoContext(ctx, "Setting annotations on node", "node", nodename, "annotations", annotations)
 
 	for annotationKey, annotationValue := range annotations {
+		if annotationKey == common.QuarantineHealthEventAnnotationKey {
+			mergedValue, err := mergeQuarantineHealthEventAnnotation(node.Annotations[annotationKey], annotationValue)
+			if err != nil {
+				return fmt.Errorf("failed to merge annotation %q on node %s: %w", annotationKey, nodename, err)
+			}
+
+			annotationValue = mergedValue
+		}
+
+		if annotationKey == common.QuarantineHealthEventAppliedTaintsAnnotationKey {
+			mergedValue, err := mergeAppliedTaintsAnnotation(node.Annotations[annotationKey], annotationValue)
+			if err != nil {
+				return fmt.Errorf("failed to merge annotation %q on node %s: %w", annotationKey, nodename, err)
+			}
+
+			annotationValue = mergedValue
+		}
+
 		node.Annotations[annotationKey] = annotationValue
 	}
+
+	return nil
+}
+
+func hasNonEmptyQuarantineHealthEvent(node *v1.Node) bool {
+	if node.Annotations == nil {
+		return false
+	}
+
+	return !annotationutil.IsEmptyValue(node.Annotations[common.QuarantineHealthEventAnnotationKey])
+}
+
+func mergeQuarantineHealthEventAnnotation(existingValue, incomingValue string) (string, error) {
+	return mergeAnnotation(
+		existingValue,
+		incomingValue,
+		"quarantine health event",
+		parseHealthEventsAnnotation,
+		mergeHealthEventsAnnotations,
+	)
+}
+
+func mergeAppliedTaintsAnnotation(existingValue, incomingValue string) (string, error) {
+	return mergeAnnotation(
+		existingValue,
+		incomingValue,
+		"applied taints",
+		parseAppliedTaintsAnnotation,
+		mergeAppliedTaints,
+	)
+}
+
+func mergeAnnotation[T any](
+	existingValue string,
+	incomingValue string,
+	annotationName string,
+	parse func(string) (T, error),
+	merge func(T, T) T,
+) (string, error) {
+	if annotationutil.IsEmptyValue(existingValue) {
+		return incomingValue, nil
+	}
+
+	if annotationutil.IsEmptyValue(incomingValue) {
+		return existingValue, nil
+	}
+
+	existing, err := parse(existingValue)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse existing %s annotation: %w", annotationName, err)
+	}
+
+	incoming, err := parse(incomingValue)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse incoming %s annotation: %w", annotationName, err)
+	}
+
+	annotationBytes, err := json.Marshal(merge(existing, incoming))
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal merged %s annotation: %w", annotationName, err)
+	}
+
+	return string(annotationBytes), nil
+}
+
+func mergeHealthEventsAnnotations(
+	existing *healthEventsAnnotation.HealthEventsAnnotationMap,
+	incoming *healthEventsAnnotation.HealthEventsAnnotationMap,
+) *healthEventsAnnotation.HealthEventsAnnotationMap {
+	for _, event := range incoming.Events {
+		existing.AddOrUpdateEvent(event)
+	}
+
+	return existing
+}
+
+func parseAppliedTaintsAnnotation(value string) ([]config.Taint, error) {
+	var taints []config.Taint
+	if err := json.Unmarshal([]byte(value), &taints); err != nil {
+		return nil, err
+	}
+
+	return taints, nil
+}
+
+func mergeAppliedTaints(existingTaints, incomingTaints []config.Taint) []config.Taint {
+	mergedByKey := make(map[config.Taint]config.Taint, len(existingTaints)+len(incomingTaints))
+	for _, taints := range [][]config.Taint{existingTaints, incomingTaints} {
+		for _, taint := range taints {
+			key := config.Taint{Key: taint.Key, Value: taint.Value, Effect: taint.Effect}
+			if existing, ok := mergedByKey[key]; ok {
+				taint.PreExisting = existing.PreExisting || taint.PreExisting
+			}
+
+			mergedByKey[key] = taint
+		}
+	}
+
+	mergedTaints := make([]config.Taint, 0, len(mergedByKey))
+	for _, taint := range mergedByKey {
+		mergedTaints = append(mergedTaints, taint)
+	}
+
+	return mergedTaints
+}
+
+func parseHealthEventsAnnotation(value string) (*healthEventsAnnotation.HealthEventsAnnotationMap, error) {
+	healthEventsMap := healthEventsAnnotation.NewHealthEventsAnnotationMap()
+	if err := json.Unmarshal([]byte(value), healthEventsMap); err == nil {
+		return healthEventsMap, nil
+	}
+
+	var singleEvent protos.HealthEvent
+	if err := json.Unmarshal([]byte(value), &singleEvent); err != nil {
+		return nil, err
+	}
+
+	healthEventsMap.AddOrUpdateEvent(&singleEvent)
+
+	return healthEventsMap, nil
 }
 
 func (c *FaultQuarantineClient) applyLabels(

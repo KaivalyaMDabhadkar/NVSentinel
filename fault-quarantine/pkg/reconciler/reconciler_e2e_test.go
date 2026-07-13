@@ -462,6 +462,18 @@ func verifyAppliedTaintsAnnotation(t *testing.T, node *corev1.Node, expectedTain
 	}
 }
 
+func hasNodeTaint(node *corev1.Node, expectedTaint config.Taint) bool {
+	for _, taint := range node.Spec.Taints {
+		if taint.Key == expectedTaint.Key &&
+			taint.Value == expectedTaint.Value &&
+			string(taint.Effect) == expectedTaint.Effect {
+			return true
+		}
+	}
+
+	return false
+}
+
 // runReconcilerAndQuarantineNode is a helper that:
 // 1. Sets up a reconciler with the given config
 // 2. Sends a health event to quarantine the node
@@ -4151,6 +4163,248 @@ func TestE2E_ManualUncordonMultipleEvents(t *testing.T) {
 		}
 		return node.Annotations[common.QuarantineHealthEventAnnotationKey] == ""
 	}, eventuallyTimeout, eventuallyPollInterval, "Quarantine annotation should be cleared")
+}
+
+func TestE2E_ConcurrentUnhealthyEvents_WithDelayedInformer(t *testing.T) {
+	testEnv := &envtest.Environment{}
+	restConfig, err := testEnv.Start()
+	require.NoError(t, err, "Failed to start test environment")
+
+	delayedRT := &delayedWatchRoundTripper{
+		watchDelay: 2 * time.Second,
+		enabled:    false,
+	}
+
+	stopCh := make(chan struct{})
+	defer func() {
+		delayedRT.SetEnabled(false)
+		close(stopCh)
+		if err := testEnv.Stop(); err != nil {
+			t.Logf("Warning: Failed to stop test environment: %v", err)
+		}
+	}()
+
+	restConfig.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+		delayedRT.delegate = rt
+		return delayedRT
+	})
+
+	k8sClient, err := kubernetes.NewForConfig(restConfig)
+	require.NoError(t, err, "Failed to create k8s client")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	nodeName := "concurrent-unhealthy-" + generateShortTestID()
+	node := &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: nodeName},
+		Spec:       corev1.NodeSpec{Unschedulable: false},
+		Status:     corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}},
+	}
+	_, err = k8sClient.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+	require.NoError(t, err, "Failed to create test node")
+
+	tomlConfig := config.TomlConfig{
+		LabelPrefix: "k8s.nvidia.com/",
+		RuleSets: []config.RuleSet{
+			{
+				Enabled:  true,
+				Name:     "node-fatal-error-a",
+				Version:  "1",
+				Priority: 10,
+				Match:    config.Match{Any: []config.Rule{{Kind: "HealthEvent", Expression: "event.checkName == 'NodeCheckA' && event.isFatal == true"}}},
+				Taint:    config.Taint{Key: "nvidia.com/node-error-a", Value: "true", Effect: "NoSchedule"},
+				Cordon:   config.Cordon{ShouldCordon: true},
+			},
+			{
+				Enabled:  true,
+				Name:     "node-fatal-error-b",
+				Version:  "1",
+				Priority: 10,
+				Match:    config.Match{Any: []config.Rule{{Kind: "HealthEvent", Expression: "event.checkName == 'NodeCheckB' && event.isFatal == true"}}},
+				Taint:    config.Taint{Key: "nvidia.com/node-error-b", Value: "true", Effect: "NoSchedule"},
+				Cordon:   config.Cordon{ShouldCordon: true},
+			},
+		},
+	}
+
+	nodeInformer, err := informer.NewNodeInformer(k8sClient, 0)
+	require.NoError(t, err)
+
+	fqClient := &informer.FaultQuarantineClient{
+		Clientset:    k8sClient,
+		DryRunMode:   false,
+		NodeInformer: nodeInformer,
+	}
+
+	go func() { _ = nodeInformer.Run(stopCh) }()
+	require.Eventually(t, nodeInformer.HasSynced, 10*time.Second, 100*time.Millisecond, "NodeInformer should sync")
+
+	ruleSetEvals, err := evaluator.InitializeRuleSetEvaluators(tomlConfig.RuleSets, fqClient.NodeInformer)
+	require.NoError(t, err)
+
+	r := NewReconciler(ReconcilerConfig{TomlConfig: tomlConfig}, fqClient, nil)
+	r.SetLabelKeys(tomlConfig.LabelPrefix)
+	fqClient.SetLabelKeys(r.cordonedReasonLabelKey, r.uncordonedReasonLabelKey)
+
+	rulesetsConfig := rulesetsConfig{
+		TaintConfigMap: map[string]*config.Taint{
+			"node-fatal-error-a": &tomlConfig.RuleSets[0].Taint,
+			"node-fatal-error-b": &tomlConfig.RuleSets[1].Taint,
+		},
+		CordonConfigMap: map[string]bool{
+			"node-fatal-error-a": true,
+			"node-fatal-error-b": true,
+		},
+		RuleSetPriorityMap: map[string]int{
+			"node-fatal-error-a": 10,
+			"node-fatal-error-b": 10,
+		},
+	}
+	r.precomputeTaintInitKeys(context.Background(), ruleSetEvals, rulesetsConfig)
+
+	eventA := &model.HealthEventWithStatus{
+		HealthEvent: &protos.HealthEvent{
+			Version: 1, Agent: "test-agent", ComponentClass: "Node",
+			CheckName: "NodeCheckA", IsHealthy: false, IsFatal: true,
+			ErrorCode:        []string{"error-a"},
+			EntitiesImpacted: []*protos.Entity{{EntityType: "v1/Node", EntityValue: nodeName}},
+			NodeName:         nodeName,
+			Id:               generateTestID(),
+		},
+	}
+	eventB := &model.HealthEventWithStatus{
+		HealthEvent: &protos.HealthEvent{
+			Version: 1, Agent: "test-agent", ComponentClass: "Node",
+			CheckName: "NodeCheckB", IsHealthy: false, IsFatal: true,
+			ErrorCode:        []string{"error-b"},
+			EntitiesImpacted: []*protos.Entity{{EntityType: "v1/Node", EntityValue: nodeName}},
+			NodeName:         nodeName,
+			Id:               generateTestID(),
+		},
+	}
+
+	delayedRT.SetEnabled(true)
+
+	var wg sync.WaitGroup
+	statuses := make([]*model.Status, 2)
+	startBarrier := make(chan struct{})
+
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-startBarrier
+		statuses[0] = r.ProcessEvent(ctx, eventA, ruleSetEvals, rulesetsConfig)
+	}()
+	go func() {
+		defer wg.Done()
+		<-startBarrier
+		statuses[1] = r.ProcessEvent(ctx, eventB, ruleSetEvals, rulesetsConfig)
+	}()
+
+	close(startBarrier)
+	wg.Wait()
+	delayedRT.SetEnabled(false)
+
+	var quarantinedCount, alreadyQuarantinedCount int
+	for _, status := range statuses {
+		require.NotNil(t, status)
+		switch *status {
+		case model.Quarantined:
+			quarantinedCount++
+		case model.AlreadyQuarantined:
+			alreadyQuarantinedCount++
+		}
+	}
+	assert.Equal(t, 1, quarantinedCount, "exactly one event should start the quarantine session")
+	assert.Equal(t, 1, alreadyQuarantinedCount, "the concurrent event should be classified as already quarantined")
+
+	finalNode, err := k8sClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	var healthEventsMap healthEventsAnnotation.HealthEventsAnnotationMap
+	err = json.Unmarshal([]byte(finalNode.Annotations[common.QuarantineHealthEventAnnotationKey]), &healthEventsMap)
+	require.NoError(t, err)
+	assert.Equal(t, 2, healthEventsMap.Count(), "both concurrent unhealthy events should be tracked")
+	assert.True(t, healthEventsMap.HasMatchingEntities(eventA.HealthEvent), "event A should be present in annotation")
+	assert.True(t, healthEventsMap.HasMatchingEntities(eventB.HealthEvent), "event B should be present in annotation")
+
+	expectedTaints := []config.Taint{
+		{Key: "nvidia.com/node-error-a", Value: "true", Effect: "NoSchedule"},
+		{Key: "nvidia.com/node-error-b", Value: "true", Effect: "NoSchedule"},
+	}
+	verifyAppliedTaintsAnnotation(t, finalNode, expectedTaints)
+
+	require.Eventually(t, func() bool {
+		cachedNode, err := nodeInformer.GetNode(nodeName)
+		if err != nil {
+			return false
+		}
+
+		var cachedHealthEventsMap healthEventsAnnotation.HealthEventsAnnotationMap
+		if err := json.Unmarshal(
+			[]byte(cachedNode.Annotations[common.QuarantineHealthEventAnnotationKey]),
+			&cachedHealthEventsMap,
+		); err != nil {
+			return false
+		}
+
+		return cachedHealthEventsMap.Count() == 2
+	}, 10*time.Second, 100*time.Millisecond, "NodeInformer should observe both concurrent quarantine events")
+
+	healthyEventA := &model.HealthEventWithStatus{
+		HealthEvent: &protos.HealthEvent{
+			Version: 1, Agent: "test-agent", ComponentClass: "Node",
+			CheckName: "NodeCheckA", IsHealthy: true, IsFatal: false,
+			ErrorCode:        []string{"error-a"},
+			EntitiesImpacted: []*protos.Entity{{EntityType: "v1/Node", EntityValue: nodeName}},
+			NodeName:         nodeName,
+			Id:               generateTestID(),
+		},
+	}
+	healthyEventB := &model.HealthEventWithStatus{
+		HealthEvent: &protos.HealthEvent{
+			Version: 1, Agent: "test-agent", ComponentClass: "Node",
+			CheckName: "NodeCheckB", IsHealthy: true, IsFatal: false,
+			ErrorCode:        []string{"error-b"},
+			EntitiesImpacted: []*protos.Entity{{EntityType: "v1/Node", EntityValue: nodeName}},
+			NodeName:         nodeName,
+			Id:               generateTestID(),
+		},
+	}
+
+	status := r.ProcessEvent(ctx, healthyEventA, ruleSetEvals, rulesetsConfig)
+	require.NotNil(t, status)
+	assert.Equal(t, model.AlreadyQuarantined, *status, "first recovery should keep node quarantined")
+
+	require.Eventually(t, func() bool {
+		cachedNode, err := nodeInformer.GetNode(nodeName)
+		if err != nil {
+			return false
+		}
+
+		var cachedHealthEventsMap healthEventsAnnotation.HealthEventsAnnotationMap
+		if err := json.Unmarshal(
+			[]byte(cachedNode.Annotations[common.QuarantineHealthEventAnnotationKey]),
+			&cachedHealthEventsMap,
+		); err != nil {
+			return false
+		}
+
+		return cachedHealthEventsMap.Count() == 1
+	}, 10*time.Second, 100*time.Millisecond, "NodeInformer should observe partial recovery")
+
+	status = r.ProcessEvent(ctx, healthyEventB, ruleSetEvals, rulesetsConfig)
+	require.NotNil(t, status)
+	assert.Equal(t, model.UnQuarantined, *status, "second recovery should unquarantine node")
+
+	finalNode, err = k8sClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, finalNode.Annotations[common.QuarantineHealthEventAnnotationKey])
+	assert.Empty(t, finalNode.Annotations[common.QuarantineHealthEventAppliedTaintsAnnotationKey])
+	for _, removedTaint := range expectedTaints {
+		assert.False(t, hasNodeTaint(finalNode, removedTaint), "taint should be removed after recovery: %+v", removedTaint)
+	}
 }
 
 // TestE2E_ConcurrentHealthyEvents_WithDelayedInformer verifies that the reconciler correctly

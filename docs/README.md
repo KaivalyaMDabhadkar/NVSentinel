@@ -22,9 +22,14 @@ Complete catalog of all Prometheus metrics exposed by NVSentinel components. Use
 
 ### [tutorials/](./tutorials/)
 **Step-by-step developer guides**  
-Hands-on walkthroughs for extending NVSentinel. Start with
-[Writing a New Health Monitor](./tutorials/writing-a-health-monitor.md) to build, deploy,
-and verify a custom fault detector end-to-end (no GPU required).
+Hands-on walkthroughs for extending NVSentinel:
+
+- [Writing a New Health Monitor](./tutorials/writing-a-health-monitor.md) — build, deploy, and
+  verify a custom fault detector end-to-end (no GPU required).
+- [Writing a Preflight Check](./tutorials/writing-a-preflight-check.md) — build an init-container
+  diagnostic, register it in Helm, and verify it blocks bad GPU pod starts.
+- [Writing a Drain Plugin](./tutorials/writing-a-drain-plugin.md) — replace node-drainer's
+  eviction step with a custom controller.
 
 ### [configuration/](./configuration/)
 **Component configuration guides**  

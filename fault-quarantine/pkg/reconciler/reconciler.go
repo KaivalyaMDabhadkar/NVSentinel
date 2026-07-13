@@ -1029,7 +1029,7 @@ func (r *Reconciler) applyQuarantine(
 
 	labels := syncMapToStringMap(labelsMap)
 
-	err := r.k8sClient.QuarantineNodeAndSetAnnotations(
+	alreadyQuarantined, err := r.k8sClient.QuarantineNodeAndSetAnnotations(
 		ctx,
 		event.HealthEvent.NodeName,
 		taintsToBeApplied,
@@ -1054,6 +1054,9 @@ func (r *Reconciler) applyQuarantine(
 	r.updateQuarantineMetrics(event.HealthEvent.NodeName, taintsToBeApplied, isCordoned)
 
 	status := model.Quarantined
+	if alreadyQuarantined {
+		status = model.AlreadyQuarantined
+	}
 
 	return &status
 }

@@ -162,9 +162,12 @@ func TestQuarantineNodeAndSetAnnotations(t *testing.T) {
 		cordonedReasonLabelKey:    "gpu-error",
 		cordonedTimestampLabelKey: time.Now().UTC().Format("2006-01-02T15-04-05Z"),
 	}
-	err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, taints, true, annotations, labelsMap)
+	alreadyQuarantined, err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, taints, true, annotations, labelsMap)
 	if err != nil {
 		t.Fatalf("QuarantineNodeAndSetAnnotations failed: %v", err)
+	}
+	if alreadyQuarantined {
+		t.Errorf("Expected node to be newly quarantined")
 	}
 
 	updatedNode, err := testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
@@ -301,7 +304,7 @@ func TestTaintAndCordonNode_NodeNotFound(t *testing.T) {
 	ctx := context.Background()
 	k8sClient := setupTestClient(t)
 
-	err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, "non-existent-node", nil, false, nil, map[string]string{})
+	_, err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, "non-existent-node", nil, false, nil, map[string]string{})
 	if err == nil {
 		t.Errorf("Expected error when node does not exist, got nil")
 	}
@@ -318,7 +321,7 @@ func TestTaintAndCordonNode_NoChanges(t *testing.T) {
 
 	k8sClient := setupTestClient(t)
 
-	err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, nil, false, nil, map[string]string{})
+	_, err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, nil, false, nil, map[string]string{})
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -473,7 +476,7 @@ func TestTaintAndCordonNode_AlreadyTaintedCordoned(t *testing.T) {
 	k8sClient := setupTestClient(t)
 
 	taintsToAdd := []config.Taint{{Key: "test-key", Value: "test-value", Effect: "NoSchedule"}}
-	err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, taintsToAdd, true, nil, map[string]string{})
+	_, err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, taintsToAdd, true, nil, map[string]string{})
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -538,7 +541,7 @@ func TestTaintAndCordonNode_InvalidTaintEffect(t *testing.T) {
 
 	// envtest validates taint effects, so invalid effects should now return an error
 	taints := []config.Taint{{Key: "weird-key", Value: "weird-value", Effect: "SomeInvalidEffect"}}
-	err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, taints, false, nil, map[string]string{})
+	_, err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, taints, false, nil, map[string]string{})
 	if err == nil {
 		t.Errorf("Expected error for invalid taint effect, got nil")
 	}
@@ -558,7 +561,7 @@ func TestTaintAndCordonNode_OverwriteAnnotation(t *testing.T) {
 	k8sClient := setupTestClient(t)
 
 	annotations := map[string]string{"existing-key": "new-value"}
-	err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, nil, false, annotations, map[string]string{})
+	_, err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, nil, false, annotations, map[string]string{})
 	if err != nil {
 		t.Fatalf("Expected no error, got %v", err)
 	}
@@ -659,7 +662,7 @@ func TestTaintAndCordonNode_EmptyTaintKeyOrValue(t *testing.T) {
 	taints := []config.Taint{
 		{Key: "", Value: "", Effect: "NoSchedule"},
 	}
-	err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, taints, false, nil, map[string]string{})
+	_, err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, taints, false, nil, map[string]string{})
 	if err == nil {
 		t.Errorf("Expected error for empty taint key, got nil")
 	}
@@ -680,7 +683,7 @@ func TestTaintAndCordonNode_EmptyAnnotationKey(t *testing.T) {
 	annotations := map[string]string{
 		"": "empty-key-value",
 	}
-	err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, nil, false, annotations, map[string]string{})
+	_, err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, nodeName, nil, false, annotations, map[string]string{})
 	if err == nil {
 		t.Errorf("Expected error for empty annotation key, got nil")
 	}
@@ -690,7 +693,7 @@ func TestTaintAndCordonNode_NonExistentNode(t *testing.T) {
 	ctx := context.Background()
 	k8sClient := setupTestClient(t)
 
-	err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, "no-such-node", nil, true, nil, map[string]string{})
+	_, err := k8sClient.QuarantineNodeAndSetAnnotations(ctx, "no-such-node", nil, true, nil, map[string]string{})
 	if err == nil {
 		t.Errorf("Expected error for non-existent node, got nil")
 	}

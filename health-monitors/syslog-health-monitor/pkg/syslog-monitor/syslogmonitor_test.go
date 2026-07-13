@@ -59,6 +59,7 @@ type MockJournal struct {
 	Path            string
 	CurrentPosition int
 	MatchFilters    []string
+	Disjunctions    int
 	Closed          bool
 	TestBootID      string
 	TestCursor      string
@@ -81,6 +82,17 @@ func (j *MockJournal) AddMatch(match string) error {
 	}
 
 	j.MatchFilters = append(j.MatchFilters, match)
+
+	return nil
+}
+
+// AddDisjunction inserts an OR between journal match groups.
+func (j *MockJournal) AddDisjunction() error {
+	if j.Closed {
+		return errors.New(JOURNAL_CLOSED_ERROR)
+	}
+
+	j.Disjunctions++
 
 	return nil
 }
@@ -821,11 +833,10 @@ func TestGPUFallenOffHandlerInitialization(t *testing.T) {
 	assert.NotNil(t, sm.checkToHandlerMap[GPUFallenOffCheck], "GPU Fallen Off handler should be initialized")
 }
 
-// TestConfigureTagFilters_KernelTagAddsTransportMatch verifies that a check
-// carrying the "-k" tag restricts the journal to kernel-transport entries via a
-// _TRANSPORT=kernel match. This is the filter the kernel-origin checks rely on
-// to keep up with journald; see NVIDIA/NVSentinel#1417.
-func TestConfigureTagFilters_KernelTagAddsTransportMatch(t *testing.T) {
+// TestConfigureTagFilters_XIDTagIncludesGPUResetAcknowledgements verifies that
+// the XID reader consumes kernel messages or tagged GPU reset acknowledgements,
+// while still excluding unrelated userspace journal traffic.
+func TestConfigureTagFilters_XIDTagIncludesGPUResetAcknowledgements(t *testing.T) {
 	for _, tag := range []string{"-k", "--dmesg"} {
 		t.Run(tag, func(t *testing.T) {
 			sm := &SyslogMonitor{}
@@ -834,10 +845,58 @@ func TestConfigureTagFilters_KernelTagAddsTransportMatch(t *testing.T) {
 
 			err := sm.configureTagFilters(mock, check)
 			assert.NoError(t, err)
-			assert.Contains(t, mock.MatchFilters, FieldTransport+"="+TransportKernel,
-				"tag %q should add a kernel-transport (_TRANSPORT=kernel) journal match", tag)
+			assert.Equal(t, []string{
+				FieldTransport + "=" + TransportKernel,
+				FieldSyslogID + "=" + GPUResetSyslogID,
+			}, mock.MatchFilters)
+			assert.Equal(t, 1, mock.Disjunctions,
+				"kernel and GPU reset identifier matches must be ORed")
 		})
 	}
+}
+
+func TestConfigureTagFilters_NonXIDKernelCheckExcludesGPUResetAcknowledgements(t *testing.T) {
+	sm := &SyslogMonitor{}
+	mock := &MockJournal{}
+	check := CheckDefinition{Name: SXIDErrorCheck, Tags: []string{"-k"}}
+
+	err := sm.configureTagFilters(mock, check)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{FieldTransport + "=" + TransportKernel}, mock.MatchFilters)
+	assert.Zero(t, mock.Disjunctions)
+}
+
+func TestFakeJournal_KernelOrGPUResetIdentifierFilter(t *testing.T) {
+	journal := NewFakeJournal()
+	journal.AddEntry(map[string]string{
+		FieldTransport: "journal",
+		FieldSyslogID:  "unrelated-service",
+	}, "unrelated")
+	journal.AddEntry(map[string]string{
+		FieldTransport: TransportKernel,
+	}, "kernel")
+	journal.AddEntry(map[string]string{
+		FieldTransport: "syslog",
+		FieldSyslogID:  GPUResetSyslogID,
+	}, "gpu-reset")
+
+	assert.NoError(t, journal.AddMatch(FieldTransport+"="+TransportKernel))
+	assert.NoError(t, journal.AddDisjunction())
+	assert.NoError(t, journal.AddMatch(FieldSyslogID+"="+GPUResetSyslogID))
+
+	advanced, err := journal.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(1), advanced)
+	cursor, err := journal.GetCursor()
+	assert.NoError(t, err)
+	assert.Equal(t, "kernel", cursor)
+
+	advanced, err = journal.Next()
+	assert.NoError(t, err)
+	assert.Equal(t, uint64(1), advanced)
+	cursor, err = journal.GetCursor()
+	assert.NoError(t, err)
+	assert.Equal(t, "gpu-reset", cursor)
 }
 
 // TestConfigureTagFilters_NoTagsAddsNoMatch verifies that a check with no tags

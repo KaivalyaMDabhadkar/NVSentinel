@@ -1553,6 +1553,7 @@ type healthEventOptions struct {
 	nodeName          string
 	eventID           string
 	nodeQuarantined   model.Status
+	createdAt         time.Time
 	drainForce        bool
 	recommendedAction protos.RecommendedAction
 	entitiesImpacted  []*protos.Entity
@@ -1562,6 +1563,10 @@ func createHealthEvent(opts healthEventOptions) map[string]interface{} {
 	eventID := opts.nodeName + "-event"
 	if opts.eventID != "" {
 		eventID = opts.eventID
+	}
+	createdAt := opts.createdAt
+	if createdAt.IsZero() {
+		createdAt = time.Now()
 	}
 
 	healthEvent := &protos.HealthEvent{
@@ -1583,7 +1588,7 @@ func createHealthEvent(opts healthEventOptions) map[string]interface{} {
 			NodeQuarantined:        string(opts.nodeQuarantined),
 			UserPodsEvictionStatus: &protos.OperationStatus{Status: string(model.StatusInProgress)},
 		},
-		"createdAt": time.Now(),
+		"createdAt": createdAt,
 	}
 }
 
@@ -1966,6 +1971,173 @@ func TestReconciler_MultipleEventsOnNodeCancelledByUnQuarantine(t *testing.T) {
 	pod2, err := setup.client.CoreV1().Pods("timeout-test").Get(setup.ctx, "pod-2", metav1.GetOptions{})
 	require.NoError(t, err)
 	assert.Nil(t, pod2.DeletionTimestamp, "pod-2 should not be deleted")
+}
+
+func TestReconciler_UnQuarantineCancellationDoesNotCancelFreshSession(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "allowcompletion-*", Mode: config.ModeAllowCompletion},
+	}, false)
+
+	nodeName := testutils.GenerateTestNodeName("fresh-session-after-unquarantine")
+	createNode(setup.ctx, t, setup.client, nodeName)
+	createNamespace(setup.ctx, t, setup.client, "allowcompletion-test")
+	createPod(setup.ctx, t, setup.client, "allowcompletion-test", "held-pod", nodeName, v1.PodRunning, nil, nil)
+
+	baseTime := time.Now().UTC()
+	oldEvent := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		eventID:         "old-event",
+		nodeQuarantined: model.Quarantined,
+		createdAt:       baseTime,
+	})
+	freshEvent := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		eventID:         "fresh-event",
+		nodeQuarantined: model.Quarantined,
+		createdAt:       baseTime.Add(2 * time.Second),
+	})
+
+	err := setup.reconciler.ProcessEventGeneric(setup.ctx, oldEvent, setup.mockCollection,
+		setup.healthEventStore, nodeName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "waiting for pods to complete")
+
+	setup.reconciler.HandleCancellation(setup.ctx, "unquarantined-event", nodeName,
+		model.UnQuarantined, baseTime.Add(time.Second))
+
+	cancelledUpdates := make(map[string]bool)
+	setup.mockCollection.UpdateDocumentFunc = func(_ context.Context, filter interface{},
+		update interface{}) (*sdkclient.UpdateResult, error) {
+		filterMap, ok := filter.(map[string]any)
+		require.True(t, ok)
+
+		documentID := fmt.Sprintf("%v", filterMap["_id"])
+		if updateMap, ok := update.(map[string]any); ok {
+			if setMap, ok := updateMap["$set"].(map[string]any); ok {
+				if statusMap, ok := setMap["healtheventstatus.userpodsevictionstatus"].(map[string]interface{}); ok {
+					cancelledUpdates[documentID] = statusMap["status"] == string(model.Cancelled)
+				}
+			}
+		}
+
+		return &sdkclient.UpdateResult{ModifiedCount: 1}, nil
+	}
+
+	err = setup.reconciler.ProcessEventGeneric(setup.ctx, freshEvent, setup.mockCollection,
+		setup.healthEventStore, nodeName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "waiting for pods to complete")
+	assert.False(t, cancelledUpdates["fresh-event"], "fresh event after UnQuarantined cutoff must not be cancelled")
+
+	err = setup.reconciler.ProcessEventGeneric(setup.ctx, oldEvent, setup.mockCollection,
+		setup.healthEventStore, nodeName)
+	require.NoError(t, err)
+	assert.True(t, cancelledUpdates["old-event"], "old event before UnQuarantined cutoff should still be cancelled")
+}
+
+func TestReconciler_UnQuarantineCutoffStillCancelsUntrackedOldEventsAfterFreshSession(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "allowcompletion-*", Mode: config.ModeAllowCompletion},
+	}, false)
+
+	nodeName := testutils.GenerateTestNodeName("fresh-session-before-untracked-old")
+	createNode(setup.ctx, t, setup.client, nodeName)
+	createNamespace(setup.ctx, t, setup.client, "allowcompletion-test")
+	createPod(setup.ctx, t, setup.client, "allowcompletion-test", "held-pod", nodeName, v1.PodRunning, nil, nil)
+
+	baseTime := time.Now().UTC()
+	staleQueuedEvent := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		eventID:         "stale-queued-event",
+		nodeQuarantined: model.Quarantined,
+		createdAt:       baseTime,
+	})
+	freshEvent := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		eventID:         "fresh-event",
+		nodeQuarantined: model.Quarantined,
+		createdAt:       baseTime.Add(2 * time.Second),
+	})
+
+	setup.reconciler.HandleCancellation(setup.ctx, "unquarantined-event", nodeName,
+		model.UnQuarantined, baseTime.Add(time.Second))
+
+	cancelledUpdates := make(map[string]bool)
+	setup.mockCollection.UpdateDocumentFunc = func(_ context.Context, filter interface{},
+		update interface{}) (*sdkclient.UpdateResult, error) {
+		filterMap, ok := filter.(map[string]any)
+		require.True(t, ok)
+
+		documentID := fmt.Sprintf("%v", filterMap["_id"])
+		if updateMap, ok := update.(map[string]any); ok {
+			if setMap, ok := updateMap["$set"].(map[string]any); ok {
+				if statusMap, ok := setMap["healtheventstatus.userpodsevictionstatus"].(map[string]interface{}); ok {
+					cancelledUpdates[documentID] = statusMap["status"] == string(model.Cancelled)
+				}
+			}
+		}
+
+		return &sdkclient.UpdateResult{ModifiedCount: 1}, nil
+	}
+
+	err := setup.reconciler.ProcessEventGeneric(setup.ctx, freshEvent, setup.mockCollection,
+		setup.healthEventStore, nodeName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "waiting for pods to complete")
+	assert.False(t, cancelledUpdates["fresh-event"], "fresh event after UnQuarantined cutoff must not be cancelled")
+
+	err = setup.reconciler.ProcessEventGeneric(setup.ctx, staleQueuedEvent, setup.mockCollection,
+		setup.healthEventStore, nodeName)
+	require.NoError(t, err)
+	assert.True(t, cancelledUpdates["stale-queued-event"],
+		"pre-cutoff event that was not tracked before the fresh session should still be cancelled")
+}
+
+func TestReconciler_UnQuarantineCutoffDoesNotCancelFreshTimeoutEviction(t *testing.T) {
+	setup := setupDirectTest(t, []config.UserNamespace{
+		{Name: "timeout-*", Mode: config.ModeDeleteAfterTimeout},
+	}, false)
+
+	nodeName := testutils.GenerateTestNodeName("fresh-timeout-after-unquarantine")
+	createNode(setup.ctx, t, setup.client, nodeName)
+	createNamespace(setup.ctx, t, setup.client, "timeout-test")
+	createPod(setup.ctx, t, setup.client, "timeout-test", "held-pod", nodeName, v1.PodRunning, nil, nil)
+
+	baseTime := time.Now().UTC()
+	freshEvent := createHealthEvent(healthEventOptions{
+		nodeName:        nodeName,
+		eventID:         "fresh-timeout-event",
+		nodeQuarantined: model.Quarantined,
+		createdAt:       baseTime.Add(2 * time.Second),
+	})
+
+	setup.reconciler.HandleCancellation(setup.ctx, "unquarantined-event", nodeName,
+		model.UnQuarantined, baseTime.Add(time.Second))
+
+	cancelledUpdates := make(map[string]bool)
+	setup.mockCollection.UpdateDocumentFunc = func(_ context.Context, filter interface{},
+		update interface{}) (*sdkclient.UpdateResult, error) {
+		filterMap, ok := filter.(map[string]any)
+		require.True(t, ok)
+
+		documentID := fmt.Sprintf("%v", filterMap["_id"])
+		if updateMap, ok := update.(map[string]any); ok {
+			if setMap, ok := updateMap["$set"].(map[string]any); ok {
+				if statusMap, ok := setMap["healtheventstatus.userpodsevictionstatus"].(map[string]interface{}); ok {
+					cancelledUpdates[documentID] = statusMap["status"] == string(model.Cancelled)
+				}
+			}
+		}
+
+		return &sdkclient.UpdateResult{ModifiedCount: 1}, nil
+	}
+
+	err := setup.reconciler.ProcessEventGeneric(setup.ctx, freshEvent, setup.mockCollection,
+		setup.healthEventStore, nodeName)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "waiting for 1 pods to complete or timeout")
+	assert.False(t, cancelledUpdates["fresh-timeout-event"],
+		"fresh timeout eviction after UnQuarantined cutoff must not be cancelled")
 }
 
 func TestReconciler_HandleCancellation_UnknownStatus_LogsWarning(t *testing.T) {

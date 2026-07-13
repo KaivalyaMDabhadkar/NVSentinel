@@ -18,6 +18,10 @@ navigation:
     contents:
       - page: Writing a Health Monitor
         path: tutorials/writing-a-health-monitor.md
+      - page: Writing a Preflight Check
+        path: tutorials/writing-a-preflight-check.md
+      - page: Writing a Drain Plugin
+        path: tutorials/writing-a-drain-plugin.md
 
   - section: Architecture
     contents:

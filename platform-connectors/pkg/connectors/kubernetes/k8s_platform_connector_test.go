@@ -604,6 +604,38 @@ func TestRemoveImpactedEntitiesMessagesScoped(t *testing.T) {
 			},
 		},
 		{
+			name: "composite NIC identity: shared port on different NIC is not cleared",
+			messages: []string{
+				"NIC:mlx5_0 NICPort:1 link down Recommended Action=RESTART_VM;",
+				"NIC:mlx5_1 NICPort:1 link down Recommended Action=RESTART_VM;",
+			},
+			entities: []protos.Entity{
+				{EntityType: "NIC", EntityValue: "mlx5_1"},
+				{EntityType: "NICPort", EntityValue: "1"},
+			},
+			errorCodes: nil,
+			expected: []string{
+				"NIC:mlx5_0 NICPort:1 link down Recommended Action=RESTART_VM;",
+			},
+		},
+		{
+			name: "scoped clear: composite entity identity preserves unrelated code",
+			messages: []string{
+				"ErrorCode:163 PCI:0000:03:00 GPU_UUID:GPU-1 boom Recommended Action=RESTART_VM;",
+				"ErrorCode:98 PCI:0000:03:00 GPU_UUID:GPU-1 unrelated Recommended Action=RESTART_VM;",
+				"ErrorCode:163 PCI:0000:04:00 GPU_UUID:GPU-2 boom Recommended Action=RESTART_VM;",
+			},
+			entities: []protos.Entity{
+				{EntityType: "PCI", EntityValue: "0000:03:00"},
+				{EntityType: "GPU_UUID", EntityValue: "GPU-1"},
+			},
+			errorCodes: []string{"163"},
+			expected: []string{
+				"ErrorCode:98 PCI:0000:03:00 GPU_UUID:GPU-1 unrelated Recommended Action=RESTART_VM;",
+				"ErrorCode:163 PCI:0000:04:00 GPU_UUID:GPU-2 boom Recommended Action=RESTART_VM;",
+			},
+		},
+		{
 			name: "Tier 1 truncated entity cleared by healthy event",
 			messages: []string{
 				"ErrorCode:POD_STUCK_AFTER_DELETION v1/Pod:prod/61f345d08c9a432a-134... Recommended Action=RESTART_VM;",
@@ -1530,6 +1562,27 @@ func TestProcessHealthEvents_StoreOnlyStrategy(t *testing.T) {
 			description:            "STORE_ONLY fatal event should not create node condition",
 		},
 		{
+			name: "STORE_AND_ANALYSE event should not create node condition",
+			healthEvents: []*protos.HealthEvent{
+				{
+					CheckName:          "GpuXidError",
+					Agent:              "gpu-health-monitor",
+					ComponentClass:     "GPU",
+					ErrorCode:          []string{"79"},
+					IsFatal:            true,
+					IsHealthy:          false,
+					GeneratedTimestamp: timestamppb.New(time.Now()),
+					RecommendedAction:  protos.RecommendedAction_CONTACT_SUPPORT,
+					Message:            "XID 79: GPU has fallen off the bus",
+					NodeName:           "store-only-test-node",
+					ProcessingStrategy: protos.ProcessingStrategy_STORE_AND_ANALYSE,
+				},
+			},
+			expectNodeConditions:   false,
+			expectKubernetesEvents: false,
+			description:            "STORE_AND_ANALYSE fatal event should not create node condition",
+		},
+		{
 			name: "STORE_ONLY non-fatal event should not create Kubernetes event",
 			healthEvents: []*protos.HealthEvent{
 				{
@@ -1722,7 +1775,7 @@ func TestProcessHealthEvents_StoreOnlyStrategy(t *testing.T) {
 					"Expected condition type %s, got %s", tc.expectedConditionType, nvsentinelConditions[0].Type)
 			} else {
 				assert.Empty(t, nvsentinelConditions,
-					"Expected no NVSentinel node conditions for STORE_ONLY events, got %d", len(nvsentinelConditions))
+					"Expected no NVSentinel node conditions for non-remediation events, got %d", len(nvsentinelConditions))
 			}
 
 			// Verify Kubernetes events
@@ -1738,7 +1791,7 @@ func TestProcessHealthEvents_StoreOnlyStrategy(t *testing.T) {
 					"Expected event type %s, got %s", tc.expectedEventType, events.Items[0].Type)
 			} else {
 				assert.Empty(t, events.Items,
-					"Expected no Kubernetes events for STORE_ONLY events, got %d", len(events.Items))
+					"Expected no Kubernetes events for non-remediation events, got %d", len(events.Items))
 			}
 
 			t.Logf("Test passed: %s", tc.description)

@@ -42,6 +42,23 @@ node-drainer:
 
 > Note: This module depends on the results from fault-quarantine. It also depends on the datastore being enabled. Therefore, ensure the datastore and the other modules are also enabled.
 
+### Change Stream Resume Token
+
+To make node-drainer skip accumulated events and start from the current stream head, scale it to zero, set its key in the shared resume-control ConfigMap to `CREATE`, then restore its replicas. Node-drainer deletes only its own resume token, records a cold-start cutoff timestamp, skips startup cold-start recovery for that run, and resets the key back to `RESUME` during startup. Future restarts still run cold-start recovery, but only for records newer than the recorded cutoff.
+
+```bash
+REPLICAS=$(kubectl -n nvsentinel get deployment node-drainer -o jsonpath='{.spec.replicas}')
+kubectl -n nvsentinel scale deployment/node-drainer --replicas=0
+kubectl -n nvsentinel rollout status deployment/node-drainer --timeout=180s
+kubectl -n nvsentinel get configmap resume-control >/dev/null 2>&1 || \
+  kubectl -n nvsentinel create configmap resume-control
+kubectl -n nvsentinel patch configmap resume-control \
+  --type merge \
+  -p '{"data":{"node-drainer":"CREATE"}}'
+kubectl -n nvsentinel scale deployment/node-drainer --replicas="${REPLICAS:-1}"
+kubectl -n nvsentinel rollout status deployment/node-drainer --timeout=180s
+```
+
 ### Partial Drain
 
 If enabled, the node-drainer will only drain pods which are leveraging the GPU_UUID impacted entity in COMPONENT_RESET HealthEvents. If disabled, the node-drainer will drain all eligible pods on the impacted node for the configured namespaces regardless of the remediation action. HealthEvents with the COMPONENT_RESET remediation action must include an impacted entity for the unhealthy GPU_UUID or else the drain will fail. 

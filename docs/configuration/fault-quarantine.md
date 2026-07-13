@@ -42,6 +42,23 @@ fault-quarantine:
   logLevel: info  # Options: debug, info, warn, error
 ```
 
+### Change Stream Resume Token
+
+To make fault-quarantine skip accumulated events and start from the current stream head, scale it to zero, set its key in the shared resume-control ConfigMap to `CREATE`, then restore its replicas. Fault-quarantine deletes only its own resume token and resets the key back to `RESUME` during startup.
+
+```bash
+REPLICAS=$(kubectl -n nvsentinel get deployment fault-quarantine -o jsonpath='{.spec.replicas}')
+kubectl -n nvsentinel scale deployment/fault-quarantine --replicas=0
+kubectl -n nvsentinel rollout status deployment/fault-quarantine --timeout=180s
+kubectl -n nvsentinel get configmap resume-control >/dev/null 2>&1 || \
+  kubectl -n nvsentinel create configmap resume-control
+kubectl -n nvsentinel patch configmap resume-control \
+  --type merge \
+  -p '{"data":{"fault-quarantine":"CREATE"}}'
+kubectl -n nvsentinel scale deployment/fault-quarantine --replicas="${REPLICAS:-1}"
+kubectl -n nvsentinel rollout status deployment/fault-quarantine --timeout=180s
+```
+
 ### Label Prefix
 
 Defines the prefix for all node labels created by the module to track cordon/uncordon lifecycle.
