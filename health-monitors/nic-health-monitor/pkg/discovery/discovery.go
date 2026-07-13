@@ -113,32 +113,53 @@ func DiscoverDevicesWithOverride(
 	}
 
 	for _, devName := range entries {
-		includedByOverride := inclusionOverrideEnabled && matchesAny(devName, inclusions)
-		if inclusionOverrideEnabled && !includedByOverride {
-			continue
-		}
-
-		if !inclusionOverrideEnabled && matchesAny(devName, exclusions) {
-			continue
-		}
-
-		dev, err := discoverDevice(reader, devName)
-		if err != nil {
-			slog.Debug("Skipping device", "device", devName, "error", err)
-			continue
-		}
-
-		dev.IncludedByOverride = includedByOverride
-
-		if dev.IsVF && !includedByOverride {
+		dev, skippedVF := discoverCandidate(
+			reader, devName, exclusions, inclusions, inclusionOverrideEnabled,
+		)
+		if skippedVF {
 			result.SkippedVFs++
-			continue
 		}
 
-		result.Devices = append(result.Devices, *dev)
+		if dev != nil {
+			result.Devices = append(result.Devices, *dev)
+		}
 	}
 
 	return result, nil
+}
+
+// discoverCandidate applies the configured discovery scope to one device,
+// parses devices that remain eligible, and reports normal-flow VFs separately
+// so the caller can maintain its skipped count.
+func discoverCandidate(
+	reader sysfs.Reader,
+	devName string,
+	exclusions []*regexp.Regexp,
+	inclusions []*regexp.Regexp,
+	inclusionOverrideEnabled bool,
+) (*IBDevice, bool) {
+	includedByOverride := inclusionOverrideEnabled && matchesAny(devName, inclusions)
+	if inclusionOverrideEnabled && !includedByOverride {
+		return nil, false
+	}
+
+	if !inclusionOverrideEnabled && matchesAny(devName, exclusions) {
+		return nil, false
+	}
+
+	dev, err := discoverDevice(reader, devName)
+	if err != nil {
+		slog.Debug("Skipping device", "device", devName, "error", err)
+
+		return nil, false
+	}
+
+	dev.IncludedByOverride = includedByOverride
+	if dev.IsVF && !includedByOverride {
+		return nil, true
+	}
+
+	return dev, false
 }
 
 // discoverDevice gathers identity and port data for a single IB device.
