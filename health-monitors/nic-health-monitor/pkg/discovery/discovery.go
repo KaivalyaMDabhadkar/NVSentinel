@@ -81,9 +81,9 @@ func DiscoverDevices(reader sysfs.Reader, exclusionRegex string) (*DiscoveryResu
 
 // DiscoverDevicesWithOverride enumerates all IB/RoCE devices from sysfs,
 // parsing each device's metadata and ports.
-// When inclusionRegexOverride is non-empty, only matching names are returned
-// and all automatic device filters, including exclusionRegex and the VF filter,
-// are bypassed.
+// When inclusionRegexOverride contains at least one usable pattern, only
+// matching names are returned and all automatic device filters, including
+// exclusionRegex and the VF filter, are bypassed.
 func DiscoverDevicesWithOverride(
 	reader sysfs.Reader,
 	exclusionRegex string,
@@ -102,7 +102,11 @@ func DiscoverDevicesWithOverride(
 
 	exclusions := compileRegexList(exclusionRegex)
 	inclusions := compileRegexList(inclusionRegexOverride)
-	inclusionOverrideEnabled := strings.TrimSpace(inclusionRegexOverride) != ""
+	// Enable the override only when at least one usable pattern was
+	// compiled. Values such as "," or ",," contain no patterns and must
+	// fall back to normal discovery instead of silently excluding every
+	// device.
+	inclusionOverrideEnabled := len(inclusions) > 0
 
 	result := &DiscoveryResult{
 		Devices: make([]IBDevice, 0, len(entries)),

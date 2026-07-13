@@ -76,3 +76,29 @@ func TestDiscoverDevices_UsesNormalFiltersWithoutInclusionOverride(t *testing.T)
 	assert.False(t, result.Devices[0].IncludedByOverride)
 	assert.Equal(t, 1, result.SkippedVFs)
 }
+
+func TestDiscoverDevices_EmptyInclusionPatternListUsesNormalFilters(t *testing.T) {
+	reader := &sysfs.MockReader{
+		ListDirsFunc: func(path string) ([]string, error) {
+			if path == "/sys/class/infiniband" {
+				return []string{"mlx5_excluded", "mlx5_vf", "mlx5_normal"}, nil
+			}
+
+			if strings.HasSuffix(path, "/ports") {
+				return []string{}, nil
+			}
+
+			return nil, nil
+		},
+		IsVirtualFunctionFunc: func(device string) bool {
+			return device == "mlx5_vf"
+		},
+	}
+
+	result, err := DiscoverDevicesWithOverride(reader, "^mlx5_excluded$", ", ,")
+	require.NoError(t, err)
+	require.Len(t, result.Devices, 1)
+	assert.Equal(t, "mlx5_normal", result.Devices[0].Name)
+	assert.False(t, result.Devices[0].IncludedByOverride)
+	assert.Equal(t, 1, result.SkippedVFs)
+}
