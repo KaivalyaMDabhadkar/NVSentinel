@@ -54,9 +54,9 @@ type stubDevice struct {
 }
 
 type stubPort struct {
-	state      string
-	physState  string
-	linkLayer  string
+	state     string
+	physState string
+	linkLayer string
 }
 
 func newStubNode() *stubNode {
@@ -490,6 +490,48 @@ func TestIBState_ManagementNICIsExcluded(t *testing.T) {
 	events, err := check.Run()
 	require.NoError(t, err)
 	assert.Empty(t, events, "Management NIC DOWN should not produce events")
+}
+
+func TestIBState_InclusionOverrideBypassesAllDeviceFilters(t *testing.T) {
+	node := newStubNode().addIB("mlx5_forced", &stubDevice{
+		vendor:     "0x9999",
+		pciAddress: "0000:02:00.1",
+		numaNode:   2,
+		isVF:       true,
+		ports: map[int]stubPort{
+			1: {state: "ACTIVE", physState: "LinkUp", linkLayer: "InfiniBand"},
+		},
+	})
+
+	reader := node.reader()
+	classifier := buildClassifier(t, reader,
+		[]string{"0000:0f:00.0"},
+		map[string][]string{"mlx5_forced": {"SYS"}},
+	)
+	assert.True(t, classifier.IsManagementNIC("mlx5_forced"))
+
+	cfg := &config.Config{
+		NicExclusionRegex:         "^mlx5_forced$",
+		NicInclusionRegexOverride: "^mlx5_forced$",
+	}
+	check := NewInfiniBandStateCheck("node1", reader, cfg,
+		classifier, pb.ProcessingStrategy_EXECUTE_REMEDIATION, freshStateManager(t), false)
+
+	// Establish a healthy baseline, then verify that the explicitly included
+	// device remains monitored when it crosses into an unhealthy state.
+	events, err := check.Run()
+	require.NoError(t, err)
+	assert.Empty(t, events)
+
+	node.ib["mlx5_forced"].ports[1] = stubPort{
+		state: "DOWN", physState: "Disabled", linkLayer: "InfiniBand",
+	}
+
+	events, err = check.Run()
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.True(t, events[0].IsFatal)
+	assert.Contains(t, events[0].Message, "mlx5_forced")
 }
 
 func TestIBState_DeviceDisappearanceEmitsFatal(t *testing.T) {

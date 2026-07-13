@@ -144,6 +144,38 @@ func LoadFromMetadata(metadataPath string, reader sysfs.Reader, procNetRoutePath
 	return c, nil
 }
 
+// NewOverrideClassifier returns a Classifier with no GPU or topology
+// data, for use ONLY while the explicit NIC inclusion override is
+// active and gpu_metadata.json is unavailable (e.g., the metadata
+// collector cannot run because the GPU stack is down — precisely the
+// situation the override exists for). Lookups degrade gracefully: with
+// an empty GPU-NUMA set every device classifies as Management, which is
+// irrelevant under the override because pinned devices bypass
+// classification filters and the homogeneity check entirely. Normal
+// discovery must never use this — LoadFromMetadata's hard failure is
+// the contract there ("no silent fallback").
+func NewOverrideClassifier(reader sysfs.Reader, procNetRoutePath ...string) *Classifier {
+	c := &Classifier{
+		reader:      reader,
+		gpuNUMASet:  make(map[int]struct{}),
+		topology:    map[string][]string{},
+		cachedRoles: make(map[string]Role),
+		cachedCards: make(map[string]string),
+	}
+
+	routePath := DefaultProcNetRoutePath
+	if len(procNetRoutePath) > 0 && procNetRoutePath[0] != "" {
+		routePath = procNetRoutePath[0]
+	}
+
+	c.resolveDefaultRouteDevice(routePath)
+
+	slog.Warn("NIC topology classifier running WITHOUT GPU metadata " +
+		"(inclusion override active) — only explicitly pinned devices are monitored")
+
+	return c
+}
+
 // populateGPUNUMASet reads each GPU's NUMA node from the metadata file
 // (populated by the metadata collector from `nvidia-smi topo -m`).
 // GPUs with numa_node < 0 (unknown) are skipped. The caller checks
@@ -456,10 +488,29 @@ func (c *Classifier) CheckCardHomogeneity(
 	cardTotal map[string]int,
 	cardRole map[string]Role,
 ) (anomalies map[string]CardAnomaly) {
+	anomalies, _ = c.EvaluateCardHomogeneity(cardActive, cardTotal, cardRole)
+
+	return anomalies
+}
+
+// EvaluateCardHomogeneity is CheckCardHomogeneity plus the positive
+// evidence set: it also returns the decisive mode for every card that
+// was actually judged (member of a >=2-card role group with a nonzero,
+// untied mode). Callers use the evaluated map to drive the card-anomaly
+// latch lifecycle: a latched card recovers only when it is present,
+// its group is decisive, and it is no longer below the mode. Absent
+// cards and indecisive groups hold the latch — no evidence, no verdict,
+// matching the first-poll suppression philosophy.
+func (c *Classifier) EvaluateCardHomogeneity(
+	cardActive map[string]int,
+	cardTotal map[string]int,
+	cardRole map[string]Role,
+) (anomalies map[string]CardAnomaly, evaluated map[string]int) {
 	anomalies = make(map[string]CardAnomaly)
+	evaluated = make(map[string]int)
 
 	if len(cardTotal) < 2 {
-		return anomalies
+		return anomalies, evaluated
 	}
 
 	byRole := make(map[Role][]string)
@@ -478,6 +529,8 @@ func (c *Classifier) CheckCardHomogeneity(
 		}
 
 		for _, card := range cards {
+			evaluated[card] = mode
+
 			active := cardActive[card]
 			if active < mode {
 				anomalies[card] = CardAnomaly{
@@ -489,7 +542,7 @@ func (c *Classifier) CheckCardHomogeneity(
 		}
 	}
 
-	return anomalies
+	return anomalies, evaluated
 }
 
 // CardAnomaly describes a card whose active-port count is below the mode

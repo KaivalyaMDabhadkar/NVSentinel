@@ -56,28 +56,39 @@ type IBPort struct {
 
 // IBDevice represents a discovered NIC device.
 type IBDevice struct {
-	Name      string   `json:"name"`   // e.g., "mlx5_0"
-	Vendor    Vendor   `json:"vendor"` // detected from sysfs vendor ID
-	HCAType   string   `json:"hca_type,omitempty"`
-	FWVersion string   `json:"fw_ver,omitempty"`
-	Ports     []IBPort `json:"ports"`
-	IsVF      bool     `json:"is_vf"` // true when `device/physfn` symlink exists
-	NetDev    string   `json:"net_dev,omitempty"`
+	Name               string   `json:"name"`   // e.g., "mlx5_0"
+	Vendor             Vendor   `json:"vendor"` // detected from sysfs vendor ID
+	HCAType            string   `json:"hca_type,omitempty"`
+	FWVersion          string   `json:"fw_ver,omitempty"`
+	Ports              []IBPort `json:"ports"`
+	IsVF               bool     `json:"is_vf"` // true when `device/physfn` symlink exists
+	NetDev             string   `json:"net_dev,omitempty"`
+	IncludedByOverride bool     `json:"-"` // true when selected by the explicit inclusion override
 }
 
-// DiscoveryResult holds the output of DiscoverDevices, separating
-// monitored physical devices from skipped VFs so callers don't need
-// to re-filter.
+// DiscoveryResult holds the output of device discovery, separating monitored
+// devices from VFs skipped by the normal discovery flow.
 type DiscoveryResult struct {
 	Devices    []IBDevice
 	SkippedVFs int
 }
 
-// DiscoverDevices enumerates all IB/RoCE devices from sysfs, parsing
-// each device's metadata and ports. SR-IOV VFs are counted but excluded
-// from the returned Devices slice. The exclusionRegex argument is a
-// comma-separated list of regexes that filter device *names*.
+// DiscoverDevices enumerates IB/RoCE devices using the normal discovery flow.
+// SR-IOV VFs are counted but excluded and exclusionRegex filters device names.
 func DiscoverDevices(reader sysfs.Reader, exclusionRegex string) (*DiscoveryResult, error) {
+	return DiscoverDevicesWithOverride(reader, exclusionRegex, "")
+}
+
+// DiscoverDevicesWithOverride enumerates all IB/RoCE devices from sysfs,
+// parsing each device's metadata and ports.
+// When inclusionRegexOverride is non-empty, only matching names are returned
+// and all automatic device filters, including exclusionRegex and the VF filter,
+// are bypassed.
+func DiscoverDevicesWithOverride(
+	reader sysfs.Reader,
+	exclusionRegex string,
+	inclusionRegexOverride string,
+) (*DiscoveryResult, error) {
 	ibPath := reader.IBBasePath()
 
 	entries, err := reader.ListDirs(ibPath)
@@ -90,13 +101,20 @@ func DiscoverDevices(reader sysfs.Reader, exclusionRegex string) (*DiscoveryResu
 	}
 
 	exclusions := compileRegexList(exclusionRegex)
+	inclusions := compileRegexList(inclusionRegexOverride)
+	inclusionOverrideEnabled := strings.TrimSpace(inclusionRegexOverride) != ""
 
 	result := &DiscoveryResult{
 		Devices: make([]IBDevice, 0, len(entries)),
 	}
 
 	for _, devName := range entries {
-		if matchesAny(devName, exclusions) {
+		includedByOverride := inclusionOverrideEnabled && matchesAny(devName, inclusions)
+		if inclusionOverrideEnabled && !includedByOverride {
+			continue
+		}
+
+		if !inclusionOverrideEnabled && matchesAny(devName, exclusions) {
 			continue
 		}
 
@@ -106,7 +124,9 @@ func DiscoverDevices(reader sysfs.Reader, exclusionRegex string) (*DiscoveryResu
 			continue
 		}
 
-		if dev.IsVF {
+		dev.IncludedByOverride = includedByOverride
+
+		if dev.IsVF && !includedByOverride {
 			result.SkippedVFs++
 			continue
 		}

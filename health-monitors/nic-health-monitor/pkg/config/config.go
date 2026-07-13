@@ -178,10 +178,12 @@ var counterDefinitions = map[string]counterDefinition{
 // Config represents the NIC Health Monitor configuration loaded from TOML.
 type Config struct {
 	// NicExclusionRegex contains comma-separated regex patterns for NICs to exclude
+	// during normal discovery. NicInclusionRegexOverride takes precedence when set.
 	NicExclusionRegex string `toml:"nicExclusionRegex"`
 
-	// NicInclusionRegexOverride, when non-empty, bypasses automatic device discovery
-	// and monitors only NIC devices whose names match these comma-separated regex patterns.
+	// NicInclusionRegexOverride, when non-empty, monitors only NIC devices whose
+	// names match these comma-separated regex patterns and bypasses all automatic
+	// device filters for those matches.
 	NicInclusionRegexOverride string `toml:"nicInclusionRegexOverride"`
 
 	// SysClassNetPath is the sysfs path for network interfaces (container mount point)

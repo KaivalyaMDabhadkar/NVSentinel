@@ -956,15 +956,15 @@ runtime paths and polling cadence. Both surfaces are documented below.
 **Helm values (YAML)** — covers sysfs mount points and device filtering:
 
 ```yaml
-# Comma-separated regex patterns for NICs to exclude from discovery.
-# Names matching any pattern are dropped before any classification runs.
+# Comma-separated regex patterns for NICs to exclude from normal discovery.
+# Names matching any pattern are dropped unless nicInclusionRegexOverride is set.
 nicExclusionRegex: "^veth.*,^docker.*,^br-.*,^lo$"
 
 # OPTIONAL. When non-empty, bypasses automatic NIC discovery and monitors
 # only IB device names matching these comma-separated regex patterns.
-# The NUMA gate, topology classification, and NicExclusionRegex are all
-# skipped — intended as an emergency override for operators who need to
-# hand-pin a device list. Leave empty for the normal flow.
+# All automatic filters, including vendor, VF, management/NUMA, and
+# NicExclusionRegex, are skipped — intended as an emergency override for
+# operators who need to hand-pin a device list. Leave empty for the normal flow.
 nicInclusionRegexOverride: ""
 
 # sysfs mount points as seen inside the container. The monitor runs with

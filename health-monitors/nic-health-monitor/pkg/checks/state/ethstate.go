@@ -127,7 +127,9 @@ func newEthPollState() *ethPollState {
 
 // Run executes a single poll cycle.
 func (c *EthernetStateCheck) Run() ([]*pb.HealthEvent, error) {
-	result, err := discovery.DiscoverDevices(c.reader, c.cfg.NicExclusionRegex)
+	result, err := discovery.DiscoverDevicesWithOverride(
+		c.reader, c.cfg.NicExclusionRegex, c.cfg.NicInclusionRegexOverride,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("device discovery failed: %w", err)
 	}
@@ -217,21 +219,29 @@ func (c *EthernetStateCheck) recordPort(
 func (c *EthernetStateCheck) buildEventsForPoll(
 	st *ethPollState, firstPoll, baselineRun bool,
 ) []*pb.HealthEvent {
-	// Computed only on the first poll: cards with positive peer evidence
-	// of failure (active-port count below their role group's decisive
-	// mode). Shared between the per-port severity decision and the
-	// card-level homogeneity events.
+	// Card homogeneity is evaluated every poll: anomalies feed the
+	// first-poll per-port severity decision and drive the card-anomaly
+	// latch (FATAL on onset, card-healthy on recovery — see
+	// cardHomogeneityEvents). Skipped entirely while the inclusion
+	// override is active — the discovered set is just the pinned
+	// devices, so peer-group statistics carry no signal (see
+	// overrideActive).
 	var anomalousCards map[string]topology.CardAnomaly
-	if firstPoll {
-		anomalousCards = c.classifier.CheckCardHomogeneity(st.cardActive, st.cardTotal, st.cardRole)
+
+	var evaluatedCards map[string]int
+
+	if !c.overrideActive() {
+		anomalousCards, evaluatedCards = c.classifier.EvaluateCardHomogeneity(
+			st.cardActive, st.cardTotal, st.cardRole)
 	}
 
 	events := c.portTransitionEvents(st, firstPoll, baselineRun, anomalousCards)
 	events = append(events, c.detectDeviceDisappearance(st.seenDevices)...)
 	events = append(events, c.detectPortDisappearance(st.currentDevices, st.currentPorts)...)
 
-	if firstPoll {
-		events = append(events, c.runCardHomogeneityCheck(anomalousCards)...)
+	if !c.overrideActive() {
+		events = append(events, c.cardHomogeneityEvents(
+			st.cardActive, st.cardRole, anomalousCards, evaluatedCards, baselineRun)...)
 	}
 
 	return events
@@ -321,6 +331,10 @@ func (c *EthernetStateCheck) healthyRecoveryEvent(
 // peer evidence the monitor logs and suppresses the event instead of
 // publishing an external HealthEvent. Runtime healthy→DOWN transitions
 // are always fatal (firstPoll is false once previous state exists).
+//
+// Devices pinned by the explicit inclusion override are never
+// suppressed: the operator asked to watch exactly this device, and that
+// intent replaces peer evidence.
 func (c *EthernetStateCheck) unhealthyEvent(
 	pi ethPortInfo, prev portSnapshot,
 	firstPoll bool, anomalousCards map[string]topology.CardAnomaly, portCard map[string]string,
@@ -334,7 +348,7 @@ func (c *EthernetStateCheck) unhealthyEvent(
 		return nil
 	}
 
-	if firstPoll {
+	if firstPoll && !pi.dev.IncludedByOverride {
 		card := portCard[pi.key]
 		if _, anomalous := anomalousCards[card]; !anomalous {
 			slog.Info("Suppressing first-poll unhealthy RoCE port: no peer evidence of failure",

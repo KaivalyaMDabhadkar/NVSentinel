@@ -112,10 +112,11 @@ type ibPollState struct {
 	ibPorts        []discovery.IBPort
 	skippedVFs     int
 
-	cardActive map[string]int
-	cardTotal  map[string]int
-	cardRole   map[string]topology.Role
-	portCard   map[string]string
+	cardActive   map[string]int
+	cardTotal    map[string]int
+	cardRole     map[string]topology.Role
+	portCard     map[string]string
+	portOverride map[string]bool
 }
 
 func newIBPollState() *ibPollState {
@@ -128,12 +129,15 @@ func newIBPollState() *ibPollState {
 		cardTotal:      make(map[string]int),
 		cardRole:       make(map[string]topology.Role),
 		portCard:       make(map[string]string),
+		portOverride:   make(map[string]bool),
 	}
 }
 
 // Run executes a single poll cycle and returns the resulting events.
 func (c *InfiniBandStateCheck) Run() ([]*pb.HealthEvent, error) {
-	result, err := discovery.DiscoverDevices(c.reader, c.cfg.NicExclusionRegex)
+	result, err := discovery.DiscoverDevicesWithOverride(
+		c.reader, c.cfg.NicExclusionRegex, c.cfg.NicInclusionRegexOverride,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("device discovery failed: %w", err)
 	}
@@ -183,7 +187,7 @@ func (c *InfiniBandStateCheck) collectDevicesAndPorts(devices []discovery.IBDevi
 				continue
 			}
 
-			c.recordPort(st, dev.Name, card, role, port)
+			c.recordPort(st, dev.Name, card, role, port, dev.IncludedByOverride)
 		}
 	}
 }
@@ -192,6 +196,7 @@ func (c *InfiniBandStateCheck) collectDevicesAndPorts(devices []discovery.IBDevi
 // the per-card aggregates used by the homogeneity check.
 func (c *InfiniBandStateCheck) recordPort(
 	st *ibPollState, device, card string, role topology.Role, port discovery.IBPort,
+	includedByOverride bool,
 ) {
 	key := portKey(device, port.Port)
 	snap := portSnapshot{
@@ -211,6 +216,7 @@ func (c *InfiniBandStateCheck) recordPort(
 
 	st.cardRole[card] = role
 	st.portCard[key] = card
+	st.portOverride[key] = includedByOverride
 }
 
 // buildEventsForPoll runs the event-producing logic (per-port transitions,
@@ -225,21 +231,29 @@ func (c *InfiniBandStateCheck) recordPort(
 func (c *InfiniBandStateCheck) buildEventsForPoll(
 	st *ibPollState, firstPoll, baselineRun bool,
 ) []*pb.HealthEvent {
-	// Computed only on the first poll: the set of cards with positive
-	// peer evidence of failure (active-port count below their role
-	// group's decisive mode). This one map drives both the per-port
-	// severity decision and the card-level homogeneity events.
+	// Card homogeneity is evaluated every poll: anomalies feed the
+	// first-poll per-port severity decision and drive the card-anomaly
+	// latch (FATAL on onset, card-healthy on recovery — see
+	// cardHomogeneityEvents). Skipped entirely while the inclusion
+	// override is active — the discovered set is just the pinned
+	// devices, so peer-group statistics carry no signal (see
+	// overrideActive).
 	var anomalousCards map[string]topology.CardAnomaly
-	if firstPoll {
-		anomalousCards = c.classifier.CheckCardHomogeneity(st.cardActive, st.cardTotal, st.cardRole)
+
+	var evaluatedCards map[string]int
+
+	if !c.overrideActive() {
+		anomalousCards, evaluatedCards = c.classifier.EvaluateCardHomogeneity(
+			st.cardActive, st.cardTotal, st.cardRole)
 	}
 
 	events := c.portTransitionEvents(st, firstPoll, baselineRun, anomalousCards)
 	events = append(events, c.detectDeviceDisappearance(st.seenDevices)...)
 	events = append(events, c.detectPortDisappearance(st.currentDevices, st.currentPorts)...)
 
-	if firstPoll {
-		events = append(events, c.runCardHomogeneityCheck(anomalousCards)...)
+	if !c.overrideActive() {
+		events = append(events, c.cardHomogeneityEvents(
+			st.cardActive, st.cardRole, anomalousCards, evaluatedCards, baselineRun)...)
 	}
 
 	return events
@@ -260,7 +274,8 @@ func (c *InfiniBandStateCheck) portTransitionEvents(
 		current := st.currentPorts[key]
 		card := st.portCard[key]
 
-		if c.shouldSuppressFirstPollWithoutPeerEvidence(firstPoll, current, port, card, anomalousCards) {
+		if !st.portOverride[key] &&
+			c.shouldSuppressFirstPollWithoutPeerEvidence(firstPoll, current, port, card, anomalousCards) {
 			continue
 		}
 
@@ -289,6 +304,10 @@ func (c *InfiniBandStateCheck) portTransitionEvents(
 // modes, and all-down groups therefore suppress first-poll unhealthy
 // ports; runtime healthy→unhealthy transitions are unaffected because
 // firstPoll is false once previous state exists.
+//
+// Devices pinned by the explicit inclusion override never reach this
+// gate (the caller checks portOverride first): the operator asked to
+// watch exactly that device, and that intent replaces peer evidence.
 func (c *InfiniBandStateCheck) shouldSuppressFirstPollWithoutPeerEvidence(
 	firstPoll bool,
 	current portSnapshot,
