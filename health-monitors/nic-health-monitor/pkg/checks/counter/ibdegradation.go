@@ -36,7 +36,10 @@ type InfiniBandDegradationCheck struct {
 	cfg       *config.Config
 	state     *statefile.Manager
 	evaluator *Evaluator
+	pending   *Evaluator
 }
+
+var _ checks.TransactionalCheck = (*InfiniBandDegradationCheck)(nil)
 
 // NewInfiniBandDegradationCheck creates a new InfiniBandDegradationCheck.
 // bootIDChanged is forwarded to the Evaluator so the first poll after a
@@ -68,16 +71,47 @@ func (c *InfiniBandDegradationCheck) Name() string {
 	return checks.InfiniBandDegradationCheckName
 }
 
-// Run executes a single InfiniBand counter degradation poll. After
-// evaluation it merges the evaluator's snapshots and breach flags back
-// into the shared state file and persists if either changed.
+// Run executes and commits one poll for direct callers. The production
+// monitor uses Prepare/Commit/Discard so publication succeeds before state
+// advances.
 func (c *InfiniBandDegradationCheck) Run() ([]*pb.HealthEvent, error) {
+	events, err := c.Prepare()
+	if err != nil {
+		return nil, err
+	}
+
+	c.Commit()
+
+	return events, nil
+}
+
+// Prepare evaluates one poll against a cloned evaluator and stages the
+// resulting counter state without mutating the committed evaluator.
+func (c *InfiniBandDegradationCheck) Prepare() ([]*pb.HealthEvent, error) {
+	c.Discard()
+
 	result, err := discovery.DiscoverDevicesWithOverride(
 		c.reader, c.cfg.NicExclusionRegex, c.cfg.NicInclusionRegexOverride,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover devices: %w", err)
 	}
+	if !result.Complete {
+		if c.evaluator.HasState() {
+			return nil, fmt.Errorf("failed to discover devices: InfiniBand sysfs tree unavailable")
+		}
+
+		// Do not consume the post-reboot baseline before the first complete
+		// enumeration. Nodes without an IB tree remain a harmless no-op.
+		return nil, nil
+	}
+	if len(result.UnreadableDevices) > 0 && !c.evaluator.HasState() {
+		// A partial first poll cannot establish a trustworthy baseline for all
+		// counters. Wait for a complete device read instead.
+		return nil, nil
+	}
+
+	candidate := c.evaluator.Clone()
 
 	var events []*pb.HealthEvent
 
@@ -95,17 +129,33 @@ func (c *InfiniBandDegradationCheck) Run() ([]*pb.HealthEvent, error) {
 				continue
 			}
 
-			portEvents := c.evaluator.EvaluateCounters(
+			portEvents := candidate.EvaluateCounters(
 				dev, port, c.cfg.CounterDetection.Counters, c.Name(),
 			)
 			events = append(events, portEvents...)
 		}
 	}
 
-	c.evaluator.ClearBootIDFlag()
-	c.persist()
+	candidate.ClearBootIDFlag()
+	c.pending = candidate
 
 	return events, nil
+}
+
+// Commit installs and persists the most recently prepared evaluator state.
+func (c *InfiniBandDegradationCheck) Commit() {
+	if c.pending == nil {
+		return
+	}
+
+	c.evaluator = c.pending
+	c.pending = nil
+	c.persist()
+}
+
+// Discard abandons a prepared poll after check or publication failure.
+func (c *InfiniBandDegradationCheck) Discard() {
+	c.pending = nil
 }
 
 // persist writes any changes to the shared state file. Errors are

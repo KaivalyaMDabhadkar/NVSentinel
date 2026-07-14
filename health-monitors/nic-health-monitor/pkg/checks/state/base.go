@@ -66,7 +66,26 @@ type baseStateCheck struct {
 	// held by fault-quarantine.
 	anomalousLatch map[string]bool
 
+	// disappearedLatch tracks device-level FATALs that still need a healthy
+	// re-enumeration event. deviceMissCounts debounces confirmed enumeration
+	// absences before creating such a FATAL.
+	disappearedLatch map[string]bool
+	deviceMissCounts map[string]int
+
+	pending *statePollCommit
+
 	strategy linkLayerStrategy
+}
+
+const deviceMissThreshold = 3
+
+type statePollCommit struct {
+	devices          map[string]bool
+	ports            map[string]portSnapshot
+	anomalousLatch   map[string]bool
+	disappearedLatch map[string]bool
+	deviceMissCounts map[string]int
+	linkLayer        string
 }
 
 // seedFromPersistedState pre-populates previousPorts and previousDevices
@@ -85,6 +104,13 @@ func (b *baseStateCheck) seedFromPersistedState() {
 	for card := range b.state.AnomalousCardsFor(b.strategy.linkLayer()) {
 		b.anomalousLatch[card] = true
 	}
+
+	b.disappearedLatch = make(map[string]bool)
+	for device := range b.state.DisappearedDevicesFor(b.strategy.linkLayer()) {
+		b.disappearedLatch[device] = true
+	}
+
+	b.deviceMissCounts = b.state.DeviceMissCountsFor(b.strategy.linkLayer())
 
 	if b.emitHealthyBaselines {
 		return
@@ -115,6 +141,110 @@ func (b *baseStateCheck) seedFromPersistedState() {
 		"port_states", len(b.previousPorts),
 		"known_devices", len(b.previousDevices),
 	)
+}
+
+func cloneBoolMap(in map[string]bool) map[string]bool {
+	out := make(map[string]bool, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+
+	return out
+}
+
+func cloneIntMap(in map[string]int) map[string]int {
+	out := make(map[string]int, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+
+	return out
+}
+
+func clonePortMap(in map[string]portSnapshot) map[string]portSnapshot {
+	out := make(map[string]portSnapshot, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+
+	return out
+}
+
+// consumeDisappearanceRecovery clears and reports a latched device
+// disappearance. It is called only while evaluating a healthy port event; the
+// transactional candidate maps ensure the clear is committed after publish.
+func (b *baseStateCheck) consumeDisappearanceRecovery(device string) bool {
+	if !b.disappearedLatch[device] {
+		return false
+	}
+
+	delete(b.disappearedLatch, device)
+
+	return true
+}
+
+// consumeReenumeratedDisappearances clears disappearance latches for
+// devices that were fully discovered again but expose no port of this
+// check's link layer, emitting a device-level healthy event so the
+// outstanding FATAL downstream is not orphaned. The per-port recovery
+// path cannot reach such devices — they never produce a healthy port of
+// this layer. This covers a device whose ports were reflashed to the
+// sibling layer while it was absent, and latches created before device
+// tracking became layer-scoped. Absent or unreadable devices are not in
+// parsedDevices and hold the latch: no evidence, no verdict.
+func (b *baseStateCheck) consumeReenumeratedDisappearances(
+	parsedDevices, currentDevices map[string]bool,
+) []*pb.HealthEvent {
+	var events []*pb.HealthEvent
+
+	for device := range b.disappearedLatch {
+		if !parsedDevices[device] || currentDevices[device] {
+			continue
+		}
+
+		delete(b.disappearedLatch, device)
+
+		slog.Info("Latched device re-enumerated without target-layer ports; emitting device recovery",
+			"device", device, "linkLayer", b.strategy.linkLayer())
+
+		events = append(events, checks.NewHealthEvent(
+			b.nodeName, b.strategy.checkName(),
+			fmt.Sprintf("Device %s re-enumerated in sysfs", device),
+			checks.DeviceEntities(device),
+			false, true, pb.RecommendedAction_NONE, b.processingStrategy,
+		))
+	}
+
+	return events
+}
+
+// retainUnreadableDevices treats a device that was enumerated but could not
+// be parsed as unknown, not absent. Its last committed device/port snapshots
+// are carried into the candidate poll so neither disappearance nor a partial
+// read can fabricate a state transition.
+func (b *baseStateCheck) retainUnreadableDevices(
+	unreadable map[string]error,
+	seenDevices, currentDevices map[string]bool,
+	currentPorts map[string]portSnapshot,
+) {
+	for device, err := range unreadable {
+		seenDevices[device] = true
+		delete(b.deviceMissCounts, device)
+
+		if !b.previousDevices[device] {
+			continue
+		}
+
+		currentDevices[device] = true
+		for key, snap := range b.previousPorts {
+			if snap.Device == device {
+				currentPorts[key] = snap
+			}
+		}
+
+		slog.Warn("Retaining last-known NIC state after incomplete sysfs read",
+			"device", device, "linkLayer", b.strategy.linkLayer(), "error", err)
+	}
 }
 
 // overrideActive reports whether the explicit inclusion override is
@@ -269,17 +399,45 @@ func (b *baseStateCheck) cardHealthyEvent(
 // detectDeviceDisappearance compares the current device set against the
 // previous poll's set. Missing devices get a FATAL event with the NIC
 // entity.
-func (b *baseStateCheck) detectDeviceDisappearance(current map[string]bool) []*pb.HealthEvent {
+func (b *baseStateCheck) detectDeviceDisappearance(
+	seenDevices map[string]bool,
+	currentDevices map[string]bool,
+	currentPorts map[string]portSnapshot,
+) ([]*pb.HealthEvent, bool) {
 	if b.previousDevices == nil {
-		return nil
+		return nil, false
 	}
 
 	var events []*pb.HealthEvent
+	heldMissingState := false
 
 	for device := range b.previousDevices {
-		if current[device] {
+		if seenDevices[device] {
+			delete(b.deviceMissCounts, device)
 			continue
 		}
+
+		misses := b.deviceMissCounts[device] + 1
+		if misses < deviceMissThreshold {
+			heldMissingState = true
+			b.deviceMissCounts[device] = misses
+			currentDevices[device] = true
+
+			for key, snap := range b.previousPorts {
+				if snap.Device == device {
+					currentPorts[key] = snap
+				}
+			}
+
+			slog.Warn("Device absent from sysfs enumeration; holding last-known state",
+				"device", device, "linkLayer", b.strategy.linkLayer(),
+				"misses", misses, "threshold", deviceMissThreshold)
+
+			continue
+		}
+
+		delete(b.deviceMissCounts, device)
+		b.disappearedLatch[device] = true
 
 		slog.Warn("Device disappeared from sysfs",
 			"device", device, "linkLayer", b.strategy.linkLayer())
@@ -296,7 +454,7 @@ func (b *baseStateCheck) detectDeviceDisappearance(current map[string]bool) []*p
 		))
 	}
 
-	return events
+	return events, heldMissingState
 }
 
 // detectPortDisappearance handles the case where a device is still
@@ -370,7 +528,15 @@ func (b *baseStateCheck) persistState(
 	portsChanged := b.state.UpdatePortStates(snapshots, devices, linkLayer)
 	latchChanged := b.state.UpdateAnomalousCards(latch, linkLayer)
 
-	if !portsChanged && !latchChanged {
+	disappeared := make(map[string]statefile.DisappearedDeviceFlag, len(b.disappearedLatch))
+	for device := range b.disappearedLatch {
+		disappeared[device] = statefile.DisappearedDeviceFlag{LinkLayer: linkLayer}
+	}
+
+	disappearedChanged := b.state.UpdateDisappearedDevices(disappeared, linkLayer)
+	missesChanged := b.state.UpdateDeviceMissCounts(b.deviceMissCounts, linkLayer)
+
+	if !portsChanged && !latchChanged && !disappearedChanged && !missesChanged {
 		return
 	}
 

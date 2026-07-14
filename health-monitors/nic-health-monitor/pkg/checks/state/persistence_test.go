@@ -186,12 +186,21 @@ func TestIBState_Persistence_DeviceDisappearanceAcrossRestart(t *testing.T) {
 	require.NoError(t, err)
 
 	// Drop mlx5_1, simulate a fresh pod on the same boot.
+	removedDevice := node.ib["mlx5_1"]
 	delete(node.ib, "mlx5_1")
 
 	mgr2 := reloadManager(t, mgr)
 	secondPod := NewInfiniBandStateCheck("node1", reader, &config.Config{},
 		classifier, pb.ProcessingStrategy_EXECUTE_REMEDIATION, mgr2, false)
 	events, err := secondPod.Run()
+	require.NoError(t, err)
+	assert.Empty(t, events, "first miss after restart must be debounced")
+
+	events, err = secondPod.Run()
+	require.NoError(t, err)
+	assert.Empty(t, events, "second miss after restart must be debounced")
+
+	events, err = secondPod.Run()
 	require.NoError(t, err)
 
 	var disappeared *pb.HealthEvent
@@ -209,6 +218,19 @@ func TestIBState_Persistence_DeviceDisappearanceAcrossRestart(t *testing.T) {
 	require.NotNil(t, disappeared, "new pod should emit a fatal device-disappearance event for mlx5_1")
 	assert.Contains(t, disappeared.Message, "mlx5_1")
 	assert.Contains(t, disappeared.Message, "disappeared")
+
+	// The disappearance latch must survive another pod restart so a healthy
+	// re-enumeration clears the outstanding device-level condition.
+	node.ib["mlx5_1"] = removedDevice
+	mgr3 := reloadManager(t, mgr2)
+	thirdPod := NewInfiniBandStateCheck("node1", reader, &config.Config{},
+		classifier, pb.ProcessingStrategy_EXECUTE_REMEDIATION, mgr3, false)
+
+	events, err = thirdPod.Run()
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.True(t, events[0].IsHealthy)
+	assert.Contains(t, events[0].Message, "mlx5_1")
 }
 
 func TestEthState_Persistence_IBAndEthShareFileWithoutClobber(t *testing.T) {

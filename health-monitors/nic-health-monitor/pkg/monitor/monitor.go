@@ -109,8 +109,22 @@ func (m *NICHealthMonitor) runChecks(ctx context.Context, checkList []checks.Che
 	start := time.Now()
 
 	for _, chk := range checkList {
-		events, err := chk.Run()
+		tx, transactional := chk.(checks.TransactionalCheck)
+
+		var events []*pb.HealthEvent
+		var err error
+
+		if transactional {
+			events, err = tx.Prepare()
+		} else {
+			events, err = chk.Run()
+		}
+
 		if err != nil {
+			if transactional {
+				tx.Discard()
+			}
+
 			slog.Error("Check failed",
 				"check", chk.Name(),
 				"category", category,
@@ -121,6 +135,10 @@ func (m *NICHealthMonitor) runChecks(ctx context.Context, checkList []checks.Che
 		}
 
 		if len(events) == 0 {
+			if transactional {
+				tx.Commit()
+			}
+
 			continue
 		}
 
@@ -129,10 +147,18 @@ func (m *NICHealthMonitor) runChecks(ctx context.Context, checkList []checks.Che
 		batch := &pb.HealthEvents{Version: 1, Events: events}
 
 		if err := m.pub.Publish(ctx, batch); err != nil {
+			if transactional {
+				tx.Discard()
+			}
+
 			slog.Error("Failed to send health events",
 				"check", chk.Name(), "error", err)
 
 			continue
+		}
+
+		if transactional {
+			tx.Commit()
 		}
 
 		for _, evt := range events {

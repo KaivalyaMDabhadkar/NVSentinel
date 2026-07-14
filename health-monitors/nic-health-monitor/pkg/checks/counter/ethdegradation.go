@@ -36,7 +36,10 @@ type EthernetDegradationCheck struct {
 	cfg       *config.Config
 	state     *statefile.Manager
 	evaluator *Evaluator
+	pending   *Evaluator
 }
+
+var _ checks.TransactionalCheck = (*EthernetDegradationCheck)(nil)
 
 // NewEthernetDegradationCheck creates a new EthernetDegradationCheck.
 func NewEthernetDegradationCheck(
@@ -66,14 +69,45 @@ func (c *EthernetDegradationCheck) Name() string {
 	return checks.EthernetDegradationCheckName
 }
 
-// Run executes a single Ethernet/RoCE counter degradation poll.
+// Run executes and commits one poll for direct callers. The production
+// monitor uses Prepare/Commit/Discard so publication succeeds before state
+// advances.
 func (c *EthernetDegradationCheck) Run() ([]*pb.HealthEvent, error) {
+	events, err := c.Prepare()
+	if err != nil {
+		return nil, err
+	}
+
+	c.Commit()
+
+	return events, nil
+}
+
+// Prepare evaluates one poll against a cloned evaluator and stages the
+// resulting counter state without mutating the committed evaluator.
+func (c *EthernetDegradationCheck) Prepare() ([]*pb.HealthEvent, error) {
+	c.Discard()
+
 	result, err := discovery.DiscoverDevicesWithOverride(
 		c.reader, c.cfg.NicExclusionRegex, c.cfg.NicInclusionRegexOverride,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to discover devices: %w", err)
 	}
+	if !result.Complete {
+		if c.evaluator.HasState() {
+			return nil, fmt.Errorf("failed to discover devices: InfiniBand sysfs tree unavailable")
+		}
+
+		// Preserve post-reboot baseline behavior until discovery can observe
+		// the complete device set. A node with no IB tree remains a no-op.
+		return nil, nil
+	}
+	if len(result.UnreadableDevices) > 0 && !c.evaluator.HasState() {
+		return nil, nil
+	}
+
+	candidate := c.evaluator.Clone()
 
 	var events []*pb.HealthEvent
 
@@ -91,13 +125,13 @@ func (c *EthernetDegradationCheck) Run() ([]*pb.HealthEvent, error) {
 				continue
 			}
 
-			ibEvents := c.evaluator.EvaluateCounters(
+			ibEvents := candidate.EvaluateCounters(
 				dev, port, c.cfg.CounterDetection.Counters, c.Name(),
 			)
 			events = append(events, ibEvents...)
 
 			if dev.NetDev != "" {
-				netEvents := c.evaluator.EvaluateNetCounters(
+				netEvents := candidate.EvaluateNetCounters(
 					dev, port, c.cfg.CounterDetection.Counters, c.Name(),
 				)
 				events = append(events, netEvents...)
@@ -105,10 +139,26 @@ func (c *EthernetDegradationCheck) Run() ([]*pb.HealthEvent, error) {
 		}
 	}
 
-	c.evaluator.ClearBootIDFlag()
-	c.persist()
+	candidate.ClearBootIDFlag()
+	c.pending = candidate
 
 	return events, nil
+}
+
+// Commit installs and persists the most recently prepared evaluator state.
+func (c *EthernetDegradationCheck) Commit() {
+	if c.pending == nil {
+		return
+	}
+
+	c.evaluator = c.pending
+	c.pending = nil
+	c.persist()
+}
+
+// Discard abandons a prepared poll after check or publication failure.
+func (c *EthernetDegradationCheck) Discard() {
+	c.pending = nil
 }
 
 func (c *EthernetDegradationCheck) persist() {
