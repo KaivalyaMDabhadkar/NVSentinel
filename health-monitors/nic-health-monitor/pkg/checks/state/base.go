@@ -72,6 +72,12 @@ type baseStateCheck struct {
 	disappearedLatch map[string]bool
 	deviceMissCounts map[string]int
 
+	// exemptionLogged de-duplicates the informational management-sibling
+	// exemption log: the classification is static for a process lifetime,
+	// so each card is logged once rather than every poll. Logging state
+	// only — deliberately outside the transactional commit.
+	exemptionLogged map[string]bool
+
 	pending *statePollCommit
 
 	strategy linkLayerStrategy
@@ -111,6 +117,7 @@ func (b *baseStateCheck) seedFromPersistedState() {
 	}
 
 	b.deviceMissCounts = b.state.DeviceMissCountsFor(b.strategy.linkLayer())
+	b.exemptionLogged = make(map[string]bool)
 
 	if b.emitHealthyBaselines {
 		return
@@ -246,8 +253,12 @@ func (b *baseStateCheck) exemptManagementSiblingCards(agg pollAggregates) {
 			continue
 		}
 
-		slog.Info("Exempting card from peer comparison: sibling function is a management NIC",
-			"card", card, "linkLayer", b.strategy.linkLayer())
+		if !b.exemptionLogged[card] {
+			b.exemptionLogged[card] = true
+
+			slog.Info("Exempting card from peer comparison: sibling function is a management NIC",
+				"card", card, "linkLayer", b.strategy.linkLayer())
+		}
 
 		delete(agg.cardActive, card)
 		delete(agg.cardTotal, card)
