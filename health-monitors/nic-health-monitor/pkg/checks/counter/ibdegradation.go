@@ -15,7 +15,6 @@
 package counter
 
 import (
-	"fmt"
 	"log/slog"
 
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
@@ -86,37 +85,35 @@ func (c *InfiniBandDegradationCheck) Run() ([]*pb.HealthEvent, error) {
 }
 
 // Prepare evaluates one poll against a cloned evaluator and stages the
-// resulting counter state without mutating the committed evaluator.
+// resulting counter state without mutating the committed evaluator. The
+// discovery completeness policy lives in prepareCounterPoll.
 func (c *InfiniBandDegradationCheck) Prepare() ([]*pb.HealthEvent, error) {
 	c.Discard()
 
-	result, err := discovery.DiscoverDevicesWithOverride(
-		c.reader, c.cfg.NicExclusionRegex, c.cfg.NicInclusionRegexOverride,
-	)
+	candidate, events, err := prepareCounterPoll(c.reader, c.cfg, c.evaluator, c.evaluateDevices)
 	if err != nil {
-		return nil, fmt.Errorf("failed to discover devices: %w", err)
+		return nil, err
 	}
-	if !result.Complete {
-		if c.evaluator.HasState() {
-			return nil, fmt.Errorf("failed to discover devices: InfiniBand sysfs tree unavailable")
-		}
 
-		// Do not consume the post-reboot baseline before the first complete
-		// enumeration. Nodes without an IB tree remain a harmless no-op.
-		return nil, nil
-	}
-	if len(result.UnreadableDevices) > 0 && !c.evaluator.HasState() {
-		// A partial first poll cannot establish a trustworthy baseline for all
-		// counters. Wait for a complete device read instead.
+	if candidate == nil {
 		return nil, nil
 	}
 
-	candidate := c.evaluator.Clone()
+	c.pending = candidate
 
+	return events, nil
+}
+
+// evaluateDevices runs the enabled IB-tree counters for every InfiniBand
+// port on supported (or explicitly pinned) devices against the candidate
+// evaluator.
+func (c *InfiniBandDegradationCheck) evaluateDevices(
+	candidate *Evaluator, devices []discovery.IBDevice,
+) []*pb.HealthEvent {
 	var events []*pb.HealthEvent
 
-	for i := range result.Devices {
-		dev := &result.Devices[i]
+	for i := range devices {
+		dev := &devices[i]
 
 		if !dev.IncludedByOverride && !discovery.IsSupportedVendor(dev) {
 			continue
@@ -129,17 +126,13 @@ func (c *InfiniBandDegradationCheck) Prepare() ([]*pb.HealthEvent, error) {
 				continue
 			}
 
-			portEvents := candidate.EvaluateCounters(
+			events = append(events, candidate.EvaluateCounters(
 				dev, port, c.cfg.CounterDetection.Counters, c.Name(),
-			)
-			events = append(events, portEvents...)
+			)...)
 		}
 	}
 
-	candidate.ClearBootIDFlag()
-	c.pending = candidate
-
-	return events, nil
+	return events
 }
 
 // Commit installs and persists the most recently prepared evaluator state.

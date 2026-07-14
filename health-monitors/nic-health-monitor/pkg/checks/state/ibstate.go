@@ -162,6 +162,7 @@ func (c *InfiniBandStateCheck) Prepare() ([]*pb.HealthEvent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("device discovery failed: %w", err)
 	}
+
 	if !result.Complete {
 		if c.previousDevices != nil {
 			return nil, fmt.Errorf("device discovery incomplete: InfiniBand sysfs tree unavailable")
@@ -301,9 +302,8 @@ func (c *InfiniBandStateCheck) recordPort(
 	st.portOverride[key] = includedByOverride
 }
 
-// buildEventsForPoll runs the event-producing logic (per-port transitions,
-// disappearance detection, first-poll homogeneity) and returns the
-// combined event slice.
+// buildEventsForPoll adapts the IB poll state to the shared event
+// pipeline in baseStateCheck.buildEvents.
 //
 // baselineRun is true only on the first poll after a boot-ID change
 // (fresh node, host reboot, corrupt state file). In that mode the
@@ -313,37 +313,21 @@ func (c *InfiniBandStateCheck) recordPort(
 func (c *InfiniBandStateCheck) buildEventsForPoll(
 	st *ibPollState, firstPoll, baselineRun bool,
 ) []*pb.HealthEvent {
-	disappearanceEvents, heldMissingState := c.detectDeviceDisappearance(
-		st.seenDevices, st.currentDevices, st.currentPorts)
-	discoveryUncertain := st.discoveryUncertain || heldMissingState
-
-	// Card homogeneity is evaluated every poll: anomalies feed the
-	// first-poll per-port severity decision and drive the card-anomaly
-	// latch (FATAL on onset, card-healthy on recovery — see
-	// cardHomogeneityEvents). Skipped entirely while the inclusion
-	// override is active — the discovered set is just the pinned
-	// devices, so peer-group statistics carry no signal (see
-	// overrideActive).
-	var anomalousCards map[string]topology.CardAnomaly
-
-	var evaluatedCards map[string]int
-
-	if !c.overrideActive() && !discoveryUncertain {
-		anomalousCards, evaluatedCards = c.classifier.EvaluateCardHomogeneity(
-			st.cardActive, st.cardTotal, st.cardRole)
+	agg := pollAggregates{
+		seenDevices:    st.seenDevices,
+		parsedDevices:  st.parsedDevices,
+		currentDevices: st.currentDevices,
+		currentPorts:   st.currentPorts,
+		cardActive:     st.cardActive,
+		cardTotal:      st.cardTotal,
+		cardRole:       st.cardRole,
+		uncertain:      st.discoveryUncertain,
 	}
 
-	events := c.portTransitionEvents(st, firstPoll, baselineRun, anomalousCards)
-	events = append(events, disappearanceEvents...)
-	events = append(events, c.detectPortDisappearance(st.currentDevices, st.currentPorts)...)
-	events = append(events, c.consumeReenumeratedDisappearances(st.parsedDevices, st.currentDevices)...)
-
-	if !c.overrideActive() && !discoveryUncertain {
-		events = append(events, c.cardHomogeneityEvents(
-			st.cardActive, st.cardRole, anomalousCards, evaluatedCards, baselineRun)...)
-	}
-
-	return events
+	return c.buildEvents(agg, baselineRun,
+		func(anomalousCards map[string]topology.CardAnomaly) []*pb.HealthEvent {
+			return c.portTransitionEvents(st, firstPoll, baselineRun, anomalousCards)
+		})
 }
 
 // portTransitionEvents produces the boundary-crossing events for every
@@ -452,36 +436,17 @@ func (c *InfiniBandStateCheck) evaluatePortTransition(
 	current, prev portSnapshot,
 	hasPrev, baselineRun bool,
 ) *pb.HealthEvent {
-	isHealthy := current.State == checks.IBStateActive && current.PhysicalState == checks.IBPhysLinkUp
+	isHealthy := portIsHealthy(current)
 	disappearanceRecovery := isHealthy && c.consumeDisappearanceRecovery(current.Device)
 
 	if !hasPrev {
-		slog.Info("First-seen IB port",
-			"device", current.Device, "port", current.Port,
-			"state", current.State, "physState", current.PhysicalState,
-			"healthy", isHealthy,
-			"baseline_run", baselineRun,
-		)
-
-		if isHealthy {
-			if !baselineRun && !disappearanceRecovery {
-				return nil
-			}
-
-			return c.healthyBaselineEvent(current)
-		}
-
-		return c.unhealthyPortEvent(current)
+		return c.firstSeenPortEvent(current, isHealthy, baselineRun, disappearanceRecovery)
 	}
 
-	wasHealthy := prev.State == checks.IBStateActive && prev.PhysicalState == checks.IBPhysLinkUp
+	wasHealthy := portIsHealthy(prev)
 
 	if isHealthy == wasHealthy && !disappearanceRecovery {
-		if !isHealthy && ibPortIsFatal(current) && !ibPortIsFatal(prev) {
-			return c.unhealthyPortEvent(current)
-		}
-
-		return nil
+		return c.escalationEvent(current, prev, isHealthy)
 	}
 
 	slog.Info("IB port state transition",
@@ -496,6 +461,43 @@ func (c *InfiniBandStateCheck) evaluatePortTransition(
 	}
 
 	return c.unhealthyPortEvent(current)
+}
+
+// firstSeenPortEvent handles a port with no previous snapshot. Healthy
+// first-seen ports are silent unless this is a baseline run (boot-ID
+// change) or the port belongs to a device recovering from a latched
+// disappearance; unhealthy ones are classified by severity as usual.
+func (c *InfiniBandStateCheck) firstSeenPortEvent(
+	current portSnapshot,
+	isHealthy, baselineRun, disappearanceRecovery bool,
+) *pb.HealthEvent {
+	slog.Info("First-seen IB port",
+		"device", current.Device, "port", current.Port,
+		"state", current.State, "physState", current.PhysicalState,
+		"healthy", isHealthy,
+		"baseline_run", baselineRun,
+	)
+
+	if !isHealthy {
+		return c.unhealthyPortEvent(current)
+	}
+
+	if !baselineRun && !disappearanceRecovery {
+		return nil
+	}
+
+	return c.healthyBaselineEvent(current)
+}
+
+// escalationEvent emits when a still-unhealthy port escalates from a
+// non-fatal to a fatal sub-state (e.g., DOWN/Polling → DOWN/Disabled);
+// all other unhealthy→unhealthy and steady-state polls stay silent.
+func (c *InfiniBandStateCheck) escalationEvent(current, prev portSnapshot, isHealthy bool) *pb.HealthEvent {
+	if !isHealthy && ibPortIsFatal(current) && !ibPortIsFatal(prev) {
+		return c.unhealthyPortEvent(current)
+	}
+
+	return nil
 }
 
 // healthyBaselineEvent builds the IsHealthy=true event used for both

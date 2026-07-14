@@ -131,6 +131,7 @@ func DiscoverDevicesWithOverride(
 		if readErr != nil {
 			result.UnreadableDevices[devName] = readErr
 		}
+
 		if skippedVF {
 			result.SkippedVFs++
 		}

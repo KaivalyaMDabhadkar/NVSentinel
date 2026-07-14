@@ -154,6 +154,7 @@ func (c *EthernetStateCheck) Prepare() ([]*pb.HealthEvent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("device discovery failed: %w", err)
 	}
+
 	if !result.Complete {
 		if c.previousDevices != nil {
 			return nil, fmt.Errorf("device discovery incomplete: InfiniBand sysfs tree unavailable")
@@ -290,8 +291,8 @@ func (c *EthernetStateCheck) recordPort(
 	st.allPorts = append(st.allPorts, ethPortInfo{dev: dev, port: p, key: key, snap: snap})
 }
 
-// buildEventsForPoll runs the per-port transition evaluation,
-// disappearance checks, and the first-poll homogeneity check.
+// buildEventsForPoll adapts the Ethernet poll state to the shared event
+// pipeline in baseStateCheck.buildEvents.
 //
 // baselineRun is true on the first poll after a boot-ID change and
 // asks the per-port evaluator to emit healthy baselines for every
@@ -299,37 +300,21 @@ func (c *EthernetStateCheck) recordPort(
 func (c *EthernetStateCheck) buildEventsForPoll(
 	st *ethPollState, firstPoll, baselineRun bool,
 ) []*pb.HealthEvent {
-	disappearanceEvents, heldMissingState := c.detectDeviceDisappearance(
-		st.seenDevices, st.currentDevices, st.currentPorts)
-	discoveryUncertain := st.discoveryUncertain || heldMissingState
-
-	// Card homogeneity is evaluated every poll: anomalies feed the
-	// first-poll per-port severity decision and drive the card-anomaly
-	// latch (FATAL on onset, card-healthy on recovery — see
-	// cardHomogeneityEvents). Skipped entirely while the inclusion
-	// override is active — the discovered set is just the pinned
-	// devices, so peer-group statistics carry no signal (see
-	// overrideActive).
-	var anomalousCards map[string]topology.CardAnomaly
-
-	var evaluatedCards map[string]int
-
-	if !c.overrideActive() && !discoveryUncertain {
-		anomalousCards, evaluatedCards = c.classifier.EvaluateCardHomogeneity(
-			st.cardActive, st.cardTotal, st.cardRole)
+	agg := pollAggregates{
+		seenDevices:    st.seenDevices,
+		parsedDevices:  st.parsedDevices,
+		currentDevices: st.currentDevices,
+		currentPorts:   st.currentPorts,
+		cardActive:     st.cardActive,
+		cardTotal:      st.cardTotal,
+		cardRole:       st.cardRole,
+		uncertain:      st.discoveryUncertain,
 	}
 
-	events := c.portTransitionEvents(st, firstPoll, baselineRun, anomalousCards)
-	events = append(events, disappearanceEvents...)
-	events = append(events, c.detectPortDisappearance(st.currentDevices, st.currentPorts)...)
-	events = append(events, c.consumeReenumeratedDisappearances(st.parsedDevices, st.currentDevices)...)
-
-	if !c.overrideActive() && !discoveryUncertain {
-		events = append(events, c.cardHomogeneityEvents(
-			st.cardActive, st.cardRole, anomalousCards, evaluatedCards, baselineRun)...)
-	}
-
-	return events
+	return c.buildEvents(agg, baselineRun,
+		func(anomalousCards map[string]topology.CardAnomaly) []*pb.HealthEvent {
+			return c.portTransitionEvents(st, firstPoll, baselineRun, anomalousCards)
+		})
 }
 
 // portTransitionEvents iterates every recorded port and emits events on
@@ -364,16 +349,12 @@ func (c *EthernetStateCheck) evaluatePortTransition(
 ) *pb.HealthEvent {
 	prev, existed := c.previousPorts[pi.key]
 
-	isHealthy := pi.snap.State == checks.IBStateActive && pi.snap.PhysicalState == checks.IBPhysLinkUp
-	wasHealthy := existed && prev.State == checks.IBStateActive && prev.PhysicalState == checks.IBPhysLinkUp
+	isHealthy := portIsHealthy(pi.snap)
+	wasHealthy := existed && portIsHealthy(prev)
 	disappearanceRecovery := isHealthy && c.consumeDisappearanceRecovery(pi.snap.Device)
 
 	if existed && isHealthy == wasHealthy && !disappearanceRecovery {
-		if !isHealthy && ethernetPortIsFatal(pi.snap) && !ethernetPortIsFatal(prev) {
-			return c.unhealthyEvent(pi, prev, firstPoll, anomalousCards, portCard)
-		}
-
-		return nil
+		return c.escalationEvent(pi, prev, isHealthy, firstPoll, anomalousCards, portCard)
 	}
 
 	if isHealthy {
@@ -381,6 +362,20 @@ func (c *EthernetStateCheck) evaluatePortTransition(
 	}
 
 	return c.unhealthyEvent(pi, prev, firstPoll, anomalousCards, portCard)
+}
+
+// escalationEvent emits when a still-unhealthy port escalates from a
+// non-fatal state to DOWN; other unhealthy→unhealthy and steady-state
+// polls stay silent.
+func (c *EthernetStateCheck) escalationEvent(
+	pi ethPortInfo, prev portSnapshot, isHealthy, firstPoll bool,
+	anomalousCards map[string]topology.CardAnomaly, portCard map[string]string,
+) *pb.HealthEvent {
+	if !isHealthy && ethernetPortIsFatal(pi.snap) && !ethernetPortIsFatal(prev) {
+		return c.unhealthyEvent(pi, prev, firstPoll, anomalousCards, portCard)
+	}
+
+	return nil
 }
 
 // healthyRecoveryEvent returns an IsHealthy=true event for port

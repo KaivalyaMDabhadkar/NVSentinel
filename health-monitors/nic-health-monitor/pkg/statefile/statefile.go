@@ -593,10 +593,12 @@ func (m *Manager) UpdateDisappearedDevices(
 	}
 
 	changed := false
+
 	for k, v := range m.state.DisappearedDevices {
 		if matchesLayer(v.LinkLayer, layers) {
 			if _, keep := devices[v.Device]; !keep {
 				delete(m.state.DisappearedDevices, k)
+
 				changed = true
 			}
 		}
@@ -604,6 +606,7 @@ func (m *Manager) UpdateDisappearedDevices(
 
 	for device, v := range devices {
 		v.Device = device
+
 		key := linkLayerEntityKey(v.LinkLayer, device)
 		if old, exists := m.state.DisappearedDevices[key]; !exists || old != v {
 			m.state.DisappearedDevices[key] = v
@@ -641,10 +644,12 @@ func (m *Manager) UpdateDeviceMissCounts(counts map[string]int, linkLayer string
 	}
 
 	changed := false
+
 	for k, v := range m.state.DeviceMissCounts {
 		if strings.EqualFold(v.LinkLayer, linkLayer) {
 			if _, keep := counts[v.Device]; !keep {
 				delete(m.state.DeviceMissCounts, k)
+
 				changed = true
 			}
 		}
@@ -652,6 +657,7 @@ func (m *Manager) UpdateDeviceMissCounts(counts map[string]int, linkLayer string
 
 	for device, count := range counts {
 		v := DeviceMissCount{Device: device, LinkLayer: linkLayer, Count: count}
+
 		key := linkLayerEntityKey(linkLayer, device)
 		if old, exists := m.state.DeviceMissCounts[key]; !exists || old != v {
 			m.state.DeviceMissCounts[key] = v

@@ -161,13 +161,66 @@ func cloneIntMap(in map[string]int) map[string]int {
 	return out
 }
 
-func clonePortMap(in map[string]portSnapshot) map[string]portSnapshot {
-	out := make(map[string]portSnapshot, len(in))
-	for k, v := range in {
-		out[k] = v
+// portIsHealthy reports whether a port snapshot is fully operational.
+// Both link layers share the same healthy definition.
+func portIsHealthy(snap portSnapshot) bool {
+	return snap.State == checks.IBStateActive && snap.PhysicalState == checks.IBPhysLinkUp
+}
+
+// pollAggregates carries the link-layer-agnostic slice of one poll that
+// the shared event-assembly pipeline consumes.
+type pollAggregates struct {
+	seenDevices    map[string]bool
+	parsedDevices  map[string]bool
+	currentDevices map[string]bool
+	currentPorts   map[string]portSnapshot
+	cardActive     map[string]int
+	cardTotal      map[string]int
+	cardRole       map[string]topology.Role
+	uncertain      bool
+}
+
+// buildEvents runs the shared per-poll event pipeline: disappearance
+// handling first (it may retain held devices and adds to discovery
+// uncertainty), then the concrete check's per-port transitions, then
+// port/device lifecycle recoveries and the card-homogeneity lifecycle.
+//
+// Card homogeneity is evaluated every poll: anomalies feed the
+// first-poll per-port severity decision and drive the card-anomaly
+// latch (FATAL on onset, card-healthy on recovery — see
+// cardHomogeneityEvents). It is skipped while the inclusion override is
+// active (peer-group statistics carry no signal over a pinned set, see
+// overrideActive) and while discovery is uncertain (partial reads or
+// held misses would make present cards look anomalous).
+func (b *baseStateCheck) buildEvents(
+	agg pollAggregates,
+	baselineRun bool,
+	portEvents func(anomalousCards map[string]topology.CardAnomaly) []*pb.HealthEvent,
+) []*pb.HealthEvent {
+	disappearanceEvents, heldMissingState := b.detectDeviceDisappearance(
+		agg.seenDevices, agg.currentDevices, agg.currentPorts)
+	discoveryUncertain := agg.uncertain || heldMissingState
+
+	var anomalousCards map[string]topology.CardAnomaly
+
+	var evaluatedCards map[string]int
+
+	if !b.overrideActive() && !discoveryUncertain {
+		anomalousCards, evaluatedCards = b.classifier.EvaluateCardHomogeneity(
+			agg.cardActive, agg.cardTotal, agg.cardRole)
 	}
 
-	return out
+	events := portEvents(anomalousCards)
+	events = append(events, disappearanceEvents...)
+	events = append(events, b.detectPortDisappearance(agg.currentDevices, agg.currentPorts)...)
+	events = append(events, b.consumeReenumeratedDisappearances(agg.parsedDevices, agg.currentDevices)...)
+
+	if !b.overrideActive() && !discoveryUncertain {
+		events = append(events, b.cardHomogeneityEvents(
+			agg.cardActive, agg.cardRole, anomalousCards, evaluatedCards, baselineRun)...)
+	}
+
+	return events
 }
 
 // consumeDisappearanceRecovery clears and reports a latched device
@@ -409,6 +462,7 @@ func (b *baseStateCheck) detectDeviceDisappearance(
 	}
 
 	var events []*pb.HealthEvent
+
 	heldMissingState := false
 
 	for device := range b.previousDevices {
