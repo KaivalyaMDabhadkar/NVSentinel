@@ -170,14 +170,15 @@ func portIsHealthy(snap portSnapshot) bool {
 // pollAggregates carries the link-layer-agnostic slice of one poll that
 // the shared event-assembly pipeline consumes.
 type pollAggregates struct {
-	seenDevices    map[string]bool
-	parsedDevices  map[string]bool
-	currentDevices map[string]bool
-	currentPorts   map[string]portSnapshot
-	cardActive     map[string]int
-	cardTotal      map[string]int
-	cardRole       map[string]topology.Role
-	uncertain      bool
+	seenDevices     map[string]bool
+	parsedDevices   map[string]bool
+	currentDevices  map[string]bool
+	currentPorts    map[string]portSnapshot
+	cardActive      map[string]int
+	cardTotal       map[string]int
+	cardRole        map[string]topology.Role
+	managementCards map[string]bool
+	uncertain       bool
 }
 
 // buildEvents runs the shared per-poll event pipeline: disappearance
@@ -201,6 +202,8 @@ func (b *baseStateCheck) buildEvents(
 		agg.seenDevices, agg.currentDevices, agg.currentPorts)
 	discoveryUncertain := agg.uncertain || heldMissingState
 
+	b.exemptManagementSiblingCards(agg)
+
 	var anomalousCards map[string]topology.CardAnomaly
 
 	var evaluatedCards map[string]int
@@ -214,10 +217,70 @@ func (b *baseStateCheck) buildEvents(
 	events = append(events, disappearanceEvents...)
 	events = append(events, b.detectPortDisappearance(agg.currentDevices, agg.currentPorts)...)
 	events = append(events, b.consumeReenumeratedDisappearances(agg.parsedDevices, agg.currentDevices)...)
+	events = append(events, b.consumeExemptCardLatches(agg.managementCards)...)
 
 	if !b.overrideActive() && !discoveryUncertain {
 		events = append(events, b.cardHomogeneityEvents(
 			agg.cardActive, agg.cardRole, anomalousCards, evaluatedCards, baselineRun)...)
+	}
+
+	return events
+}
+
+// exemptManagementSiblingCards removes cards that have a management-
+// classified sibling function from the homogeneity inputs. Such a card
+// is frontend plumbing: its active member is the excluded management
+// NIC itself, so peer comparison would misread the remaining (often
+// intentionally uncabled) function as a failure — with the active
+// sibling excluded from counting, the card shows 0 active ports against
+// a decisive peer mode (observed on OCI BM.GPU.L40S.4: eth0 excluded as
+// the default-route NIC left card 0000:5a:00 counting 0 < mode 1,
+// fataling its uncabled aux port on every node of the SKU). Exempt
+// cards keep per-port runtime transition detection; they only opt out
+// of peer-evidence verdicts. VF siblings do not exempt a card — they
+// are skipped by discovery before classification and carry no frontend
+// signal.
+func (b *baseStateCheck) exemptManagementSiblingCards(agg pollAggregates) {
+	for card := range agg.managementCards {
+		if _, tracked := agg.cardTotal[card]; !tracked {
+			continue
+		}
+
+		slog.Info("Exempting card from peer comparison: sibling function is a management NIC",
+			"card", card, "linkLayer", b.strategy.linkLayer())
+
+		delete(agg.cardActive, card)
+		delete(agg.cardTotal, card)
+		delete(agg.cardRole, card)
+	}
+}
+
+// consumeExemptCardLatches clears outstanding card-anomaly latches for
+// cards that are exempt from peer comparison (management sibling).
+// Exempt cards are never evaluated again, so a held latch could never
+// recover through cardHomogeneityEvents; the card-healthy event keeps
+// the downstream FATAL from being orphaned. This also self-heals nodes
+// latched before the exemption existed. Runs on the transactional
+// candidate latch, so the clear commits only after publication.
+func (b *baseStateCheck) consumeExemptCardLatches(managementCards map[string]bool) []*pb.HealthEvent {
+	var events []*pb.HealthEvent
+
+	for card := range b.anomalousLatch {
+		if !managementCards[card] {
+			continue
+		}
+
+		delete(b.anomalousLatch, card)
+
+		slog.Info("Clearing card-anomaly latch: card is exempt from peer comparison",
+			"card", card, "linkLayer", b.strategy.linkLayer())
+
+		events = append(events, checks.NewHealthEvent(
+			b.nodeName, b.strategy.checkName(),
+			fmt.Sprintf("Card %s exempt from peer comparison (management NIC sibling); clearing anomaly", card),
+			checks.DeviceEntities(card),
+			false, true, pb.RecommendedAction_NONE, b.processingStrategy,
+		))
 	}
 
 	return events

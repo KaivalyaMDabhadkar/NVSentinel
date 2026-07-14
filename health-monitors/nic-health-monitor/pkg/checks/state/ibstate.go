@@ -111,6 +111,7 @@ type ibPollState struct {
 	parsedDevices      map[string]bool
 	currentDevices     map[string]bool
 	currentPorts       map[string]portSnapshot
+	managementCards    map[string]bool
 	ibPorts            []discovery.IBPort
 	skippedVFs         int
 	discoveryUncertain bool
@@ -124,16 +125,17 @@ type ibPollState struct {
 
 func newIBPollState() *ibPollState {
 	return &ibPollState{
-		seenDevices:    make(map[string]bool),
-		parsedDevices:  make(map[string]bool),
-		currentDevices: make(map[string]bool),
-		currentPorts:   make(map[string]portSnapshot),
-		ibPorts:        make([]discovery.IBPort, 0),
-		cardActive:     make(map[string]int),
-		cardTotal:      make(map[string]int),
-		cardRole:       make(map[string]topology.Role),
-		portCard:       make(map[string]string),
-		portOverride:   make(map[string]bool),
+		seenDevices:     make(map[string]bool),
+		parsedDevices:   make(map[string]bool),
+		currentDevices:  make(map[string]bool),
+		currentPorts:    make(map[string]portSnapshot),
+		managementCards: make(map[string]bool),
+		ibPorts:         make([]discovery.IBPort, 0),
+		cardActive:      make(map[string]int),
+		cardTotal:       make(map[string]int),
+		cardRole:        make(map[string]topology.Role),
+		portCard:        make(map[string]string),
+		portOverride:    make(map[string]bool),
 	}
 }
 
@@ -257,6 +259,12 @@ func (c *InfiniBandStateCheck) collectDevicesAndPorts(devices []discovery.IBDevi
 		st.parsedDevices[dev.Name] = true
 
 		if !c.shouldMonitor(dev) {
+			// A management-classified function marks its whole card as
+			// frontend plumbing — see exemptManagementSiblingCards.
+			if c.classifier.IsManagementNIC(dev.Name) {
+				st.managementCards[c.classifier.PCICardOf(dev.Name)] = true
+			}
+
 			continue
 		}
 
@@ -314,14 +322,15 @@ func (c *InfiniBandStateCheck) buildEventsForPoll(
 	st *ibPollState, firstPoll, baselineRun bool,
 ) []*pb.HealthEvent {
 	agg := pollAggregates{
-		seenDevices:    st.seenDevices,
-		parsedDevices:  st.parsedDevices,
-		currentDevices: st.currentDevices,
-		currentPorts:   st.currentPorts,
-		cardActive:     st.cardActive,
-		cardTotal:      st.cardTotal,
-		cardRole:       st.cardRole,
-		uncertain:      st.discoveryUncertain,
+		seenDevices:     st.seenDevices,
+		parsedDevices:   st.parsedDevices,
+		currentDevices:  st.currentDevices,
+		currentPorts:    st.currentPorts,
+		cardActive:      st.cardActive,
+		cardTotal:       st.cardTotal,
+		cardRole:        st.cardRole,
+		managementCards: st.managementCards,
+		uncertain:       st.discoveryUncertain,
 	}
 
 	return c.buildEvents(agg, baselineRun,

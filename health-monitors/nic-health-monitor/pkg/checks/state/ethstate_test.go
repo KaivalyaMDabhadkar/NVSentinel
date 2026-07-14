@@ -23,6 +23,7 @@ import (
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/checks"
 	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/config"
+	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/statefile"
 	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/topology"
 )
 
@@ -242,6 +243,133 @@ func TestEthState_LatchedDeviceReenumeratedWithoutEthPorts_EmitsDeviceRecovery(t
 	assert.True(t, found, "device recovery must carry the NIC entity so the downstream FATAL clears")
 
 	// Latch consumed: subsequent polls stay silent.
+	events, err = check.Run()
+	require.NoError(t, err)
+	assert.Empty(t, events)
+}
+
+// l40sFrontendNode reproduces the OCI BM.GPU.L40S.4 layout that produced
+// a fleet-wide false positive: four dual-function cards, where card
+// 0000:5a:00's .0 function carries the default route (classified
+// Management and excluded) and its .1 sibling is uncabled by design.
+// With the Prime excluded from counting, the card showed 0 active ports
+// against a decisive storage-peer mode of 1 and was fataled.
+func l40sFrontendNode() *stubNode {
+	node := newStubNode().
+		addIB("mlx5_0", &stubDevice{ // RoCE fabric NIC
+			pciAddress: "0000:27:00.0", numaNode: 0, netDev: "rdma0",
+			ports: map[int]stubPort{1: {state: "ACTIVE", physState: "LinkUp", linkLayer: "Ethernet"}},
+		}).
+		addIB("mlx5_1", &stubDevice{ // frontend Prime: default route → Management
+			pciAddress: "0000:5a:00.0", numaNode: 0, netDev: "eth0",
+			ports: map[int]stubPort{1: {state: "ACTIVE", physState: "LinkUp", linkLayer: "Ethernet"}},
+		}).
+		addIB("mlx5_2", &stubDevice{ // RoCE fabric NIC
+			pciAddress: "0000:97:00.0", numaNode: 0, netDev: "rdma1",
+			ports: map[int]stubPort{1: {state: "ACTIVE", physState: "LinkUp", linkLayer: "Ethernet"}},
+		}).
+		addIB("mlx5_3", &stubDevice{ // second frontend card, cabled function
+			pciAddress: "0000:d4:00.0", numaNode: 0, netDev: "eth1",
+			ports: map[int]stubPort{1: {state: "ACTIVE", physState: "LinkUp", linkLayer: "Ethernet"}},
+		}).
+		addIB("mlx5_5", &stubDevice{ // frontend Aux: uncabled by design
+			pciAddress: "0000:5a:00.1", numaNode: 0, netDev: "aux0",
+			ports: map[int]stubPort{1: {state: "DOWN", physState: "Disabled", linkLayer: "Ethernet"}},
+		}).
+		addIB("mlx5_7", &stubDevice{ // second card's uncabled function
+			pciAddress: "0000:d4:00.1", numaNode: 0, netDev: "aux1",
+			ports: map[int]stubPort{1: {state: "DOWN", physState: "Disabled", linkLayer: "Ethernet"}},
+		})
+
+	node.nets["rdma0"] = "up"
+	node.nets["eth0"] = "up"
+	node.nets["rdma1"] = "up"
+	node.nets["eth1"] = "up"
+	node.nets["aux0"] = "down"
+	node.nets["aux1"] = "down"
+
+	return node
+}
+
+func l40sTopology() map[string][]string {
+	return map[string][]string{
+		"mlx5_0": {"NODE"}, "mlx5_1": {"NODE"}, "mlx5_2": {"NODE"},
+		"mlx5_3": {"NODE"}, "mlx5_5": {"NODE"}, "mlx5_7": {"NODE"},
+	}
+}
+
+// TestEthState_ManagementSiblingCardExemptFromHomogeneity verifies that a
+// card whose sibling function is the excluded default-route NIC does not
+// participate in peer comparison: its uncabled remaining function must be
+// suppressed on the first poll instead of producing a card-anomaly FATAL
+// plus an unsuppressed port FATAL.
+func TestEthState_ManagementSiblingCardExemptFromHomogeneity(t *testing.T) {
+	node := l40sFrontendNode()
+	reader := node.reader()
+	routePath := writeProcNetRoute(t, "eth0")
+	classifier := buildClassifier(t, reader,
+		[]string{"0000:0f:00.0"}, l40sTopology(), routePath)
+	require.Equal(t, topology.RoleManagement, classifier.RoleOf("mlx5_1"))
+
+	check := NewEthernetStateCheck("node1", reader, &config.Config{},
+		classifier, pb.ProcessingStrategy_EXECUTE_REMEDIATION, freshStateManager(t), false)
+
+	events, err := check.Run()
+	require.NoError(t, err)
+	assert.Empty(t, events,
+		"uncabled sibling of an excluded management NIC must be suppressed, not fataled")
+
+	// Steady state stays silent, and real peers keep coverage: rdma1's
+	// runtime failure must still produce events.
+	events, err = check.Run()
+	require.NoError(t, err)
+	assert.Empty(t, events)
+
+	node.ib["mlx5_2"].ports[1] = stubPort{state: "DOWN", physState: "Disabled", linkLayer: "Ethernet"}
+	node.nets["rdma1"] = "down"
+	events, err = check.Run()
+	require.NoError(t, err)
+	assert.NotEmpty(t, events, "exemption must not disable detection for non-exempt cards")
+}
+
+// TestEthState_ExemptCardClearsExistingAnomalyLatch verifies the
+// migration path: a card-anomaly latch created before the exemption
+// existed (or before the sibling became the default-route NIC) is
+// cleared with a card-healthy event so the downstream FATAL is not
+// orphaned.
+func TestEthState_ExemptCardClearsExistingAnomalyLatch(t *testing.T) {
+	node := l40sFrontendNode()
+	reader := node.reader()
+	routePath := writeProcNetRoute(t, "eth0")
+	classifier := buildClassifier(t, reader,
+		[]string{"0000:0f:00.0"}, l40sTopology(), routePath)
+
+	mgr := freshStateManager(t)
+	mgr.UpdateAnomalousCards(map[string]statefile.AnomalousCardFlag{
+		"0000:5a:00": {LinkLayer: "Ethernet"},
+	}, "Ethernet")
+
+	check := NewEthernetStateCheck("node1", reader, &config.Config{},
+		classifier, pb.ProcessingStrategy_EXECUTE_REMEDIATION, mgr, false)
+
+	events, err := check.Run()
+	require.NoError(t, err)
+	require.Len(t, events, 1, "the pre-existing latch must clear with exactly one recovery event")
+	assert.True(t, events[0].IsHealthy)
+	assert.Contains(t, events[0].Message, "exempt")
+
+	found := false
+
+	for _, e := range events[0].EntitiesImpacted {
+		if e.EntityType == checks.EntityTypeNIC && e.EntityValue == "0000:5a:00" {
+			found = true
+		}
+	}
+
+	assert.True(t, found, "recovery must carry the card entity so the downstream FATAL clears")
+	assert.Empty(t, mgr.AnomalousCardsFor("Ethernet"),
+		"the cleared latch must be removed from the persisted state")
+
 	events, err = check.Run()
 	require.NoError(t, err)
 	assert.Empty(t, events)

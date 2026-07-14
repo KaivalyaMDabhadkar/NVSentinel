@@ -106,6 +106,7 @@ type ethPollState struct {
 	parsedDevices      map[string]bool
 	currentDevices     map[string]bool
 	currentPorts       map[string]portSnapshot
+	managementCards    map[string]bool
 	allPorts           []ethPortInfo
 	discoveryUncertain bool
 
@@ -117,15 +118,16 @@ type ethPollState struct {
 
 func newEthPollState() *ethPollState {
 	return &ethPollState{
-		seenDevices:    make(map[string]bool),
-		parsedDevices:  make(map[string]bool),
-		currentDevices: make(map[string]bool),
-		currentPorts:   make(map[string]portSnapshot),
-		allPorts:       nil,
-		cardActive:     make(map[string]int),
-		cardTotal:      make(map[string]int),
-		cardRole:       make(map[string]topology.Role),
-		portCard:       make(map[string]string),
+		seenDevices:     make(map[string]bool),
+		parsedDevices:   make(map[string]bool),
+		currentDevices:  make(map[string]bool),
+		currentPorts:    make(map[string]portSnapshot),
+		managementCards: make(map[string]bool),
+		allPorts:        nil,
+		cardActive:      make(map[string]int),
+		cardTotal:       make(map[string]int),
+		cardRole:        make(map[string]topology.Role),
+		portCard:        make(map[string]string),
 	}
 }
 
@@ -246,6 +248,12 @@ func (c *EthernetStateCheck) collectDevicesAndPorts(devices []discovery.IBDevice
 		st.parsedDevices[dev.Name] = true
 
 		if !c.shouldMonitor(dev) {
+			// A management-classified function marks its whole card as
+			// frontend plumbing — see exemptManagementSiblingCards.
+			if c.classifier.IsManagementNIC(dev.Name) {
+				st.managementCards[c.classifier.PCICardOf(dev.Name)] = true
+			}
+
 			continue
 		}
 
@@ -301,14 +309,15 @@ func (c *EthernetStateCheck) buildEventsForPoll(
 	st *ethPollState, firstPoll, baselineRun bool,
 ) []*pb.HealthEvent {
 	agg := pollAggregates{
-		seenDevices:    st.seenDevices,
-		parsedDevices:  st.parsedDevices,
-		currentDevices: st.currentDevices,
-		currentPorts:   st.currentPorts,
-		cardActive:     st.cardActive,
-		cardTotal:      st.cardTotal,
-		cardRole:       st.cardRole,
-		uncertain:      st.discoveryUncertain,
+		seenDevices:     st.seenDevices,
+		parsedDevices:   st.parsedDevices,
+		currentDevices:  st.currentDevices,
+		currentPorts:    st.currentPorts,
+		cardActive:      st.cardActive,
+		cardTotal:       st.cardTotal,
+		cardRole:        st.cardRole,
+		managementCards: st.managementCards,
+		uncertain:       st.discoveryUncertain,
 	}
 
 	return c.buildEvents(agg, baselineRun,
