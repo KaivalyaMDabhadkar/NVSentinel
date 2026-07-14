@@ -638,9 +638,12 @@ On host reboot, the node may come back with **entirely different hardware** (the
        - **Delta counters** evaluate against the new baseline starting from the **second poll** (one polling interval later) — any increment above threshold triggers an unhealthy event.
        - **Velocity counters** wait for their full `velocityUnit` window (1s / 1m / 1h) to elapse against the new baseline before evaluating; they do not extrapolate from a partial sample.
    - Rationale: the node is effectively a fresh machine after reboot — NICs may have been replaced, firmware updated, cables reseated. The platform must be told that all previously-reported conditions are resolved unless new issues are detected on this boot.
-4. **If boot IDs match** (pod restart, same host boot):
+4. **If boot IDs match and the discovery scope is unchanged** (pod restart, same host boot):
    - Restore all persisted state (counter snapshots, breach flags, port/device snapshots, debounce state, and outstanding latches)
    - Resume normal boundary-crossing detection with full context
+5. **If boot IDs match but the discovery scope changed** (`nicExclusionRegex` / `nicInclusionRegexOverride` differ from the persisted scope):
+   - Discard port/device snapshots, known devices, and disappearance miss counts — the state checks re-baseline against the new scope and re-emit healthy baselines
+   - Preserve counter snapshots, breach flags, and outstanding card/device FATAL latches: hardware counters do not reset on a scope change, and an outstanding FATAL held downstream must not be orphaned
 
 > **Consistency with sibling monitors**: This boot ID mechanism matches the pattern used by the GPU health monitor (`--state-file` with boot ID) and the syslog health monitor (`state.json` with `boot_id` and journal cursors).
 
@@ -1105,7 +1108,9 @@ On startup, before the first poll cycle:
        - Clear ALL persisted counter state (snapshots and breach flags)
        - Set reboot_detected = true
      ELSE (pod restart, same boot):
-       - Restore all persisted counter state
+       - Restore all persisted counter state (counter snapshots and breach
+         flags also survive a same-boot discovery-scope change — only
+         port/device discovery state is scope-sensitive; see Section 6.5)
        - Set reboot_detected = false
 
 For each configured counter (key = <device>:<port>:<counter_name>):
