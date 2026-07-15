@@ -766,13 +766,41 @@ func TestIBState_DeviceDisappearanceEmitsFatal(t *testing.T) {
 	}
 	assert.True(t, found, "device-level event should include the NIC entity")
 
-	// Re-enumeration as healthy must clear the device-level disappearance.
+	// Re-enumeration as healthy must clear the device-level disappearance
+	// with BOTH scopes: a port-level healthy (clears port conditions) and
+	// a device-level healthy whose entity set mirrors the FATAL's, so
+	// consumers requiring all entities to match can clear the NIC entry.
 	node.ib["mlx5_1"] = removedDevice
 	events, err = check.Run()
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.True(t, events[0].IsHealthy)
-	assert.Contains(t, events[0].Message, "mlx5_1")
+	require.Len(t, events, 2)
+
+	var sawPortHealthy, sawDeviceHealthy bool
+
+	for _, evt := range events {
+		require.True(t, evt.IsHealthy)
+
+		hasPortEntity := false
+
+		for _, e := range evt.EntitiesImpacted {
+			if e.EntityType == checks.EntityTypePort {
+				hasPortEntity = true
+			}
+		}
+
+		if hasPortEntity {
+			sawPortHealthy = true
+		} else {
+			sawDeviceHealthy = true
+
+			require.Len(t, evt.EntitiesImpacted, 1, "device recovery must carry only the NIC entity")
+			assert.Equal(t, "mlx5_1", evt.EntitiesImpacted[0].EntityValue)
+			assert.Contains(t, evt.Message, "re-enumerated")
+		}
+	}
+
+	assert.True(t, sawPortHealthy, "port-scoped recovery must be emitted")
+	assert.True(t, sawDeviceHealthy, "device-scoped recovery must be emitted")
 }
 
 func TestIBState_ExpectedDownCardSuppressedOnFirstPoll(t *testing.T) {

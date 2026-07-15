@@ -220,7 +220,8 @@ func TestIBState_Persistence_DeviceDisappearanceAcrossRestart(t *testing.T) {
 	assert.Contains(t, disappeared.Message, "disappeared")
 
 	// The disappearance latch must survive another pod restart so a healthy
-	// re-enumeration clears the outstanding device-level condition.
+	// re-enumeration clears the outstanding device-level condition — with
+	// both the port-scoped and the device-scoped (entity-symmetric) healthy.
 	node.ib["mlx5_1"] = removedDevice
 	mgr3 := reloadManager(t, mgr2)
 	thirdPod := NewInfiniBandStateCheck("node1", reader, &config.Config{},
@@ -228,9 +229,20 @@ func TestIBState_Persistence_DeviceDisappearanceAcrossRestart(t *testing.T) {
 
 	events, err = thirdPod.Run()
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.True(t, events[0].IsHealthy)
-	assert.Contains(t, events[0].Message, "mlx5_1")
+	require.Len(t, events, 2)
+
+	deviceScoped := 0
+
+	for _, evt := range events {
+		require.True(t, evt.IsHealthy)
+		assert.Contains(t, evt.Message, "mlx5_1")
+
+		if len(evt.EntitiesImpacted) == 1 {
+			deviceScoped++
+		}
+	}
+
+	assert.Equal(t, 1, deviceScoped, "exactly one recovery must be device-scoped (NIC entity only)")
 }
 
 func TestEthState_Persistence_IBAndEthShareFileWithoutClobber(t *testing.T) {

@@ -17,6 +17,7 @@ package state
 import (
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
@@ -207,9 +208,18 @@ func (b *baseStateCheck) buildEvents(
 			agg.cardActive, agg.cardTotal, agg.cardRole)
 	}
 
+	// Snapshot the disappearance latch before the port pass so devices it
+	// consumes (via consumeDisappearanceRecovery) can be diffed afterwards
+	// and given a device-scoped recovery. Latches added above by
+	// detectDeviceDisappearance survive the pass and never appear in the
+	// diff; latches consumed later by consumeReenumeratedDisappearances
+	// emit their own device event and are still present at diff time.
+	latchedBefore := maps.Clone(b.disappearedLatch)
+
 	events := portEvents(anomalousCards)
 	events = append(events, disappearanceEvents...)
 	events = append(events, b.detectPortDisappearance(agg.currentDevices, agg.currentPorts)...)
+	events = append(events, b.deviceDisappearanceRecoveries(latchedBefore)...)
 	events = append(events, b.consumeReenumeratedDisappearances(agg.parsedDevices, agg.currentDevices)...)
 	events = append(events, b.consumeExemptCardLatches(agg.managementCards)...)
 
@@ -295,6 +305,37 @@ func (b *baseStateCheck) consumeDisappearanceRecovery(device string) bool {
 	delete(b.disappearedLatch, device)
 
 	return true
+}
+
+// deviceDisappearanceRecoveries emits a device-level healthy event for
+// every disappearance latch the current poll's port evaluation consumed.
+// The disappearance FATAL is device-scoped (NIC entity only), so its
+// recovery must carry the identical entity set: consumers that require
+// all of a healthy event's entities to match a stored condition entry
+// (platform-connector's node conditions since PR #1468) can never clear
+// the device entry from the port-scoped healthy alone. The port healthy
+// emitted by the transition path still clears any port-scoped
+// conditions; this event clears the device-scoped one.
+func (b *baseStateCheck) deviceDisappearanceRecoveries(latchedBefore map[string]bool) []*pb.HealthEvent {
+	var events []*pb.HealthEvent
+
+	for device := range latchedBefore {
+		if b.disappearedLatch[device] {
+			continue // still latched: not consumed by this poll's port pass
+		}
+
+		slog.Info("Device recovered from disappearance; emitting device-scoped recovery",
+			"device", device, "linkLayer", b.strategy.linkLayer())
+
+		events = append(events, checks.NewHealthEvent(
+			b.nodeName, b.strategy.checkName(),
+			fmt.Sprintf("Device %s re-enumerated in sysfs", device),
+			checks.DeviceEntities(device),
+			false, true, pb.RecommendedAction_NONE, b.processingStrategy,
+		))
+	}
+
+	return events
 }
 
 // consumeReenumeratedDisappearances clears disappearance latches for
