@@ -116,7 +116,7 @@ The State Monitor follows NVSentinel's established architectural pattern where:
 
 | Architectural Principle     | Implementation                             | Purpose                                                                   |
 |-----------------------------|--------------------------------------------|---------------------------------------------------------------------------|
-| **Raw Event Reporting**     | Health transition or fatal severity escalation → immediate event | One event per port per reportable transition                    |
+| **Raw Event Reporting**     | Health transition or fatal severity escalation → immediate event | One event per affected entity (port, card, or device) per reportable transition                    |
 | **Centralized Correlation** | Health Events Analyzer MongoDB pipelines   | Flexible, configurable rules without monitor code changes                 |
 | **Temporal Correlation**    | Analyzer rules with time windows           | Detects patterns like "3 link flaps in 10 minutes"                        |
 | **Stabilization Windows**   | Analyzer rules with sticky XID-style logic | Prevents "Alert Blinking" where transient recoveries hide critical issues |
@@ -149,7 +149,7 @@ On device disappearance:
 
 Persists (after successful event publication, or immediately for a no-event poll):
 ├── Port state snapshots       → state + phys_state per port
-├── Known devices/miss counts  → disappearance debounce across restarts
+├── Known devices/miss counts  → disappearance debounce across same-boot pod restarts (reset on host reboot)
 └── Outstanding event latches  → card/device recovery after restart or reboot
 
 Emits: Raw STATE_CHANGE events → Platform Connector → MongoDB

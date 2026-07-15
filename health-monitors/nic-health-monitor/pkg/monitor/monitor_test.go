@@ -97,7 +97,7 @@ func TestRunChecks_PublishFailureDiscardsAndReemits(t *testing.T) {
 	client := &publishFailOnceClient{}
 	check := &stagedTestCheck{}
 	monitor := NewNICHealthMonitor("node1", client, "127.0.0.1:5555",
-		[]checks.Check{check}, time.Second)
+		[]checks.TransactionalCheck{check}, time.Second)
 
 	require.NoError(t, monitor.RunStateChecks(context.Background()))
 	assert.False(t, check.committed)

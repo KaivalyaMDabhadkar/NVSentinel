@@ -17,6 +17,7 @@ package state
 import (
 	"fmt"
 	"log/slog"
+	"maps"
 
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/health-monitors/nic-health-monitor/pkg/checks"
@@ -193,9 +194,9 @@ func (c *InfiniBandStateCheck) Prepare() ([]*pb.HealthEvent, error) {
 	committedAnomalous := c.anomalousLatch
 	committedDisappeared := c.disappearedLatch
 	committedMisses := c.deviceMissCounts
-	c.anomalousLatch = cloneBoolMap(committedAnomalous)
-	c.disappearedLatch = cloneBoolMap(committedDisappeared)
-	c.deviceMissCounts = cloneIntMap(committedMisses)
+	c.anomalousLatch = maps.Clone(committedAnomalous)
+	c.disappearedLatch = maps.Clone(committedDisappeared)
+	c.deviceMissCounts = maps.Clone(committedMisses)
 
 	c.collectDevicesAndPorts(result.Devices, st)
 	c.retainUnreadableDevices(

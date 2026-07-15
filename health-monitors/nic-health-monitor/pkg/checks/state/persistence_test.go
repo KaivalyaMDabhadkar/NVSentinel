@@ -895,3 +895,49 @@ func TestEthState_SameScopeRestart_RetainsMemory(t *testing.T) {
 	require.Len(t, events, 1, "retained memory must produce the DOWN→ACTIVE recovery event")
 	assert.True(t, events[0].IsHealthy)
 }
+
+// TestPersistState_RetriesAfterFailedSave verifies the dirty-flag retry:
+// a failed Save leaves the in-memory manager updated, so the change
+// detection alone would never re-save on an unchanged poll and the
+// on-disk state would stay stale until an unrelated change or restart.
+func TestPersistState_RetriesAfterFailedSave(t *testing.T) {
+	dir := t.TempDir()
+	// A regular file where the state directory belongs makes Save's
+	// MkdirAll fail deterministically until it is removed.
+	blocker := filepath.Join(dir, "state-dir")
+	require.NoError(t, os.WriteFile(blocker, []byte("blocker"), 0o644))
+
+	statePath := filepath.Join(blocker, "state.json")
+	bootIDPath := filepath.Join(dir, "boot_id")
+	require.NoError(t, os.WriteFile(bootIDPath, []byte("boot-1\n"), 0o644))
+
+	mgr := statefile.NewManagerWithPaths(statePath, bootIDPath)
+	require.NoError(t, mgr.Load())
+
+	node := newStubNode().addIB("mlx5_0", &stubDevice{
+		pciAddress: "0000:47:00.0", numaNode: 0,
+		ports: map[int]stubPort{1: {state: "ACTIVE", physState: "LinkUp", linkLayer: "InfiniBand"}},
+	})
+	reader := node.reader()
+	classifier := buildClassifier(t, reader,
+		[]string{"0000:0f:00.0"}, map[string][]string{"mlx5_0": {"PIX"}})
+	check := NewInfiniBandStateCheck("node1", reader, &config.Config{},
+		classifier, pb.ProcessingStrategy_EXECUTE_REMEDIATION, mgr, false)
+
+	// First poll: state changed, Save fails (the blocker file makes the
+	// state directory uncreatable).
+	_, err := check.Run()
+	require.NoError(t, err, "persistence failures must not fail the poll")
+	_, statErr := os.Stat(statePath)
+	require.Error(t, statErr, "the state file must not exist while saves are failing")
+
+	// Unblock persistence; a steady-state poll has no changes, so only
+	// the dirty flag can trigger the retry.
+	require.NoError(t, os.Remove(blocker))
+
+	_, err = check.Run()
+	require.NoError(t, err)
+
+	_, statErr = os.Stat(statePath)
+	assert.NoError(t, statErr, "an unchanged poll after a failed save must retry persistence")
+}

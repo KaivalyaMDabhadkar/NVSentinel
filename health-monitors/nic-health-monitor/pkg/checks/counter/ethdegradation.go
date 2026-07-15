@@ -36,6 +36,10 @@ type EthernetDegradationCheck struct {
 	state     *statefile.Manager
 	evaluator *Evaluator
 	pending   *Evaluator
+
+	// saveFailed records that the last state-file Save failed, so the
+	// next commit retries even when nothing changed.
+	saveFailed bool
 }
 
 var _ checks.TransactionalCheck = (*EthernetDegradationCheck)(nil)
@@ -159,12 +163,18 @@ func (c *EthernetDegradationCheck) persist() {
 	snapshotsChanged := c.state.UpdateCounterSnapshots(c.evaluator.Snapshots())
 	flagsChanged := c.state.UpdateBreachFlags(c.evaluator.BreachFlags())
 
-	if !snapshotsChanged && !flagsChanged {
+	if !snapshotsChanged && !flagsChanged && !c.saveFailed {
 		return
 	}
 
 	if err := c.state.Save(); err != nil {
+		c.saveFailed = true
+
 		slog.Warn("Failed to persist counter state to disk",
 			"check", c.Name(), "error", err)
+
+		return
 	}
+
+	c.saveFailed = false
 }

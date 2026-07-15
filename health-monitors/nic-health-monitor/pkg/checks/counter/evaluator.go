@@ -35,6 +35,7 @@ package counter
 import (
 	"fmt"
 	"log/slog"
+	"maps"
 	"strings"
 	"time"
 
@@ -138,52 +139,17 @@ func NewEvaluator(
 
 // Clone returns an independent candidate evaluator for a transactional poll.
 // Reader/configuration dependencies are shared, while every mutable map is
-// copied so a failed publication can discard the candidate without advancing
+// copied (values are plain value types, so a shallow maps.Clone is a full
+// copy) so a failed publication can discard the candidate without advancing
 // snapshots, breach latches, reset detection, or boot-baseline state.
 func (e *Evaluator) Clone() *Evaluator {
 	clone := *e
-	clone.snapshots = cloneCounterSnapshots(e.snapshots)
-	clone.breachFlags = cloneBreachFlags(e.breachFlags)
-	clone.lastPollValues = cloneUint64Map(e.lastPollValues)
-	clone.ownedKeys = cloneSet(e.ownedKeys)
+	clone.snapshots = maps.Clone(e.snapshots)
+	clone.breachFlags = maps.Clone(e.breachFlags)
+	clone.lastPollValues = maps.Clone(e.lastPollValues)
+	clone.ownedKeys = maps.Clone(e.ownedKeys)
 
 	return &clone
-}
-
-func cloneCounterSnapshots(in map[string]statefile.CounterSnapshot) map[string]statefile.CounterSnapshot {
-	out := make(map[string]statefile.CounterSnapshot, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-
-	return out
-}
-
-func cloneBreachFlags(in map[string]statefile.CounterBreachFlag) map[string]statefile.CounterBreachFlag {
-	out := make(map[string]statefile.CounterBreachFlag, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-
-	return out
-}
-
-func cloneUint64Map(in map[string]uint64) map[string]uint64 {
-	out := make(map[string]uint64, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-
-	return out
-}
-
-func cloneSet(in map[string]struct{}) map[string]struct{} {
-	out := make(map[string]struct{}, len(in))
-	for k := range in {
-		out[k] = struct{}{}
-	}
-
-	return out
 }
 
 // HasState reports whether an evaluator has committed counter history. It is

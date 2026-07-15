@@ -47,21 +47,24 @@ type NICHealthMonitor struct {
 	nodeName string
 	pub      *healthpub.Publisher
 
-	stateChecks   []checks.Check
-	counterChecks []checks.Check
+	stateChecks   []checks.TransactionalCheck
+	counterChecks []checks.TransactionalCheck
 
 	stateInterval time.Duration
 }
 
 // NewNICHealthMonitor constructs a NICHealthMonitor. The allChecks
 // slice is automatically partitioned into state and counter categories
-// based on each check's name. target must match the gRPC target string
-// used to dial pcClient (typically "unix:///var/run/nvsentinel.sock").
+// based on each check's name. Checks must be transactional so a failed
+// publication can never consume a health boundary — the monitor commits
+// staged state only after successful delivery. target must match the
+// gRPC target string used to dial pcClient (typically
+// "unix:///var/run/nvsentinel.sock").
 func NewNICHealthMonitor(
 	nodeName string,
 	pcClient pb.PlatformConnectorClient,
 	target string,
-	allChecks []checks.Check,
+	allChecks []checks.TransactionalCheck,
 	stateInterval time.Duration,
 ) *NICHealthMonitor {
 	m := &NICHealthMonitor{
@@ -102,48 +105,16 @@ func (m *NICHealthMonitor) RunCounterChecks(ctx context.Context) error {
 // StateInterval returns the configurable state polling interval.
 func (m *NICHealthMonitor) StateInterval() time.Duration { return m.stateInterval }
 
-// checkTx adapts plain and transactional checks to one call surface so
-// the polling loop stays linear. For non-transactional checks commit and
-// discard are no-ops — their Run has already committed.
-type checkTx struct {
-	chk checks.Check
-	tx  checks.TransactionalCheck
-}
-
-func newCheckTx(chk checks.Check) checkTx {
-	tx, _ := chk.(checks.TransactionalCheck)
-
-	return checkTx{chk: chk, tx: tx}
-}
-
-func (c checkTx) prepare() ([]*pb.HealthEvent, error) {
-	if c.tx != nil {
-		return c.tx.Prepare()
-	}
-
-	return c.chk.Run()
-}
-
-func (c checkTx) commit() {
-	if c.tx != nil {
-		c.tx.Commit()
-	}
-}
-
-func (c checkTx) discard() {
-	if c.tx != nil {
-		c.tx.Discard()
-	}
-}
-
 // runChecks executes the checks in a category and sends any resulting
 // events in a single batch per check. Check errors are logged and do
 // not cancel the remaining checks.
-func (m *NICHealthMonitor) runChecks(ctx context.Context, checkList []checks.Check, category string) error {
+func (m *NICHealthMonitor) runChecks(
+	ctx context.Context, checkList []checks.TransactionalCheck, category string,
+) error {
 	start := time.Now()
 
 	for _, chk := range checkList {
-		m.runOneCheck(ctx, newCheckTx(chk), category)
+		m.runOneCheck(ctx, chk, category)
 	}
 
 	metrics.PollCycleDuration.WithLabelValues(m.nodeName, category).
@@ -155,12 +126,12 @@ func (m *NICHealthMonitor) runChecks(ctx context.Context, checkList []checks.Che
 // runOneCheck prepares one check, publishes its events, and commits the
 // staged state only after successful delivery so a failed publication
 // cannot consume a health boundary.
-func (m *NICHealthMonitor) runOneCheck(ctx context.Context, c checkTx, category string) {
-	events, err := c.prepare()
+func (m *NICHealthMonitor) runOneCheck(ctx context.Context, chk checks.TransactionalCheck, category string) {
+	events, err := chk.Prepare()
 	if err != nil {
-		c.discard()
+		chk.Discard()
 		slog.Error("Check failed",
-			"check", c.chk.Name(),
+			"check", chk.Name(),
 			"category", category,
 			"error", err,
 		)
@@ -169,25 +140,25 @@ func (m *NICHealthMonitor) runOneCheck(ctx context.Context, c checkTx, category 
 	}
 
 	if len(events) == 0 {
-		c.commit()
+		chk.Commit()
 
 		return
 	}
 
-	slog.Info("Check produced events", "check", c.chk.Name(), "count", len(events))
+	slog.Info("Check produced events", "check", chk.Name(), "count", len(events))
 
 	batch := &pb.HealthEvents{Version: 1, Events: events}
 
 	if err := m.pub.Publish(ctx, batch); err != nil {
-		c.discard()
+		chk.Discard()
 		slog.Error("Failed to send health events",
-			"check", c.chk.Name(), "error", err)
+			"check", chk.Name(), "error", err)
 
 		return
 	}
 
-	c.commit()
-	m.logSentEvents(c.chk.Name(), events)
+	chk.Commit()
+	m.logSentEvents(chk.Name(), events)
 }
 
 // logSentEvents records the per-event log line and delivery metric after

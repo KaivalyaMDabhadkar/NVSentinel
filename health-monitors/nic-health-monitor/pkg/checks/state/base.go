@@ -78,6 +78,11 @@ type baseStateCheck struct {
 	// only — deliberately outside the transactional commit.
 	exemptionLogged map[string]bool
 
+	// saveFailed records that the last state-file Save failed, so the
+	// next committed poll retries even when nothing changed. Persistence
+	// bookkeeping only — deliberately outside the transactional commit.
+	saveFailed bool
+
 	pending *statePollCommit
 
 	strategy linkLayerStrategy
@@ -148,24 +153,6 @@ func (b *baseStateCheck) seedFromPersistedState() {
 		"port_states", len(b.previousPorts),
 		"known_devices", len(b.previousDevices),
 	)
-}
-
-func cloneBoolMap(in map[string]bool) map[string]bool {
-	out := make(map[string]bool, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-
-	return out
-}
-
-func cloneIntMap(in map[string]int) map[string]int {
-	out := make(map[string]int, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-
-	return out
 }
 
 // portIsHealthy reports whether a port snapshot is fully operational.
@@ -664,12 +651,28 @@ func (b *baseStateCheck) persistState(
 	disappearedChanged := b.state.UpdateDisappearedDevices(disappeared, linkLayer)
 	missesChanged := b.state.UpdateDeviceMissCounts(b.deviceMissCounts, linkLayer)
 
-	if !portsChanged && !latchChanged && !disappearedChanged && !missesChanged {
+	b.saveState(linkLayer, portsChanged || latchChanged || disappearedChanged || missesChanged)
+}
+
+// saveState writes the shared state file when something changed or when
+// a previous Save failed. saveFailed keeps a failed Save retrying on
+// subsequent polls: the in-memory manager already carries the update, so
+// the change flags stay false on an unchanged next poll and the on-disk
+// state would otherwise remain stale until an unrelated change or a
+// restart.
+func (b *baseStateCheck) saveState(linkLayer string, changed bool) {
+	if !changed && !b.saveFailed {
 		return
 	}
 
 	if err := b.state.Save(); err != nil {
+		b.saveFailed = true
+
 		slog.Warn("Failed to persist state to disk",
 			"linkLayer", linkLayer, "path", b.state.Path(), "error", err)
+
+		return
 	}
+
+	b.saveFailed = false
 }
