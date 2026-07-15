@@ -940,13 +940,17 @@ func TestPersistState_RetriesAfterFailedSave(t *testing.T) {
 	// state directory uncreatable).
 	_, err := check.Run()
 	require.NoError(t, err, "persistence failures must not fail the poll")
-	_, statErr := os.Stat(statePath)
-	require.Error(t, statErr, "the state file must not exist while saves are failing")
 
-	// Unblock persistence; a steady-state poll has no changes, so only
-	// the dirty flag can trigger the retry.
+	// Unblock before asserting: with the blocker gone, the stat result is
+	// an unambiguous ENOENT for the state file itself rather than an
+	// ENOTDIR artifact of the blocker on the parent path.
 	require.NoError(t, os.Remove(blocker))
 
+	_, statErr := os.Stat(statePath)
+	require.True(t, os.IsNotExist(statErr), "the failed save must not have created the state file")
+
+	// A steady-state poll has no changes, so only the dirty flag can
+	// trigger the retry.
 	_, err = check.Run()
 	require.NoError(t, err)
 
