@@ -500,7 +500,7 @@ first-match-wins single-line loop:
 2. **Confirm**: within the window, a line matching
    `mlx5e_(poll_ico_cq|napi_poll)\+0x` — the `RIP:` line or a call-trace
    frame — confirms mlx5 attribution and emits one **Fatal** event
-   (`REPLACE_VM`). Frames prefixed with `? ` are speculative stack remnants
+   (`REPLACE_VM`). Frames prefixed with `?` (followed by a space) are speculative stack remnants
    and are ignored; generic frames such as `net_rx_action` never count as
    evidence, so soft lockups in other drivers are not attributed to the NIC.
 3. **Rate-limit**: the watchdog re-reports a persistent lockup every few tens
