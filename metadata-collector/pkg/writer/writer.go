@@ -45,11 +45,18 @@ func (w *Writer) Write(metadata *model.GPUMetadata) error {
 	}
 
 	tmpPath := w.outputPath + ".tmp"
-	// 0644: the metadata file is a shared artifact consumed by other
-	// components (nic-health-monitor, syslog-health-monitor) whose pods
-	// run as non-root; a root-only mode breaks their startup.
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
 		return fmt.Errorf("failed to write temporary file %s: %w", tmpPath, err)
+	}
+
+	// The metadata file is a shared artifact consumed by other
+	// components (nic-health-monitor, syslog-health-monitor) whose pods
+	// run as non-root; a root-only mode breaks their startup. Chmod
+	// explicitly rather than relying on the WriteFile mode: WriteFile
+	// only applies its mode on creation, so this also corrects a stale
+	// tmp file left behind by a previously interrupted run.
+	if err := os.Chmod(tmpPath, 0644); err != nil { //nolint:gosec // G302: world-readable by design, no secrets
+		return fmt.Errorf("failed to set permissions on %s: %w", tmpPath, err)
 	}
 
 	if err := os.Rename(tmpPath, w.outputPath); err != nil {
