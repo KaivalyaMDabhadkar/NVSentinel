@@ -16,9 +16,12 @@ suite: daemonset
 templates:
   - templates/daemonset.yaml
 tests:
-  - it: must not add any Linux capability (SYS_ADMIN regression guard)
+  - it: must not add any Linux capability to the monitor (SYS_ADMIN regression guard)
     set:
       global.metricsPort: 2112
+      global.initContainerImage.repository: docker.io/bitnamilegacy/os-shell
+      global.initContainerImage.tag: "12-debian-12-r30"
+      global.initContainerImage.pullPolicy: IfNotPresent
     asserts:
       - isKind:
           of: DaemonSet
@@ -28,9 +31,49 @@ tests:
           path: spec.template.spec.containers[0].securityContext.capabilities.drop
           value: ["ALL"]
 
+  - it: must run the monitor as non-root
+    set:
+      global.metricsPort: 2112
+      global.initContainerImage.repository: docker.io/bitnamilegacy/os-shell
+      global.initContainerImage.tag: "12-debian-12-r30"
+      global.initContainerImage.pullPolicy: IfNotPresent
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsUser
+          value: 65532
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsGroup
+          value: 65532
+
+  - it: must limit the state-permissions init container to CHOWN
+    set:
+      global.metricsPort: 2112
+      global.initContainerImage.repository: docker.io/bitnamilegacy/os-shell
+      global.initContainerImage.tag: "12-debian-12-r30"
+      global.initContainerImage.pullPolicy: IfNotPresent
+    asserts:
+      - equal:
+          path: spec.template.spec.initContainers[0].name
+          value: fix-state-permissions
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.drop
+          value: ["ALL"]
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.capabilities.add
+          value: ["CHOWN"]
+      - equal:
+          path: spec.template.spec.initContainers[0].securityContext.allowPrivilegeEscalation
+          value: false
+
   - it: must keep the hardened security context
     set:
       global.metricsPort: 2112
+      global.initContainerImage.repository: docker.io/bitnamilegacy/os-shell
+      global.initContainerImage.tag: "12-debian-12-r30"
+      global.initContainerImage.pullPolicy: IfNotPresent
     asserts:
       - equal:
           path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
@@ -45,6 +88,9 @@ tests:
   - it: must mount host sysfs and procfs read-only
     set:
       global.metricsPort: 2112
+      global.initContainerImage.repository: docker.io/bitnamilegacy/os-shell
+      global.initContainerImage.tag: "12-debian-12-r30"
+      global.initContainerImage.pullPolicy: IfNotPresent
     asserts:
       - contains:
           path: spec.template.spec.containers[0].volumeMounts

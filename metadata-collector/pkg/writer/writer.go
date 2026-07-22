@@ -45,7 +45,10 @@ func (w *Writer) Write(metadata *model.GPUMetadata) error {
 	}
 
 	tmpPath := w.outputPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0600); err != nil {
+	// 0644: the metadata file is a shared artifact consumed by other
+	// components (nic-health-monitor, syslog-health-monitor) whose pods
+	// run as non-root; a root-only mode breaks their startup.
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
 		return fmt.Errorf("failed to write temporary file %s: %w", tmpPath, err)
 	}
 
