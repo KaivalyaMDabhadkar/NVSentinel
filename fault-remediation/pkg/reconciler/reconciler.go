@@ -67,6 +67,7 @@ type ReconcilerConfig struct {
 	Pipeline           datastore.Pipeline
 	RemediationClient  remediation.FaultRemediationClientInterface
 	StateManager       statemanager.StateManager
+	NodeReader         client.Reader
 	EnableLogCollector bool
 	UpdateMaxRetries   int
 	UpdateRetryDelay   time.Duration
@@ -251,13 +252,12 @@ func (r *FaultRemediationReconciler) shouldSkipEvent(ctx context.Context,
 	slog.Info("Unsupported recommended action for node",
 		"action", actionName,
 		"node", nodeName)
-	metrics.TotalUnsupportedRemediationActions.WithLabelValues(actionName, nodeName).Inc()
 
 	span.SetAttributes(
 		attribute.String("fault_remediation.skip_reason", "unsupported_action"),
 	)
 
-	activeQuarantine, err := r.nodeHasActiveQuarantine(ctx, nodeName)
+	activeQuarantine, err := r.nodeHasActiveQuarantine(ctx, healthEventWithStatus.HealthEvent)
 	if err != nil {
 		tracing.RecordError(span, err)
 		span.SetAttributes(
@@ -267,6 +267,8 @@ func (r *FaultRemediationReconciler) shouldSkipEvent(ctx context.Context,
 
 		return true, err
 	}
+
+	metrics.TotalUnsupportedRemediationActions.WithLabelValues(actionName, nodeName).Inc()
 
 	if !activeQuarantine {
 		slog.InfoContext(ctx, "Skipping remediation-failed label for node without an active quarantine",
@@ -303,34 +305,54 @@ func (r *FaultRemediationReconciler) shouldSkipEvent(ctx context.Context,
 	return true, nil
 }
 
-// nodeHasActiveQuarantine checks the current node rather than trusting the event's persisted
-// NodeQuarantined status. Change-stream replay can deliver an old remediation-ready event after
-// fault-quarantine has already recovered the node and removed its quarantine annotation.
-func (r *FaultRemediationReconciler) nodeHasActiveQuarantine(ctx context.Context, nodeName string) (bool, error) {
-	if r.annotationManager == nil {
-		return false, fmt.Errorf("annotation manager is not configured")
+// nodeHasActiveQuarantine checks the current node rather than trusting persisted event status.
+// It requires the same failure to remain in the live quarantine annotation so an event from an
+// older quarantine session cannot affect a newer, unrelated session.
+func (r *FaultRemediationReconciler) nodeHasActiveQuarantine(
+	ctx context.Context,
+	healthEvent *protos.HealthEvent,
+) (bool, error) {
+	if healthEvent == nil {
+		return false, fmt.Errorf("health event is nil")
 	}
 
-	_, node, err := r.annotationManager.GetRemediationState(ctx, nodeName)
+	node, err := r.readLiveNode(ctx, healthEvent.NodeName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			return false, nil
 		}
 
-		return false, fmt.Errorf("failed to get live node state for %s: %w", nodeName, err)
+		return false, fmt.Errorf("failed to get live node state for %s: %w", healthEvent.NodeName, err)
 	}
 
-	var annotations map[string]string
-	if node != nil {
-		annotations = node.GetAnnotations()
-	}
-
-	activeEvents, err := activeQuarantineEvents(annotations)
+	active, err := activeQuarantineContainsEvent(node.GetAnnotations(), healthEvent)
 	if err != nil {
-		return false, fmt.Errorf("failed to read active quarantine events for node %s: %w", nodeName, err)
+		return false, fmt.Errorf(
+			"failed to read active quarantine events for node %s: %w", healthEvent.NodeName, err)
 	}
 
-	return len(activeEvents) > 0, nil
+	return active, nil
+}
+
+// readLiveNode uses the API reader in production to bypass the informer cache. Unit tests that
+// construct the reconciler directly can fall back to the annotation manager's node read.
+func (r *FaultRemediationReconciler) readLiveNode(ctx context.Context, nodeName string) (*corev1.Node, error) {
+	if r.Config.NodeReader != nil {
+		node := &corev1.Node{}
+		if err := r.Config.NodeReader.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+			return nil, err
+		}
+
+		return node, nil
+	}
+
+	if r.annotationManager == nil {
+		return nil, fmt.Errorf("node reader is not configured")
+	}
+
+	_, node, err := r.annotationManager.GetRemediationState(ctx, nodeName)
+
+	return node, err
 }
 
 // runLogCollector runs log collector for non-NONE actions if enabled
@@ -454,7 +476,7 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 		"node", nodeName,
 		"status", status)
 
-	remediationState, node, err := r.annotationManager.GetRemediationState(ctx, nodeName)
+	remediationState, _, err := r.annotationManager.GetRemediationState(ctx, nodeName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			slog.WarnContext(ctx, "Node no longer exists, marking cancellation event as terminal", "node", nodeName)
@@ -491,7 +513,7 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 		return ctrl.Result{}, fmt.Errorf("failed to clear remediation state for node: %w", err)
 	}
 
-	if err := r.clearFaultRemediationNodeLabel(ctx, nodeName, node); err != nil {
+	if err := r.clearFaultRemediationNodeLabel(ctx, nodeName); err != nil {
 		tracing.RecordError(span, err)
 		span.SetAttributes(
 			attribute.String("fault_remediation.error.type", "clear_remediation_label_error"),
@@ -523,30 +545,23 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 func (r *FaultRemediationReconciler) clearFaultRemediationNodeLabel(
 	ctx context.Context,
 	nodeName string,
-	node *corev1.Node,
 ) error {
-	label := currentNodeStateLabel(node)
-	if !isFaultRemediationOwnedLabel(label) {
-		return nil
-	}
-
-	_, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx, nodeName, "", true)
+	_, err := r.Config.StateManager.RemoveNVSentinelStateNodeLabelIfMatch(
+		ctx,
+		nodeName,
+		statemanager.RemediatingLabelValue,
+		statemanager.RemediationSucceededLabelValue,
+		statemanager.RemediationFailedLabelValue,
+	)
 	if err != nil {
 		slog.ErrorContext(ctx, "Failed to clear fault-remediation node label",
 			"node", nodeName,
-			"label", label,
 			"error", err)
 
 		return fmt.Errorf("failed to clear fault-remediation label for node %s: %w", nodeName, err)
 	}
 
 	return nil
-}
-
-func isFaultRemediationOwnedLabel(label string) bool {
-	return label == string(statemanager.RemediatingLabelValue) ||
-		label == string(statemanager.RemediationSucceededLabelValue) ||
-		label == string(statemanager.RemediationFailedLabelValue)
 }
 
 func (r *FaultRemediationReconciler) handlePartialRecoveryEvent(
@@ -840,6 +855,38 @@ func activeQuarantineEvents(annotations map[string]string) ([]*protos.HealthEven
 	}
 
 	return activeEvents, nil
+}
+
+// activeQuarantineContainsEvent reports whether the incoming event belongs to the current
+// quarantine session. Event IDs distinguish repeated failures across sessions when available;
+// legacy records without IDs fall back to fault-quarantine's normal event-key matching.
+func activeQuarantineContainsEvent(
+	annotations map[string]string,
+	incomingEvent *protos.HealthEvent,
+) (bool, error) {
+	activeEvents, err := activeQuarantineEvents(annotations)
+	if err != nil {
+		return false, err
+	}
+
+	for _, activeEvent := range activeEvents {
+		if activeEvent.Id != "" && incomingEvent.Id != "" {
+			if activeEvent.Id == incomingEvent.Id {
+				return true, nil
+			}
+
+			continue
+		}
+
+		activeEventMap := fqannotation.NewHealthEventsAnnotationMap()
+		activeEventMap.AddOrUpdateEvent(activeEvent)
+
+		if _, matches := activeEventMap.GetEvent(incomingEvent); matches {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // unsupportedRemediationAction reports whether an active event needs remediation but has no
