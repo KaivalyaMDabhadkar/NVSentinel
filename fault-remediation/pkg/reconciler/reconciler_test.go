@@ -58,6 +58,18 @@ type MockNodeReader struct {
 	getFn func(ctx context.Context, key ctrlclient.ObjectKey, obj ctrlclient.Object) error
 }
 
+func newMockNodeReader(annotations map[string]string) *MockNodeReader {
+	return &MockNodeReader{
+		getFn: func(_ context.Context, key ctrlclient.ObjectKey, obj ctrlclient.Object) error {
+			node := obj.(*corev1.Node)
+			node.Name = key.Name
+			node.Annotations = annotations
+
+			return nil
+		},
+	}
+}
+
 func (m *MockNodeReader) Get(
 	ctx context.Context,
 	key ctrlclient.ObjectKey,
@@ -466,6 +478,7 @@ func TestPerformRemediationWithUnsupportedAction(t *testing.T) {
 	cfg := ReconcilerConfig{
 		RemediationClient: k8sClient,
 		StateManager:      stateManager,
+		NodeReader:        newMockNodeReader(quarantineAnnotationForTest(t, activeEvent)),
 		UpdateMaxRetries:  2,
 		UpdateRetryDelay:  1 * time.Microsecond,
 	}
@@ -653,15 +666,10 @@ func TestPerformRemediationWithUpdateNodeStateLabelFailures(t *testing.T) {
 }
 
 func TestShouldSkipEvent(t *testing.T) {
-	activeEvent := testAnnotationHealthEvent(
-		"unsupported-event", "test-node", protos.RecommendedAction_CONTACT_SUPPORT, "GPU-test")
 	mockK8sClient := &MockK8sClient{
 		createMaintenanceResourceFn: func(ctx context.Context, healthEventDoc *events.HealthEventData,
 			_ *common.EquivalenceGroupConfig) (string, error) {
 			return "test-cr", nil
-		},
-		annotationManagerOverride: &MockNodeAnnotationManager{
-			nodeAnnotations: quarantineAnnotationForTest(t, activeEvent),
 		},
 	}
 	stateManager := &statemanager.MockStateManager{
@@ -671,7 +679,11 @@ func TestShouldSkipEvent(t *testing.T) {
 		},
 	}
 
-	cfg := ReconcilerConfig{RemediationClient: mockK8sClient, StateManager: stateManager}
+	cfg := ReconcilerConfig{
+		RemediationClient: mockK8sClient,
+		StateManager:      stateManager,
+		NodeReader:        newMockNodeReader(nil),
+	}
 	r := NewFaultRemediationReconciler(nil, nil, nil, cfg, false)
 
 	tests := []struct {
@@ -1318,6 +1330,7 @@ func TestUnsupportedActionSkipMarksEventTerminal(t *testing.T) {
 				return true, nil
 			},
 		},
+		NodeReader: newMockNodeReader(quarantineAnnotationForTest(t, activeEvent)),
 	}
 	r := NewFaultRemediationReconciler(nil, nil, nil, cfg, false)
 	mockWatcher := &MockChangeStreamWatcher{}
@@ -1371,6 +1384,7 @@ func TestTrySkipEvent_UnsupportedReplayWithoutLiveQuarantine_MarksTerminalWithou
 				return true, nil
 			},
 		},
+		NodeReader: newMockNodeReader(nil),
 	}
 	r := NewFaultRemediationReconciler(nil, nil, nil, cfg, false)
 	mockWatcher := &MockChangeStreamWatcher{}
@@ -1474,6 +1488,7 @@ func TestTrySkipEvent_UnsupportedReplayDuringNewQuarantine_MarksTerminalWithoutS
 				return true, nil
 			},
 		},
+		NodeReader: newMockNodeReader(quarantineAnnotationForTest(t, newSessionEvent)),
 	}
 	r := NewFaultRemediationReconciler(nil, nil, nil, cfg, false)
 	mockWatcher := &MockChangeStreamWatcher{}
@@ -1569,6 +1584,7 @@ func TestTrySkipEvent_LiveNodeReadFails_ReturnsErrorWithoutFinalizingEvent(t *te
 
 	assert.True(t, done)
 	assert.ErrorIs(t, err, liveReadErr)
+	assert.ErrorContains(t, err, "failed to read node test-node from the API")
 	assert.False(t, labelUpdateCalled)
 	assert.False(t, statusUpdated)
 	_, markProcessedCount, _, _ := mockWatcher.GetCallCounts()

@@ -1347,6 +1347,7 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 		cfg := ReconcilerConfig{
 			RemediationClient: remediationClient,
 			StateManager:      statemanager.NewStateManager(testClient),
+			NodeReader:        ctrlRuntimeAPIReader,
 			UpdateMaxRetries:  3,
 			UpdateRetryDelay:  100 * time.Millisecond,
 		}

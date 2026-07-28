@@ -334,25 +334,14 @@ func (r *FaultRemediationReconciler) nodeHasActiveQuarantine(
 	return active, nil
 }
 
-// readLiveNode uses the API reader in production to bypass the informer cache. Unit tests that
-// construct the reconciler directly can fall back to the annotation manager's node read.
+// readLiveNode uses the API reader to bypass the informer cache.
 func (r *FaultRemediationReconciler) readLiveNode(ctx context.Context, nodeName string) (*corev1.Node, error) {
-	if r.Config.NodeReader != nil {
-		node := &corev1.Node{}
-		if err := r.Config.NodeReader.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
-			return nil, err
-		}
-
-		return node, nil
+	node := &corev1.Node{}
+	if err := r.Config.NodeReader.Get(ctx, client.ObjectKey{Name: nodeName}, node); err != nil {
+		return nil, fmt.Errorf("failed to read node %s from the API: %w", nodeName, err)
 	}
 
-	if r.annotationManager == nil {
-		return nil, fmt.Errorf("node reader is not configured")
-	}
-
-	_, node, err := r.annotationManager.GetRemediationState(ctx, nodeName)
-
-	return node, err
+	return node, nil
 }
 
 // runLogCollector runs log collector for non-NONE actions if enabled
