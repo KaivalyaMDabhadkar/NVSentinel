@@ -214,7 +214,9 @@ func (r *FaultRemediationReconciler) completeEventSession(
 }
 
 func (r *FaultRemediationReconciler) shouldSkipEvent(ctx context.Context,
-	healthEventWithStatus model.HealthEventWithStatus, groupConfig *common.EquivalenceGroupConfig) bool {
+	healthEventWithStatus model.HealthEventWithStatus,
+	groupConfig *common.EquivalenceGroupConfig,
+) (bool, error) {
 	action := healthEventWithStatus.HealthEvent.RecommendedAction
 	nodeName := healthEventWithStatus.HealthEvent.NodeName
 
@@ -228,7 +230,7 @@ func (r *FaultRemediationReconciler) shouldSkipEvent(ctx context.Context,
 			attribute.String("fault_remediation.skip_reason", "recommended_action_none"),
 		)
 
-		return true
+		return true, nil
 	}
 
 	if healthEventWithStatus.HealthEventStatus != nil && healthEventWithStatus.HealthEventStatus.FaultRemediated != nil &&
@@ -237,11 +239,11 @@ func (r *FaultRemediationReconciler) shouldSkipEvent(ctx context.Context,
 			attribute.String("fault_remediation.skip_reason", "already_remediated"),
 		)
 
-		return true
+		return true, nil
 	}
 
 	if groupConfig != nil {
-		return false
+		return false, nil
 	}
 
 	// Unsupported action detected
@@ -255,12 +257,35 @@ func (r *FaultRemediationReconciler) shouldSkipEvent(ctx context.Context,
 		attribute.String("fault_remediation.skip_reason", "unsupported_action"),
 	)
 
-	_, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx,
+	activeQuarantine, err := r.nodeHasActiveQuarantine(ctx, nodeName)
+	if err != nil {
+		tracing.RecordError(span, err)
+		span.SetAttributes(
+			attribute.String("fault_remediation.error.type", "quarantine_state_check_error"),
+			attribute.String("fault_remediation.error.message", err.Error()),
+		)
+
+		return true, err
+	}
+
+	if !activeQuarantine {
+		slog.InfoContext(ctx, "Skipping remediation-failed label for node without an active quarantine",
+			"action", actionName,
+			"node", nodeName)
+		span.SetAttributes(
+			attribute.String("fault_remediation.skip_reason", "unsupported_action_stale_event"),
+		)
+
+		return true, nil
+	}
+
+	nodeModified, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx,
 		healthEventWithStatus.HealthEvent.NodeName,
 		statemanager.RemediationFailedLabelValue, false)
 	if err != nil {
 		slog.ErrorContext(ctx, "Error updating node label",
 			"label", statemanager.RemediationFailedLabelValue,
+			"nodeModified", nodeModified,
 			"error", err)
 		tracing.RecordError(span, err)
 		span.SetAttributes(
@@ -269,9 +294,43 @@ func (r *FaultRemediationReconciler) shouldSkipEvent(ctx context.Context,
 		)
 		metrics.ProcessingErrors.WithLabelValues("label_update_error",
 			healthEventWithStatus.HealthEvent.NodeName).Inc()
+
+		if !nodeModified {
+			return true, fmt.Errorf("failed to label unsupported remediation action for node %s: %w", nodeName, err)
+		}
 	}
 
-	return true
+	return true, nil
+}
+
+// nodeHasActiveQuarantine checks the current node rather than trusting the event's persisted
+// NodeQuarantined status. Change-stream replay can deliver an old remediation-ready event after
+// fault-quarantine has already recovered the node and removed its quarantine annotation.
+func (r *FaultRemediationReconciler) nodeHasActiveQuarantine(ctx context.Context, nodeName string) (bool, error) {
+	if r.annotationManager == nil {
+		return false, fmt.Errorf("annotation manager is not configured")
+	}
+
+	_, node, err := r.annotationManager.GetRemediationState(ctx, nodeName)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("failed to get live node state for %s: %w", nodeName, err)
+	}
+
+	var annotations map[string]string
+	if node != nil {
+		annotations = node.GetAnnotations()
+	}
+
+	activeEvents, err := activeQuarantineEvents(annotations)
+	if err != nil {
+		return false, fmt.Errorf("failed to read active quarantine events for node %s: %w", nodeName, err)
+	}
+
+	return len(activeEvents) > 0, nil
 }
 
 // runLogCollector runs log collector for non-NONE actions if enabled
@@ -395,7 +454,7 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 		"node", nodeName,
 		"status", status)
 
-	remediationState, _, err := r.annotationManager.GetRemediationState(ctx, nodeName)
+	remediationState, node, err := r.annotationManager.GetRemediationState(ctx, nodeName)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			slog.WarnContext(ctx, "Node no longer exists, marking cancellation event as terminal", "node", nodeName)
@@ -432,6 +491,16 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 		return ctrl.Result{}, fmt.Errorf("failed to clear remediation state for node: %w", err)
 	}
 
+	if err := r.clearFaultRemediationNodeLabel(ctx, nodeName, node); err != nil {
+		tracing.RecordError(span, err)
+		span.SetAttributes(
+			attribute.String("fault_remediation.error.type", "clear_remediation_label_error"),
+			attribute.String("fault_remediation.error.message", err.Error()),
+		)
+
+		return ctrl.Result{}, err
+	}
+
 	if err := r.updateNodeRemediatedStatus(ctx, healthEventStore, eventWithToken, true); err != nil {
 		slog.ErrorContext(ctx, "Failed to write completion marker for cancellation event",
 			"node", nodeName,
@@ -446,6 +515,38 @@ func (r *FaultRemediationReconciler) handleCancellationEvent(
 	}
 
 	return ctrl.Result{}, nil
+}
+
+// clearFaultRemediationNodeLabel removes terminal or in-progress labels owned by this controller.
+// It deliberately leaves quarantine and drain labels alone because those belong to other
+// controllers and may represent a newer quarantine session.
+func (r *FaultRemediationReconciler) clearFaultRemediationNodeLabel(
+	ctx context.Context,
+	nodeName string,
+	node *corev1.Node,
+) error {
+	label := currentNodeStateLabel(node)
+	if !isFaultRemediationOwnedLabel(label) {
+		return nil
+	}
+
+	_, err := r.Config.StateManager.UpdateNVSentinelStateNodeLabel(ctx, nodeName, "", true)
+	if err != nil {
+		slog.ErrorContext(ctx, "Failed to clear fault-remediation node label",
+			"node", nodeName,
+			"label", label,
+			"error", err)
+
+		return fmt.Errorf("failed to clear fault-remediation label for node %s: %w", nodeName, err)
+	}
+
+	return nil
+}
+
+func isFaultRemediationOwnedLabel(label string) bool {
+	return label == string(statemanager.RemediatingLabelValue) ||
+		label == string(statemanager.RemediationSucceededLabelValue) ||
+		label == string(statemanager.RemediationFailedLabelValue)
 }
 
 func (r *FaultRemediationReconciler) handlePartialRecoveryEvent(
@@ -884,7 +985,12 @@ func (r *FaultRemediationReconciler) trySkipEvent(
 	healthEventStore datastore.HealthEventStore,
 	nodeName string,
 ) (ctrl.Result, error, bool) {
-	if !r.shouldSkipEvent(ctx, healthEventWithStatus.HealthEventWithStatus, groupConfig) {
+	shouldSkip, err := r.shouldSkipEvent(ctx, healthEventWithStatus.HealthEventWithStatus, groupConfig)
+	if err != nil {
+		return ctrl.Result{}, err, true
+	}
+
+	if !shouldSkip {
 		return ctrl.Result{}, nil, false
 	}
 

@@ -415,11 +415,16 @@ func TestHandleEvent(t *testing.T) {
 }
 
 func TestPerformRemediationWithUnsupportedAction(t *testing.T) {
+	activeEvent := testAnnotationHealthEvent(
+		"unsupported-event", "node1", protos.RecommendedAction_UNKNOWN, "GPU-test")
 	k8sClient := &MockK8sClient{
 		createMaintenanceResourceFn: func(ctx context.Context, healthEventDoc *events.HealthEventData,
 			groupConfig *common.EquivalenceGroupConfig) (string, error) {
 			t.Errorf("CreateMaintenanceResource should not be called on an unsupported action")
 			return "", fmt.Errorf("test error")
+		},
+		annotationManagerOverride: &MockNodeAnnotationManager{
+			nodeAnnotations: quarantineAnnotationForTest(t, activeEvent),
 		},
 	}
 	count := 0
@@ -459,7 +464,9 @@ func TestPerformRemediationWithUnsupportedAction(t *testing.T) {
 	r := NewFaultRemediationReconciler(nil, nil, nil, cfg, false)
 
 	// shouldSkipEvent should return true for UNKNOWN action
-	assert.True(t, r.shouldSkipEvent(t.Context(), healthEvent.HealthEventWithStatus, nil))
+	shouldSkip, err := r.shouldSkipEvent(t.Context(), healthEvent.HealthEventWithStatus, nil)
+	assert.NoError(t, err)
+	assert.True(t, shouldSkip)
 }
 
 func TestPerformRemediationWithSuccess(t *testing.T) {
@@ -627,10 +634,15 @@ func TestPerformRemediationWithUpdateNodeStateLabelFailures(t *testing.T) {
 }
 
 func TestShouldSkipEvent(t *testing.T) {
+	activeEvent := testAnnotationHealthEvent(
+		"unsupported-event", "test-node", protos.RecommendedAction_CONTACT_SUPPORT, "GPU-test")
 	mockK8sClient := &MockK8sClient{
 		createMaintenanceResourceFn: func(ctx context.Context, healthEventDoc *events.HealthEventData,
 			_ *common.EquivalenceGroupConfig) (string, error) {
 			return "test-cr", nil
+		},
+		annotationManagerOverride: &MockNodeAnnotationManager{
+			nodeAnnotations: quarantineAnnotationForTest(t, activeEvent),
 		},
 	}
 	stateManager := &statemanager.MockStateManager{
@@ -695,7 +707,8 @@ func TestShouldSkipEvent(t *testing.T) {
 				HealthEvent: healthEvent,
 			}
 
-			result := r.shouldSkipEvent(t.Context(), healthEventWithStatus, tt.groupConfig)
+			result, err := r.shouldSkipEvent(t.Context(), healthEventWithStatus, tt.groupConfig)
+			assert.NoError(t, err)
 			assert.Equal(t, tt.shouldSkip, result, tt.description)
 		})
 	}
@@ -711,7 +724,8 @@ func TestShouldSkipEvent(t *testing.T) {
 		}
 		groupConfig := getGroupConfig("disk-replace", nil)
 
-		result := r.shouldSkipEvent(t.Context(), healthEventWithStatus, groupConfig)
+		result, err := r.shouldSkipEvent(t.Context(), healthEventWithStatus, groupConfig)
+		assert.NoError(t, err)
 		assert.False(t, result, "Custom actions with a matching group config should not be skipped")
 	})
 
@@ -725,7 +739,8 @@ func TestShouldSkipEvent(t *testing.T) {
 			HealthEvent: healthEvent,
 		}
 
-		result := r.shouldSkipEvent(t.Context(), healthEventWithStatus, nil)
+		result, err := r.shouldSkipEvent(t.Context(), healthEventWithStatus, nil)
+		assert.NoError(t, err)
 		assert.True(t, result, "Custom actions without a matching group config should be skipped")
 	})
 }
@@ -767,7 +782,9 @@ func TestRunLogCollectorOnNoneActionWhenEnabled(t *testing.T) {
 		_, _ = r.Config.RemediationClient.RunLogCollectorJob(ctx, event.HealthEvent.NodeName, "")
 	}
 	groupConfig := getGroupConfig("restart", nil)
-	assert.True(t, r.shouldSkipEvent(t.Context(), event, groupConfig))
+	shouldSkip, err := r.shouldSkipEvent(t.Context(), event, groupConfig)
+	assert.NoError(t, err)
+	assert.True(t, shouldSkip)
 	assert.True(t, called, "log collector job should be invoked when enabled for NONE action")
 }
 
@@ -902,7 +919,9 @@ func TestLogCollectorDisabled(t *testing.T) {
 		_, _ = r.Config.RemediationClient.RunLogCollectorJob(ctx, event.HealthEvent.NodeName, "")
 	}
 	groupConfig := getGroupConfig("restart", nil)
-	assert.True(t, r.shouldSkipEvent(t.Context(), event, groupConfig))
+	shouldSkip, err := r.shouldSkipEvent(t.Context(), event, groupConfig)
+	assert.NoError(t, err)
+	assert.True(t, shouldSkip)
 	assert.False(t, logCollectorCalled, "log collector job should NOT be invoked when disabled")
 }
 
@@ -1265,7 +1284,13 @@ func TestUnsupportedActionSkipMarksEventTerminal(t *testing.T) {
 	// CONTACT_SUPPORT is not configured as a maintenance action for FR. That is an
 	// intentional skip, but it still needs a durable terminal status; otherwise cold
 	// start will keep replaying the same unsupported event because faultremediated is nil.
-	mockK8sClient := &MockK8sClient{}
+	activeEvent := testAnnotationHealthEvent(
+		eventID, nodeName, protos.RecommendedAction_CONTACT_SUPPORT, "GPU-test")
+	mockK8sClient := &MockK8sClient{
+		annotationManagerOverride: &MockNodeAnnotationManager{
+			nodeAnnotations: quarantineAnnotationForTest(t, activeEvent),
+		},
+	}
 	cfg := ReconcilerConfig{
 		RemediationClient: mockK8sClient,
 		StateManager: &statemanager.MockStateManager{
@@ -1308,6 +1333,164 @@ func TestUnsupportedActionSkipMarksEventTerminal(t *testing.T) {
 	assert.True(t, updated)
 	_, markProcessedCount, _, _ := mockWatcher.GetCallCounts()
 	assert.Equal(t, 1, markProcessedCount)
+}
+
+func TestUnsupportedActionReplayDoesNotLabelUnquarantinedNode(t *testing.T) {
+	ctx := context.Background()
+	nodeName := "recovered-node"
+	eventID := "stale-unsupported-event"
+	labelUpdateCalled := false
+	statusUpdated := false
+
+	mockK8sClient := &MockK8sClient{
+		annotationManagerOverride: &MockNodeAnnotationManager{},
+	}
+	cfg := ReconcilerConfig{
+		RemediationClient: mockK8sClient,
+		StateManager: &statemanager.MockStateManager{
+			UpdateNVSentinelStateNodeLabelFn: func(context.Context, string,
+				statemanager.NVSentinelStateLabelValue, bool) (bool, error) {
+				labelUpdateCalled = true
+
+				return true, nil
+			},
+		},
+	}
+	r := NewFaultRemediationReconciler(nil, nil, nil, cfg, false)
+	mockWatcher := &MockChangeStreamWatcher{}
+	mockStore := &MockHealthEventStore{
+		UpdateHealthEventStatusFn: func(_ context.Context, id string, status datastore.HealthEventStatus) error {
+			assert.Equal(t, eventID, id)
+			assert.NotNil(t, status.FaultRemediated)
+			assert.False(t, *status.FaultRemediated)
+			statusUpdated = true
+
+			return nil
+		},
+	}
+	healthEventDoc := &events.HealthEventDoc{
+		ID: eventID,
+		HealthEventWithStatus: model.HealthEventWithStatus{
+			HealthEvent: &protos.HealthEvent{
+				NodeName:          nodeName,
+				RecommendedAction: protos.RecommendedAction_CONTACT_SUPPORT,
+			},
+			HealthEventStatus: &protos.HealthEventStatus{
+				NodeQuarantined: string(model.Quarantined),
+			},
+		},
+	}
+	eventWithToken := datastore.EventWithToken{
+		Event:       testRawHealthEvent(eventID, nodeName, protos.RecommendedAction_CONTACT_SUPPORT),
+		ResumeToken: []byte("resume-token"),
+	}
+
+	_, err, done := r.trySkipEvent(
+		ctx, healthEventDoc, nil, eventWithToken, mockWatcher, mockStore, nodeName)
+
+	assert.True(t, done)
+	assert.NoError(t, err)
+	assert.False(t, labelUpdateCalled,
+		"a persisted quarantine status must not relabel a node whose live quarantine annotation is gone")
+	assert.True(t, statusUpdated, "the stale unsupported event should still be made terminal")
+	_, markProcessedCount, _, _ := mockWatcher.GetCallCounts()
+	assert.Equal(t, 1, markProcessedCount)
+}
+
+func TestCancellationEventClearsOnlyFaultRemediationOwnedLabels(t *testing.T) {
+	tests := []struct {
+		name          string
+		label         string
+		expectRemoval bool
+	}{
+		{
+			name:          "remediating",
+			label:         string(statemanager.RemediatingLabelValue),
+			expectRemoval: true,
+		},
+		{
+			name:          "remediation succeeded",
+			label:         string(statemanager.RemediationSucceededLabelValue),
+			expectRemoval: true,
+		},
+		{
+			name:          "remediation failed",
+			label:         string(statemanager.RemediationFailedLabelValue),
+			expectRemoval: true,
+		},
+		{
+			name:          "drain succeeded belongs to node drainer",
+			label:         string(statemanager.DrainSucceededLabelValue),
+			expectRemoval: false,
+		},
+		{
+			name:          "state label absent",
+			expectRemoval: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			nodeName := "test-node"
+			eventID := "cancellation-event"
+			removeCalls := 0
+			nodeLabels := map[string]string{}
+			if tt.label != "" {
+				nodeLabels[statemanager.NVSentinelStateLabelKey] = tt.label
+			}
+
+			mockAnnotationManager := &MockNodeAnnotationManager{
+				nodeLabels: nodeLabels,
+			}
+			mockK8sClient := &MockK8sClient{
+				annotationManagerOverride: mockAnnotationManager,
+			}
+			cfg := ReconcilerConfig{
+				RemediationClient: mockK8sClient,
+				StateManager: &statemanager.MockStateManager{
+					UpdateNVSentinelStateNodeLabelFn: func(_ context.Context, gotNodeName string,
+						newState statemanager.NVSentinelStateLabelValue, remove bool) (bool, error) {
+						removeCalls++
+						assert.Equal(t, nodeName, gotNodeName)
+						assert.Empty(t, newState)
+						assert.True(t, remove)
+
+						return true, nil
+					},
+				},
+			}
+			mockStore := &MockHealthEventStore{
+				UpdateHealthEventStatusFn: func(_ context.Context, id string,
+					status datastore.HealthEventStatus) error {
+					assert.Equal(t, eventID, id)
+					assert.NotNil(t, status.FaultRemediated)
+					assert.True(t, *status.FaultRemediated)
+
+					return nil
+				},
+			}
+			mockWatcher := &MockChangeStreamWatcher{}
+			r := NewFaultRemediationReconciler(nil, mockWatcher, mockStore, cfg, false)
+			eventWithToken := datastore.EventWithToken{
+				Event:       testRawHealthEvent(eventID, nodeName, protos.RecommendedAction_CONTACT_SUPPORT),
+				ResumeToken: []byte("resume-token"),
+			}
+
+			result, err := r.handleCancellationEvent(
+				ctx, nodeName, model.UnQuarantined, mockWatcher, eventWithToken, mockStore)
+
+			assert.NoError(t, err)
+			assert.True(t, result.IsZero())
+			if tt.expectRemoval {
+				assert.Equal(t, 1, removeCalls)
+			} else {
+				assert.Equal(t, 0, removeCalls)
+			}
+			_, markProcessedCount, _, _ := mockWatcher.GetCallCounts()
+			assert.Equal(t, 1, markProcessedCount)
+		})
+	}
 }
 
 func TestPartialRecoveryRecomputesLabelToRemediationSucceeded(t *testing.T) {

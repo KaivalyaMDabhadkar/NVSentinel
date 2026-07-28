@@ -910,7 +910,8 @@ func TestEventSequenceWithSupersedingGroup(t *testing.T) {
 	groupConfig, err = common.GetGroupConfigForEvent(cfg.RemediationClient.GetConfig().RemediationActions,
 		event2.HealthEvent)
 	assert.NoError(t, err)
-	shouldSkip := r.shouldSkipEvent(ctx, event2, groupConfig)
+	shouldSkip, err := r.shouldSkipEvent(ctx, event2, groupConfig)
+	assert.NoError(t, err)
 	assert.False(t, shouldSkip, "Shouldn't valid health event")
 	shouldCreate, existingCR, _, err := r.checkExistingCRStatus(ctx, event2.HealthEvent, time.Now(), groupConfig)
 	assert.NoError(t, err)
@@ -1110,6 +1111,23 @@ func TestEventSequenceWithSupersedingGroup(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond, "Expected CR-2 group to be removed and CR-3 group to remain")
 
 	// Event 9: COMPONENT_RESET missing GPU_UUID should result in a nvsentinel-state label having value remediation-failed.
+	// Model the active fault-quarantine state that permits fault-remediation to write a terminal label.
+	node, err = testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
+	require.NoError(t, err)
+	if node.Annotations == nil {
+		node.Annotations = make(map[string]string)
+	}
+	for key, value := range quarantineAnnotationForTest(t,
+		testAnnotationHealthEvent("event-9", nodeName, protos.RecommendedAction_COMPONENT_RESET, "GPU-test")) {
+		node.Annotations[key] = value
+	}
+	_, err = testClient.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		active, err := r.nodeHasActiveQuarantine(ctx, nodeName)
+		return err == nil && active
+	}, 5*time.Second, 100*time.Millisecond, "Expected active quarantine annotation to reach informer cache")
+
 	_, _ = stateManager.UpdateNVSentinelStateNodeLabel(ctx, nodeName, statemanager.DrainSucceededLabelValue, false)
 	event9 := model.HealthEventWithStatus{
 		HealthEvent: &protos.HealthEvent{
@@ -1121,7 +1139,8 @@ func TestEventSequenceWithSupersedingGroup(t *testing.T) {
 		event9.HealthEvent)
 	assert.Error(t, err)
 	assert.Nil(t, groupConfig)
-	shouldSkip = r.shouldSkipEvent(ctx, event9, groupConfig)
+	shouldSkip, err = r.shouldSkipEvent(ctx, event9, groupConfig)
+	assert.NoError(t, err)
 	assert.True(t, shouldSkip, "Should skip invalid health event")
 
 	node, err = testClient.CoreV1().Nodes().Get(ctx, nodeName, metav1.GetOptions{})
@@ -1339,7 +1358,8 @@ func TestFullReconcilerWithMockedMongoDB_E2E(t *testing.T) {
 			healthEvent.HealthEvent)
 		assert.NoError(t, err)
 
-		shouldSkip := reconcilerInstance.shouldSkipEvent(ctx, healthEvent, groupConfig)
+		shouldSkip, err := reconcilerInstance.shouldSkipEvent(ctx, healthEvent, groupConfig)
+		assert.NoError(t, err)
 		assert.True(t, shouldSkip, "Should skip unsupported action")
 
 		afterUnsupported := getCounterVecValue(t, metrics.TotalUnsupportedRemediationActions, "UNKNOWN", nodeName)
