@@ -19,6 +19,7 @@ package tests
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -105,6 +106,9 @@ func TestFaultRemediationResumeTokenAdvances(t *testing.T) {
 		// written by an earlier run must not satisfy this test).
 		restConfig := client.RESTConfig()
 		tokenBefore = helpers.GetResumeTokenDoc(newCtx, t, restConfig, client, mongoPod, "fault-remediation")
+		require.True(t,
+			strings.Contains(tokenBefore, "NOT_FOUND") || resumeTokenData(tokenBefore) != "",
+			"unexpected ResumeTokens read for fault-remediation: %s", tokenBefore)
 		t.Logf("fault-remediation resume token before test: %s", tokenBefore)
 
 		return newCtx
@@ -126,10 +130,19 @@ func TestFaultRemediationResumeTokenAdvances(t *testing.T) {
 
 			// The checkpoint is upserted right after each processed event;
 			// give it a generous window to absorb mongosh exec latency.
+			// Compare the extracted _data payloads rather than raw mongosh
+			// output so transient stdout noise (warnings, partial reads)
+			// can never satisfy the "token advanced" predicate: anything
+			// that is not a well-formed token document parses to "" and the
+			// poll simply retries.
+			dataBefore := resumeTokenData(tokenBefore)
+
 			var tokenAfter string
 			require.Eventually(t, func() bool {
 				tokenAfter = helpers.GetResumeTokenDoc(ctx, t, restConfig, client, mongoPod, "fault-remediation")
-				return !strings.Contains(tokenAfter, "NOT_FOUND") && tokenAfter != tokenBefore
+				dataAfter := resumeTokenData(tokenAfter)
+
+				return dataAfter != "" && dataAfter != dataBefore
 			}, 2*time.Minute, 5*time.Second,
 				"fault-remediation must persist its change-stream checkpoint after processing "+
 					"a live event (GitHub issue #1513: resume token dropped → replay/OOM on restart). "+
@@ -153,4 +166,20 @@ func TestFaultRemediationResumeTokenAdvances(t *testing.T) {
 	})
 
 	testEnv.Test(t, feature.Feature())
+}
+
+// resumeTokenDataRe matches the _data hex payload in a printjson'd resume
+// token document, e.g. `resumeToken: { _data: '826A69...' }`.
+var resumeTokenDataRe = regexp.MustCompile(`_data:\s*['"]([0-9A-Fa-f]+)['"]`)
+
+// resumeTokenData extracts the resume token's _data payload from mongosh
+// output. Returns "" for NOT_FOUND, empty, or malformed output so callers
+// can treat only well-formed token documents as comparable.
+func resumeTokenData(doc string) string {
+	match := resumeTokenDataRe.FindStringSubmatch(doc)
+	if match == nil {
+		return ""
+	}
+
+	return match[1]
 }
