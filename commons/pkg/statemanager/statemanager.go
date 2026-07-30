@@ -403,9 +403,13 @@ func validateStateTransition(nodeName, currentValue string, exists bool, targetS
 		// remediation-succeeded and remediation-failed are terminal for a single failure, but a
 		// partial recovery (a tracked failure clears while the node stays quarantined) lets
 		// fault-remediation recompute the node label from the remaining active failures, which can
-		// move between the two terminal remediation outcomes.
-		RemediationSucceededLabelValue: {RemediationFailedLabelValue},
-		RemediationFailedLabelValue:    {RemediationSucceededLabelValue},
+		// move between the two terminal remediation outcomes. Both states can also return to
+		// remediating: a new remediation-ready event can arrive after an equivalent maintenance CR
+		// completed (for example a post-reboot fault while the node is still quarantined), and a
+		// failed CR is retried with a new CR, so fault-remediation legitimately starts another
+		// remediation cycle within the same quarantine session.
+		RemediationSucceededLabelValue: {RemediationFailedLabelValue, RemediatingLabelValue},
+		RemediationFailedLabelValue:    {RemediationSucceededLabelValue, RemediatingLabelValue},
 	}
 
 	currentState := NVSentinelStateLabelValue(currentValue)
