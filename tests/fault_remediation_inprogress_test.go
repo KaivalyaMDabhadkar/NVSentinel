@@ -156,9 +156,18 @@ func TestEventDuringInProgressCRIsRetriedAfterCompletion(t *testing.T) {
 		})
 
 	feature.Teardown(func(ctx context.Context, t *testing.T, c *envconf.Config) context.Context {
+		// Restore janitor-provider loudly: leaving it at 0 replicas would make every later
+		// test that depends on maintenance CRs completing fail with unrelated symptoms.
+		providerRestored := false
+
 		client, err := c.NewClient()
-		if err == nil {
-			_ = helpers.ScaleDeployment(ctx, t, client, "janitor-provider", helpers.NVSentinelNamespace, 1)
+		if err != nil {
+			t.Errorf("teardown could not build a client; janitor-provider may be left scaled to 0: %v", err)
+		} else if scaleErr := helpers.ScaleDeployment(ctx, t, client, "janitor-provider",
+			helpers.NVSentinelNamespace, 1); scaleErr != nil {
+			t.Errorf("failed to restore janitor-provider to 1 replica: %v", scaleErr)
+		} else {
+			providerRestored = true
 		}
 
 		if testCtx != nil && testCtx.NodeName != "" {
@@ -167,7 +176,17 @@ func TestEventDuringInProgressCRIsRetriedAfterCompletion(t *testing.T) {
 			helpers.RecoverEntityFailure(ctx, t, testCtx.NodeName, "GPU", "1", "79")
 		}
 
-		return helpers.TeardownFaultRemediation(ctx, t, c)
+		ctx = helpers.TeardownFaultRemediation(ctx, t, c)
+
+		// Verify the provider actually came back. This runs after the remaining cleanup
+		// because the rollout helper fails the test fatally on timeout, which would
+		// otherwise skip the cleanup steps above.
+		if providerRestored {
+			helpers.WaitForDeploymentRolloutWithTimeout(ctx, t, client,
+				"janitor-provider", helpers.NVSentinelNamespace, 2*time.Minute)
+		}
+
+		return ctx
 	})
 
 	testEnv.Test(t, feature.Feature())
