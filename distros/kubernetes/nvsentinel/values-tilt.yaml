@@ -126,10 +126,10 @@ preflight:
       command: ["/bin/sh", "-c"]
       args: ["echo 'preflight-dcgm-diag: no real GPU, exiting ok'; exit 0"]
 
+# NOTE: useBitnami/usePerconaOperator are intentionally NOT set here so the
+# default MongoDB legs exercise the chart's default backend selection.
+# Legs that need a specific backend pin it in their values-tilt-mongodb-*.yaml.
 mongodb-store:
-  useBitnami: true
-  usePerconaOperator: false
-  
   job:
     nodeSelector:
       node-role.kubernetes.io/control-plane: ""

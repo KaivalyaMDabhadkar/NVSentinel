@@ -54,7 +54,11 @@ postgresql:
   enabled: false
 
 # MongoDB subchart configuration — TLS and auth disabled
+# Explicitly pinned to the Bitnami backend: this leg keeps covering the
+# legacy Bitnami path (the chart default is the Percona operator).
 mongodb-store:
+  useBitnami: true
+  usePerconaOperator: false
   mongodb:
     enabled: true
     tls:

@@ -15,6 +15,11 @@
 # MongoDB-specific values for Tilt development
 # This file is automatically included when USE_POSTGRESQL is not set
 # Example: Run `tilt up` (default uses MongoDB)
+#
+# This overlay intentionally does NOT set mongodb-store.useBitnami /
+# mongodb-store.usePerconaOperator, so the deployment uses the chart's
+# default backend (Percona Operator). The connection host below must match
+# the service created by that default backend.
 
 global:
   dryRun: false
@@ -31,8 +36,8 @@ global:
   datastore:
     provider: "mongodb"
     connection:
-      # Use the headless service for replica set connection
-      host: "mongodb-headless.nvsentinel.svc.cluster.local"
+      # Percona operator exposes the replica set via the <cluster>-rs0 service
+      host: "mongodb-rs0.nvsentinel.svc.cluster.local"
       port: 27017
       database: "HealthEventsDatabase"
       collection: "HealthEvents"
@@ -55,8 +60,6 @@ global:
 postgresql:
   enabled: false
 
-# MongoDB subchart configuration
-mongodb-store:
-  mongodb:
-    enabled: true
+# No mongodb-store backend flags here: this leg validates that the chart's
+# default backend selection works without any explicit override.
 

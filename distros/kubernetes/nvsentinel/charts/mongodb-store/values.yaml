@@ -14,22 +14,22 @@
 
 # Feature flags to switch between Bitnami MongoDB and Percona MongoDB Operator
 # Due to Helm limitations, both flags must be explicitly set when switching modes
-# 
-# Default (Bitnami MongoDB - backward compatible):
+#
+# Default (Percona MongoDB Operator - multi-arch, supports ARM64):
 #   global.mongodbStore.enabled: true
-#   mongodb-store.useBitnami: true           # Default
-#   mongodb-store.usePerconaOperator: false  # Default
-# 
-# Percona MongoDB Operator:
+#   mongodb-store.useBitnami: false          # Default
+#   mongodb-store.usePerconaOperator: true   # Default
+#
+# Bitnami MongoDB (legacy, amd64-only images):
 #   global.mongodbStore.enabled: true
-#   mongodb-store.useBitnami: false          # Must explicitly disable
-#   mongodb-store.usePerconaOperator: true   # Must explicitly enable
+#   mongodb-store.useBitnami: true           # Must explicitly enable
+#   mongodb-store.usePerconaOperator: false  # Must explicitly disable
 #
 # IMPORTANT: These flags control which chart dependencies are loaded.
 # Both must be set correctly to avoid loading unnecessary charts.
 
-useBitnami: true
-usePerconaOperator: false
+useBitnami: false
+usePerconaOperator: true
 
 # SCRAM application user (created when mongodb.tls.enabled is false).
 # Instead of X.509 cert-based users, the Job creates a SCRAM-SHA-256 user
