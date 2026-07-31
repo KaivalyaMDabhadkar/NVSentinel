@@ -219,8 +219,13 @@ local_resource(
 
 k8s_yaml(yaml)
 
-# Check if using Percona operator (only relevant when using MongoDB)
-use_percona = effective_values.get('mongodb-store', {}).get('usePerconaOperator', False) if not use_postgresql else False
+# Check if using Percona operator (only relevant when using MongoDB).
+# The mongodb-store subchart's own values.yaml is not part of the values-file
+# merge above, so read it explicitly: when no values file overrides the flag,
+# helm falls back to the chart default and Tilt must follow the same logic.
+mongodb_store_chart_defaults = read_yaml('../distros/kubernetes/nvsentinel/charts/mongodb-store/values.yaml')
+default_use_percona = mongodb_store_chart_defaults.get('usePerconaOperator', False)
+use_percona = effective_values.get('mongodb-store', {}).get('usePerconaOperator', default_use_percona) if not use_postgresql else False
 if use_percona:
     print("Using Percona MongoDB Operator for MongoDB installation.")
 else:
