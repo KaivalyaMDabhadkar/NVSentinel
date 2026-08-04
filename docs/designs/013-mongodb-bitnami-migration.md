@@ -6,7 +6,7 @@ The NVSentinel platform relies on MongoDB as its primary data store for persisti
 
 While functional, this approach presented significant operational challenges:
 - **Upstream Image Deprecations:** As announced in the [official Bitnami containers issue #83267](https://github.com/bitnami/containers/issues/83267), effective August 28th, 2025, Bitnami moved most versioned container images to a read-only `docker.io/bitnamilegacy` registry, with no further updates or security patches. Our deployment depended on these now-archived images, materially increasing long-term maintenance and security risk. See also: [Appsmith's guidance on Bitnami image deprecation](https://docs.appsmith.com/getting-started/setup/instance-management/bitnami-image-deprecation). 
-- **Manual Lifecycle Management:** The Bitnami chart directly created a Kubernetes `StatefulSet`. All "Day 2" operations—such as database version upgrades, scaling, member recovery, and configuration changes—were manual, brittle, and required direct `kubectl` intervention.
+- **Manual Lifecycle Management:** The Bitnami chart directly created a Kubernetes `StatefulSet`. All "Day 2" operations, such as database version upgrades, scaling, member recovery, and configuration changes, were manual, brittle, and required direct `kubectl` intervention.
 - **Lack of Integrated Features:** Critical production features like automated backups, point-in-time recovery (PITR), and advanced monitoring were not part of the chart. Implementing them would require building and maintaining separate, complex solutions.
 - **Complex Templating:** To achieve our security requirements (TLS/mTLS with `cert-manager`, X.509 authentication), we had to write complex Go template logic within our `mongodb-store` chart. This included loops to generate per-replica certificates, which was fragile and hard to maintain.
 
@@ -14,7 +14,7 @@ The goal was to modernize our database layer by adopting a Kubernetes Operator, 
 
 ## Decision: Adopt the Percona Operator for MongoDB
 
-We decided to migrate from the Bitnami Helm chart to the **Percona Operator for MongoDB**. This decision was made after evaluating the available open-source MongoDB deployment options for Kubernetes, including the official MongoDB Community Operator and manual StatefulSet approaches. We concluded that Percona provided the best—and effectively the only viable—combination of enterprise-grade features, operational flexibility, and compatibility with our existing infrastructure requirements among fully open-source solutions.
+We decided to migrate from the Bitnami Helm chart to the **Percona Operator for MongoDB**. This decision was made after evaluating the available open-source MongoDB deployment options for Kubernetes, including the official MongoDB Community Operator and manual StatefulSet approaches. We concluded that Percona provided the best (and effectively the only viable) combination of enterprise-grade features, operational flexibility, and compatibility with our existing infrastructure requirements among fully open-source solutions.
 
 ### Options Considered
 
@@ -101,12 +101,14 @@ The `mongodb-store/Chart.yaml` was modified to conditionally include either Bitn
 # In distros/kubernetes/nvsentinel/charts/mongodb-store/Chart.yaml
 dependencies:
   - name: mongodb # Old Bitnami chart
-    condition: mongodb-store.useBitnami
+    condition: useBitnami
   - name: psmdb-operator # Percona Operator
-    condition: mongodb-store.usePerconaOperator
+    condition: usePerconaOperator
   - name: psmdb-db # Percona Database CRD
-    condition: mongodb-store.usePerconaOperator
+    condition: usePerconaOperator
 ```
+
+The condition paths are relative to the `mongodb-store` chart's own values, so users set them as `mongodb-store.useBitnami` and `mongodb-store.usePerconaOperator` in the umbrella chart values.
 
 ### 2. Declarative Configuration via Custom Resource
 
@@ -167,42 +169,21 @@ The removal of the per-replica server certificate generation (the `{{- range $i 
 
 ## Migration Procedure
 
-To migrate from the Bitnami-based deployment to the Percona Operator, we will perform a clean installation. Note that **existing data will not be preserved**.
+The full, tested procedure lives in the [MongoDB Bitnami to Percona migration runbook](../runbooks/mongodb-bitnami-to-percona-migration.md). The runbook is the canonical reference; the summary below only records the shape of the procedure and the pitfalls found while validating it on real clusters (amd64 on OCI and arm64 on AWS, August 2026).
 
-1. **Uninstall:** Uninstall the existing Helm release to ensure a clean state.
+The migration is a clean installation. **Existing data will not be preserved.**
 
-   ```bash
-   helm uninstall <release-name> -n <namespace>
-   ```
+1. **Uninstall** the existing Helm release.
 
-2. **Cleanup:** Manually remove lingering resources from the previous release to avoid conflicts.
+2. **Cleanup.** `helm uninstall` leaves behind the PVCs, the `mongodb` credentials secret (kept by resource policy), the cert-manager TLS secrets (`mongo-ca-secret`, `mongo-root-ca-secret`, `mongo-app-client-cert-secret`, and one `mongo-server-cert-<n>` per replica), and two runtime-created ConfigMaps (`resume-control` and `circuit-breaker`). All of them must be deleted. Leftover TLS secrets are the sharpest edge: they belong to the old certificate authority, and if they survive, every datastore consumer crash-loops against the new deployment with generic connection errors.
 
-   - **PVCs:** The Bitnami chart retains PVCs by default. Delete them to free up storage for the new cluster.
+3. **Clear fault-handling state** on production clusters: node annotations (`quarantineHealthEvent*`, `latestFaultRemediationState`) and remediation resources embed database IDs from the old datastore. Stale quarantine annotations in particular cause node-drainer to retry a missing event lookup every minute, indefinitely.
 
-     ```bash
-     kubectl delete pvc -l app.kubernetes.io/name=mongodb -n <namespace>
-     ```
+4. **Install** with Percona enabled (`mongodb-store.useBitnami=false`, `mongodb-store.usePerconaOperator=true`, `global.mongodbStore.enabled=true`). Set the psmdb volume size to at least the cloud provider's minimum block volume size (on OCI, 50Gi); otherwise the operator refuses to reconcile and the replica set never initializes.
 
-   - **Secrets:** Remove secrets that may persist (due to resource policies or external creation) and conflict with the new deployment.
+5. **Verification:** the `PerconaServerMongoDB` resource reaches `ready`, the `create-mongodb-database` job completes, and services log successful database pings after their usual restart-until-ready cycle.
 
-     ```bash
-     # Old credentials (retained by resource-policy)
-     kubectl delete secret mongodb -n <namespace>
-     # Old TLS artifacts (created by cert-manager or helper jobs)
-     kubectl delete secret mongo-ca-secret mongo-root-ca-secret mongo-app-client-cert-secret -n <namespace>
-     ```
-
-3. **Install:** Install the chart with Percona enabled.
-
-   ```bash
-   helm upgrade --install <release-name> <chart-path> \
-     --namespace <namespace> \
-     --set mongodb-store.useBitnami=false \
-     --set mongodb-store.usePerconaOperator=true \
-     --set global.mongodbStore.enabled=true
-   ```
-
-4. **Verification:** Verify that the new Percona MongoDB cluster comes up in a `Ready` state and that application services can connect to it.
+**Do not attempt the switch as an in-place `helm upgrade` on an existing release.** The backend flags change the immutable pod template of the `create-mongodb-database` Job, so the upgrade fails partway through and leaves both backends partially deployed, with the service configuration already pointing at the not-yet-functional Percona endpoint. Recovery requires a Helm rollback plus manual deletion of the resources the failed upgrade created.
 
 ## Consequences
 
@@ -221,6 +202,7 @@ To migrate from the Bitnami-based deployment to the Percona Operator, we will pe
    - **Sharding Support:** While currently using a 3-node replica set, the operator provides native sharding capabilities if we need to scale beyond a single replica set's capacity.
    - **Active Maintenance:** Percona Operator receives regular updates (latest: 1.21.1, released October 2025) with MongoDB 8.0 support, ensuring compatibility with current MongoDB versions.
    - **Escape from Deprecated Images:** No longer dependent on `docker.io/bitnamilegacy` images that moved to a read-only registry in August 2025.
+   - **ARM64 Support:** The Bitnami MongoDB images are published for amd64 only, so the default backend cannot run on ARM64 nodes (the pod fails at image pull with `no match for platform in manifest`). The Percona operator, server, and exporter images are all multi-arch, which makes the Percona backend the supported way to run NVSentinel on ARM64 clusters (see issue #1497).
 
 ### Breaking Changes
 
