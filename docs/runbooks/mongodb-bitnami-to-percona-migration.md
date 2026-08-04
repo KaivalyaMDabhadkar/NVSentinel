@@ -21,7 +21,7 @@ You need `helm` and `kubectl` access to the cluster, and cert-manager must be in
 
 On a production cluster, check for in-flight fault handling before you start. Health events are referenced by their database IDs from node annotations and remediation resources. After the database is wiped, those references point at nothing. In particular, node-drainer looks up the event behind the `quarantineHealthEvent` node annotation and retries every minute, forever, when the event is missing. Nodes in that state never drain and never recover on their own.
 
-Step 3 below removes this state. Be aware of the operational consequence: clearing quarantine state returns the affected nodes to service. If a node has a real hardware fault, the monitors will detect it again and re-quarantine it within their normal detection cycle.
+Step 3 below removes this state. Be aware of the operational consequence: clearing quarantine state returns the affected nodes to service, and not every fault will be detected a second time. Faults that are still observable, such as a failing DCGM health check or a NIC that is still down, are re-detected on the next monitoring cycle. One-time events, such as GPU XID errors that were already read from the logs, will not be raised again. Record the list of quarantined nodes before you start (step 3 shows how) and review each one manually after the migration: remediate it, or keep it cordoned until you are confident it is healthy.
 
 ## Step 1: Uninstall the release
 
@@ -66,7 +66,13 @@ Do not delete your image pull secrets or any other secrets you created yourself.
 
 Skip this step only if you are certain there were no active quarantines or remediations.
 
-Remove the quarantine and remediation annotations from all nodes:
+First, record which nodes are currently quarantined so you can review them after the migration. This matters because one-time events (GPU XIDs, for example) will not be detected again once the event history is gone:
+
+```bash
+kubectl get nodes -o custom-columns=NAME:.metadata.name,QUARANTINE:.metadata.annotations.quarantineHealthEvent --no-headers | grep -v "<none>"
+```
+
+Then remove the quarantine and remediation annotations from all nodes:
 
 ```bash
 kubectl annotate nodes --all quarantineHealthEvent- quarantineHealthEventAppliedTaints- quarantineHealthEventAppliedLabels- quarantineHealthEventIsCordoned- quarantineHealthEventCordonPreExisting- latestFaultRemediationState-
@@ -140,10 +146,12 @@ mongodb-store:
 ## Step 5: Install with Percona enabled
 
 ```bash
-helm upgrade --install nvsentinel <chart> -n nvsentinel -f <your-values.yaml> --timeout 20m --wait
+helm upgrade --install nvsentinel <chart> -n nvsentinel -f <your-values.yaml> --timeout 20m --wait --wait-for-jobs
 ```
 
-The install takes longer than the Bitnami one because the operator starts first, then builds the replica set, and only then can the database initialization job finish. As a reference point from validation runs: the operator was up within a minute, the replica set reached `ready` about 3 minutes in, the initialization job completed about 2 minutes after that, and the NVSentinel services settled shortly after. The whole install typically finishes well within 10 minutes; the 20 minute timeout leaves room for slow image pulls.
+The `--wait-for-jobs` flag makes Helm wait for the `create-mongodb-database` job as well; `--wait` alone only waits for the workloads.
+
+The install takes longer than the Bitnami one because the operator starts first, then builds the replica set, and only then can the database initialization job finish. As a reference point from validation runs: the operator was up within a minute, the replica set reached `ready` about 3 minutes in, the initialization job completed about 2 minutes after that, and the NVSentinel services settled shortly after. The whole install typically finishes well within 10 minutes; the 20-minute timeout leaves room for slow image pulls.
 
 ## Step 6: Verify
 
@@ -169,7 +177,7 @@ kubectl logs -n nvsentinel deploy/health-events-analyzer | grep "Successfully pi
 
 - **CSP maintenance events replay.** The CSP health monitor tracks its progress through the provider's maintenance feed using the database itself. With the database wiped, it re-ingests every maintenance event still visible in the provider API, which can re-quarantine nodes for maintenance you already handled. Expect this for one polling cycle after the migration.
 - **Event exporter backfill.** With no resume token in the new database, the event exporter starts from scratch. Against an empty database this is a no-op. If you restore or seed any data, it exports all of it again, so warn the owners of the downstream sink about duplicates.
-- **Quarantine history is gone.** Nodes you cleared in step 3 are back in service. Real faults will be re-detected and re-quarantined by the monitors.
+- **Quarantine history is gone.** Nodes you cleared in step 3 are back in service. Faults that are still observable (persistent hardware conditions, failing health checks) are re-detected and re-quarantined on the next monitoring cycle. One-time events such as GPU XID errors are not raised again, so work through the list of quarantined nodes you recorded in step 3 and handle those nodes manually.
 
 ## Troubleshooting
 

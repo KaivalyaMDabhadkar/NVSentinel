@@ -47,7 +47,7 @@ Switching backends is a clean reinstall of the datastore and the stored health e
 
 ## Percona Operator
 
-Enable Percona on install or upgrade:
+Enable Percona when first installing NVSentinel. On a release that already runs Percona, keep these flags set on every upgrade. To move an existing Bitnami installation to Percona, do not change the flags in place; follow the [migration runbook](../runbooks/mongodb-bitnami-to-percona-migration.md) instead.
 
 ```yaml
 global:
@@ -106,7 +106,7 @@ Verify after install:
 
 ```bash
 kubectl get perconaservermongodb -n {namespace}
-kubectl get pods -n {namespace} -l app.kubernetes.io/name=percona-server-mongodb
+kubectl get pods -n {namespace} -l app.kubernetes.io/component=mongod
 ```
 
 The `perconaservermongodb` resource must reach the `ready` state and the `create-mongodb-database` job must complete.
