@@ -9,7 +9,7 @@ description: >-
 maturity: experimental
 lifecycle: evergreen
 api-version: nvsentinel.skills/v1
-allowed-tools: Bash(kubectl *), Bash(helm *), Bash(scripts/mongodb-migration/preflight.sh*), Read, Grep
+allowed-tools: Bash(kubectl get *), Bash(kubectl describe *), Bash(kubectl version *), Bash(helm status *), Bash(helm list *), Bash(helm get *), Bash(scripts/mongodb-migration/preflight.sh*), Read, Grep
 ---
 
 # Check MongoDB Migration Readiness
@@ -47,8 +47,9 @@ export MIGRATION_PVC_SIZE_GI="8"
    ```
 
 2. Interpret the verdict:
-   - Exit `2` (`BLOCKED`): stop. Help the operator resolve every FAIL row,
-     then re-run. Typical blockers: a failed/pending Helm release, both
+   - Exit `2` (`BLOCKED`): stop. Explain each FAIL row and propose the fix,
+     but do NOT execute mutations inside this skill (it is read-only by
+     contract); the operator applies fixes, then re-run the preflight. Typical blockers: a failed/pending Helm release, both
      backends present (mixed state; see the runbook troubleshooting table),
      cert-manager missing, or the default StorageClass minimum above the
      requested volume size (OCI block volumes have a 50Gi minimum; the
@@ -73,6 +74,10 @@ export MIGRATION_PVC_SIZE_GI="8"
    - **GitOps:** ask whether ArgoCD/Flux manages the installation. If yes,
      reconciliation must be suspended before the migration and the desired
      state in git updated before resuming (runbook steps 2, 4a and 6a).
+   - **Chart reference:** record which chart and version the installation
+     currently runs (from the Application spec, HelmRelease, or
+     `helm list`), so the migration redeploys the SAME chart version with
+     new values instead of silently upgrading NVSentinel.
 
 ## Output
 
@@ -84,6 +89,8 @@ Report to the operator:
 - whether GitOps suspension is required
 - the values changes the install will need (backend flags, volume size,
   scheduling keys)
+- the chart reference and version to redeploy (`CHART_REF` for the
+  migration skill)
 
 ## Next skill to run
 

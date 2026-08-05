@@ -53,9 +53,15 @@ run() {
 }
 
 # --- guard: refuse to clean under a live release --------------------------------
-if helm status "$RELEASE" -n "$NS" >/dev/null 2>&1; then
+# Distinguish "release not found" (safe to proceed) from helm being broken or
+# pointed at the wrong context (refuse: the interlock cannot be verified).
+HELM_ERR=""
+if HELM_ERR="$(helm status "$RELEASE" -n "$NS" 2>&1 >/dev/null)"; then
   echo "REFUSED: helm release '$RELEASE' still exists in '$NS'." >&2
   echo "Run 'helm uninstall $RELEASE -n $NS' first. Cleanup only runs on an uninstalled release." >&2
+  exit 3
+elif ! printf '%s' "$HELM_ERR" | grep -qi "not found"; then
+  echo "REFUSED: could not verify the release state: $HELM_ERR" >&2
   exit 3
 fi
 
@@ -64,7 +70,7 @@ if [ "$DRY_RUN" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ]; then
   if [ -t 0 ]; then
     echo "This permanently deletes the MongoDB PVCs (all health event data), TLS secrets,"
     echo "and runtime state in namespace '$NS'. Type YES to continue:"
-    read -r ANSWER
+    read -r ANSWER || { echo "aborted."; exit 3; }
     [ "$ANSWER" = "YES" ] || { echo "aborted."; exit 3; }
   else
     echo "REFUSED: non-interactive run without --yes." >&2
@@ -114,17 +120,41 @@ if [ "$CLEAR_FAULT_STATE" -eq 1 ]; then
   # deletion to NVSentinel-owned resources via the label fault-remediation stamps
   # on everything it creates. Unlabeled leftovers are listed, never deleted.
   MANAGED="app.kubernetes.io/managed-by=nvsentinel"
+  # Janitor adds finalizers to some of these CRs and is uninstalled by now, so a
+  # waiting delete would hang forever. Delete without waiting, then check below.
   for KIND in rebootnodes terminatenodes gpuresets externalremediationrequests; do
     if kubectl get "$KIND" >/dev/null 2>&1; then
-      run kubectl delete "$KIND" -l "$MANAGED" --ignore-not-found=true
-      UNLABELED="$(kubectl get "$KIND" --no-headers 2>/dev/null | awk '{print $1}' | grep -E '^(maintenance|drain)-' || true)"
+      run kubectl delete "$KIND" -l "$MANAGED" --ignore-not-found=true --wait=false
+      UNLABELED="$(kubectl get "$KIND" -l '!app.kubernetes.io/managed-by' --no-headers 2>/dev/null | awk '{print $1}' || true)"
       if [ -n "$UNLABELED" ]; then
         echo "WARNING: $KIND resources without the $MANAGED label were left in place;" >&2
         echo "review and delete them manually if they belong to this installation:" >&2
-        echo "$UNLABELED" | sed 's/^/  /' >&2
+        for R in $UNLABELED; do echo "  $R" >&2; done
       fi
     fi
   done
+  if [ "$DRY_RUN" -eq 0 ]; then
+    # Give deletions a moment, then flag CRs stuck on finalizers (their controller
+    # is uninstalled and will never release them).
+    DEADLINE=$((SECONDS + 30))
+    STUCK=""
+    while [ "$SECONDS" -lt "$DEADLINE" ]; do
+      STUCK=""
+      for KIND in rebootnodes terminatenodes gpuresets externalremediationrequests; do
+        L="$(kubectl get "$KIND" -l "$MANAGED" -o name 2>/dev/null || true)"
+        if [ -n "$L" ]; then STUCK="$STUCK $L"; fi
+      done
+      if [ -z "$STUCK" ]; then break; fi
+      sleep 3
+    done
+    if [ -n "$STUCK" ]; then
+      echo "FAILED: these resources are stuck deleting (their finalizer owner, janitor, is uninstalled):" >&2
+      for R in $STUCK; do echo "  $R" >&2; done
+      echo "Remove the finalizers manually, then re-run this script, e.g.:" >&2
+      echo "  kubectl patch <resource> --type=merge -p '{\"metadata\":{\"finalizers\":[]}}'" >&2
+      exit 1
+    fi
+  fi
   # Jobs are namespaced and dgxc.nvidia.com/event-id is only stamped by
   # fault-remediation's log-collector jobs, so namespace + label is the ownership
   # boundary here. (The CRs above cannot be scoped by instance yet: fault-remediation

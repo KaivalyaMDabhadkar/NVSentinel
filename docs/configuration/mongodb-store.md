@@ -13,7 +13,7 @@ Two in-cluster backends are supported: **Bitnami** (default) and **Percona Opera
 | Bitnami (default) | `useBitnami: true`, `usePerconaOperator: false` | `mongodb-store.mongodb.*` |
 | Percona Operator | `useBitnami: false`, `usePerconaOperator: true` | `mongodb-store.psmdb-db.*`, `mongodb-store.psmdb-operator.*` |
 
-Both flags must always be set together. Setting them explicitly in your values, rather than relying on the chart defaults, is recommended for any long-lived installation: it keeps your deployment on its current backend even if the chart default changes in a future release. Upgrading a release across a backend change does not work in place and forces a data-losing migration, so an accidental switch is worth guarding against.
+Both flags must always be set together. Setting them explicitly in your values, rather than relying on the chart defaults, is recommended for any long-lived installation: it keeps your deployment on its current backend even if the chart default changes in a future release. Upgrading a release across a backend change does not work in place and forces a full remove-and-redeploy migration, so an accidental switch is worth guarding against.
 
 See [ADR-013: MongoDB Migration from Bitnami](../designs/013-mongodb-bitnami-migration.md) for the rationale behind the dual-backend design and for licensing details.
 
@@ -43,7 +43,7 @@ mongodb-store:
 
 Do **NOT** switch backends by changing the two flags on a live release with `helm upgrade`. The upgrade fails partway through with an immutable field error on the database initialization Job, and by then it has already deployed parts of the other backend. The result is two MongoDB clusters running side by side and services pointed at the wrong one.
 
-Switching backends is a clean reinstall of the datastore and the stored health event data is not preserved. Follow the [MongoDB Bitnami to Percona migration runbook](../runbooks/mongodb-bitnami-to-percona-migration.md) for the full procedure, including the cleanup steps and the handling of in-flight quarantines.
+Switching backends reinstalls the datastore; the migration runbook's default path carries the health event data over with a dump and restore, and only its opt-out clean path drops it. Follow the [MongoDB Bitnami to Percona migration runbook](../runbooks/mongodb-bitnami-to-percona-migration.md) for the full procedure, including the cleanup steps and the handling of in-flight quarantines.
 
 ## Percona Operator
 

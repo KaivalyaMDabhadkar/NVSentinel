@@ -15,16 +15,18 @@
 # limitations under the License.
 #
 # migrate-data.sh - optional data preservation for the Bitnami -> Percona migration.
-# dump:    streams a mongodump archive out of the Bitnami mongod (excluding ResumeTokens,
-#          which are only valid on the cluster that created them).
+# dump:    streams a mongodump archive out of the current backend (auto-detects Bitnami
+#          or Percona; always excludes ResumeTokens, which are only valid on the cluster
+#          that created them).
 # restore: streams the archive into the Percona mongod. ObjectIDs are preserved, so node
 #          annotations and CR names that reference event IDs stay valid.
 #
 # Usage:
-#   migrate-data.sh dump    <archive-file>     (run while the Bitnami backend is up)
+#   migrate-data.sh dump    <archive-file>     (run while the old backend is up)
 #   migrate-data.sh restore <archive-file>     (run after verify.sh passes on Percona)
 #
-# Exit codes: 0 = success, 1 = error.
+# Exit codes: 0 = success, 1 = error,
+#             3 = refused (dump: writers still active; restore: consumers not ready).
 set -euo pipefail
 
 NS="${NVSENTINEL_NAMESPACE:-nvsentinel}"
@@ -62,8 +64,20 @@ dump)
     REMAINING="${STATE##*/}"
     if [ "${DESIRED:-0}" != "0" ]; then
       ACTIVE_WRITERS="$ACTIVE_WRITERS $D"
+      continue
     elif [ -n "$REMAINING" ] && [ "$REMAINING" != "0" ]; then
       ACTIVE_WRITERS="$ACTIVE_WRITERS $D"
+      continue
+    fi
+    # Deployment status drops terminating pods immediately, but a pod in its
+    # termination grace period can still write references. Count real pods.
+    if ! PODS="$(kubectl get pods -n "$NS" -l "app.kubernetes.io/name=$D" --no-headers 2>&1)"; then
+      echo "ERROR: could not list pods for '$D': $PODS" >&2
+      echo "Refusing to dump while writer quiescence cannot be proved." >&2
+      exit 1
+    fi
+    if [ -n "$PODS" ]; then
+      ACTIVE_WRITERS="$ACTIVE_WRITERS $D(terminating)"
     fi
   done
   if [ -n "$ACTIVE_WRITERS" ]; then
@@ -76,7 +90,8 @@ dump)
       echo "events written after the dump:$ACTIVE_WRITERS" >&2
       echo "Scale them to zero and wait for their pods to terminate:" >&2
       for D in $ACTIVE_WRITERS; do
-        echo "  kubectl scale deploy $D -n $NS --replicas=0" >&2
+        echo "  kubectl scale deploy ${D%%(*} -n $NS --replicas=0" >&2
+        echo "  kubectl wait --for=delete pod -l app.kubernetes.io/name=${D%%(*} -n $NS --timeout=120s" >&2
       done
       echo "(Set DUMP_WITHOUT_FAULT_STATE_GUARANTEES=1 only for a plain backup that" >&2
       echo "will not be used to preserve fault state.)" >&2
@@ -86,8 +101,12 @@ dump)
 
   # Detect the source backend: Bitnami (statefulset/mongodb) or Percona (psmdb/mongodb).
   # Server certificates on both sides are issued for pod/service FQDNs, never localhost.
-  # Credentials are passed to the pod over stdin (never on a command line), which also
-  # keeps passwords with shell-significant characters intact.
+  # Credentials are passed to the pod over stdin, keeping them out of the local command
+  # line and the API-server exec audit record (inside the pod, the tools still receive
+  # them as arguments), and keeping shell-significant characters intact.
+  # The dump is written to a temp file and renamed on success, so a failed re-run never
+  # destroys a previous good archive.
+  TMP_ARCHIVE="$ARCHIVE.tmp"
   if kubectl get statefulset mongodb -n "$NS" >/dev/null 2>&1; then
     PASSWORD="$(kubectl get secret mongodb -n "$NS" -o jsonpath='{.data.mongodb-root-password}' | base64 -d || true)"
     if [ -z "$PASSWORD" ]; then
@@ -101,7 +120,7 @@ dump)
       "IFS= read -r MPW; mongodump --host '$DUMP_HOST' --db '$DB' --excludeCollection '$TOKEN_COLLECTION' \
         --username root --password \"\$MPW\" --authenticationDatabase admin \
         --ssl --sslCAFile certs/mongodb-ca-cert --sslPEMKeyFile certs/mongodb.pem \
-        --archive --quiet" > "$ARCHIVE" || RC=$?
+        --archive --quiet" > "$TMP_ARCHIVE" || RC=$?
   elif kubectl get psmdb mongodb -n "$NS" >/dev/null 2>&1; then
     PU="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_BACKUP_USER}' | base64 -d || true)"
     PP="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_BACKUP_PASSWORD}' | base64 -d || true)"
@@ -109,6 +128,10 @@ dump)
       # Fall back to the database admin user if the backup user is absent.
       PU="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_USER}' | base64 -d || true)"
       PP="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d || true)"
+    fi
+    if [ -z "$PU" ] || [ -z "$PP" ]; then
+      echo "ERROR: could not read Percona credentials (secret 'internal-mongodb-users')." >&2
+      exit 1
     fi
     RC=0
     DUMP_HOST="mongodb-rs0-0.mongodb-rs0.$NS.svc.cluster.local"
@@ -119,15 +142,17 @@ dump)
        mongodump --host '$DUMP_HOST' --db '$DB' --excludeCollection '$TOKEN_COLLECTION' \
         --username \"\$MUSER\" --password \"\$MPW\" --authenticationDatabase admin \
         --ssl --sslCAFile /etc/mongodb-ssl-internal/ca.crt --sslPEMKeyFile /tmp/dump.pem \
-        --archive --quiet" > "$ARCHIVE" || RC=$?
+        --archive --quiet" > "$TMP_ARCHIVE" || RC=$?
   else
     echo "ERROR: no MongoDB backend found in '$NS' (neither statefulset/mongodb nor psmdb/mongodb)." >&2
     exit 1
   fi
-  if [ "$RC" -ne 0 ] || [ ! -s "$ARCHIVE" ]; then
-    echo "ERROR: dump failed (rc=$RC, archive size $(wc -c < "$ARCHIVE" 2>/dev/null || echo 0) bytes)." >&2
+  if [ "$RC" -ne 0 ] || [ ! -s "$TMP_ARCHIVE" ]; then
+    echo "ERROR: dump failed (rc=$RC, archive size $(wc -c < "$TMP_ARCHIVE" 2>/dev/null || echo 0) bytes)." >&2
+    rm -f "$TMP_ARCHIVE"
     exit 1
   fi
+  mv "$TMP_ARCHIVE" "$ARCHIVE"
   echo "Dump complete: $ARCHIVE ($(wc -c < "$ARCHIVE") bytes)."
   echo "Safe to proceed with the migration. Restore AFTER verify.sh passes on Percona."
   ;;
@@ -135,6 +160,44 @@ restore)
   if [ ! -s "$ARCHIVE" ]; then
     echo "ERROR: archive '$ARCHIVE' missing or empty." >&2
     exit 1
+  fi
+  # Guard: unlike the dump, the restore needs the consumers UP, not down.
+  # fault-quarantine and health-events-analyzer see restored events only through
+  # live change streams (they have no cold-start replay), so a consumer that is
+  # down during the restore never processes what it inserts. Concurrent live
+  # writes are safe: restored documents keep their original ObjectIDs and new
+  # events get fresh ones. This enforces the runbook ordering: verify.sh passes,
+  # then restore.
+  NOT_READY=""
+  for D in health-events-analyzer fault-quarantine node-drainer fault-remediation; do
+    READY=""
+    if ! READY="$(kubectl get deploy "$D" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>&1)"; then
+      case "$READY" in
+        *NotFound*) continue ;;  # deployment not part of this installation
+        *)
+          echo "ERROR: could not determine the state of deployment '$D': $READY" >&2
+          echo "Refusing to restore while consumer readiness cannot be proved." >&2
+          exit 1
+          ;;
+      esac
+    fi
+    if [ -z "$READY" ] || [ "$READY" = "0" ]; then
+      NOT_READY="$NOT_READY $D"
+    fi
+  done
+  if [ -n "$NOT_READY" ]; then
+    if [ "${RESTORE_WITHOUT_LIVE_CONSUMERS:-0}" = "1" ]; then
+      echo "WARNING: restoring while these consumers are not ready:$NOT_READY" >&2
+      echo "Change-stream consumers that are down never process the events inserted now." >&2
+    else
+      echo "REFUSED: these datastore consumers are not ready:$NOT_READY" >&2
+      echo "fault-quarantine and health-events-analyzer receive restored events only" >&2
+      echo "through live change streams, so they must be running and connected before" >&2
+      echo "the restore. Run verify.sh and restore once all of its gates pass." >&2
+      echo "(Set RESTORE_WITHOUT_LIVE_CONSUMERS=1 only for a plain data restore whose" >&2
+      echo "immediate processing does not matter.)" >&2
+      exit 3
+    fi
   fi
   # Percona: databaseAdmin credentials from internal-mongodb-users, internal TLS certs.
   PU="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_USER}' | base64 -d || true)"
@@ -144,9 +207,9 @@ restore)
     exit 1
   fi
   # The internal certificate is issued for the pod/service FQDNs, not localhost.
-  # Credentials travel over stdin ahead of the archive bytes (never on a command
-  # line): the two 'read' calls consume the credential lines and mongorestore
-  # reads the remainder of the stream as the archive.
+  # Credentials travel over stdin ahead of the archive bytes (kept off the local
+  # command line and out of the exec audit record): the two 'read' calls consume
+  # the credential lines and mongorestore reads the remainder of the stream.
   RC=0
   RESTORE_HOST="mongodb-rs0-0.mongodb-rs0.$NS.svc.cluster.local"
   echo "Restoring $DB into mongodb-rs0-0 (ObjectIDs preserved)..."
@@ -162,10 +225,11 @@ restore)
     echo "ERROR: restore failed (rc=$RC)." >&2
     exit 1
   fi
-  echo "Restore complete."
-  echo "Now restart the datastore consumers so their cold-start logic processes the restored"
-  echo "events (kubectl rollout restart on the consumer deployments), and expect the event"
-  echo "exporter to re-export restored events to its sink (duplicates downstream)."
+  echo "Restore complete. fault-quarantine and health-events-analyzer are processing the"
+  echo "restored events through their change streams. Now restart the datastore consumers"
+  echo "(kubectl rollout restart on the consumer deployments) so node-drainer and"
+  echo "fault-remediation also re-query for unfinished events on startup, and expect the"
+  echo "event exporter to re-export restored events to its sink (duplicates downstream)."
   ;;
 *)
   echo "usage: $0 dump|restore <archive-file>" >&2

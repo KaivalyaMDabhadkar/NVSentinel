@@ -37,11 +37,11 @@ The repository ships scripts that implement the mechanical parts of this runbook
 | Script | Step | What it does |
 | ------ | ---- | ------------ |
 | `preflight.sh` | step 1 | Read-only readiness check: current backend, cert-manager, storage class minimums vs the requested volume size, quarantined nodes, in-flight remediation objects. Prints a verdict table; exits 2 when blocked. |
-| `migrate-data.sh` | steps 3a and 8 | `dump` streams a mongodump archive out of the old backend (always excluding `ResumeTokens`) and fails closed while reference-writing components are still running; `restore` streams the archive into the new backend. Document IDs are preserved, so node annotations and remediation resource names stay valid. |
+| `migrate-data.sh` | steps 3a and 8 | `dump` streams a mongodump archive out of the old backend (always excluding `ResumeTokens`) and fails closed while reference-writing components are still running; `restore` streams the archive into the new backend and fails closed while any deployed datastore consumer is not ready. Document IDs are preserved, so node annotations and remediation resource names stay valid. |
 | `cleanup.sh` | step 5 | Deletes everything the removal leaves behind, then verifies nothing remains. Refuses to run while a Helm release is still installed and asks for confirmation. `--dry-run` prints the plan; `--clear-fault-state` also clears node annotations and NVSentinel-owned remediation objects. |
 | `verify.sh` | step 7 | Waits on the five post-install gates and prints a verdict table. |
 
-All four respect `NVSENTINEL_NAMESPACE` and `NVSENTINEL_RELEASE` (default `nvsentinel` for both). The scripts automate the steps; the decisions (choosing the data path, reviewing quarantined nodes) stay with you.
+All four respect `NVSENTINEL_NAMESPACE`; `preflight.sh` and `cleanup.sh` also respect `NVSENTINEL_RELEASE` (default `nvsentinel` for both). The scripts automate the steps; the decisions (choosing the data path, reviewing quarantined nodes) stay with you.
 
 ## Using the agent skills
 
@@ -83,7 +83,7 @@ If NVSentinel is deployed by a GitOps controller such as ArgoCD/FluxCD, stop rec
 - ArgoCD: disable automated sync (`argocd app set nvsentinel --sync-policy none`, or edit the Application to remove `spec.syncPolicy.automated`), or use a sync window that denies syncs for the duration.
 - Flux: `flux suspend helmrelease nvsentinel`.
 
-Reconciliation stays off until step 6a, after the new values are in git. Helm-managed installations skip this step.
+Reconciliation stays off until step 6a, after the new values are in git. One Flux-specific rule for later: do NOT delete the suspended HelmRelease in step 4a; Flux does not finalize suspended objects, so the deletion hangs. Flux installations are real Helm releases, so step 4a uses `helm uninstall` directly instead. Helm-managed installations skip this step.
 
 ## Step 3: Capture the data
 
@@ -92,10 +92,10 @@ Reconciliation stays off until step 6a, after the new values are in git. Helm-ma
 Stop the components that write references to events, and wait for their pods to terminate. An event written after the dump is absent from the archive; if fault-quarantine then annotated a node for it, that annotation would point at a document the restore does not contain. Scale down each of these that exists in your installation (reconciliation is already off on GitOps-managed clusters, so nothing scales them back up):
 
 ```bash
-for D in fault-quarantine node-drainer fault-remediation; do kubectl get deploy "$D" -n nvsentinel >/dev/null 2>&1 && kubectl scale deploy "$D" -n nvsentinel --replicas=0; done
+for D in fault-quarantine node-drainer fault-remediation; do kubectl get deploy "$D" -n nvsentinel >/dev/null 2>&1 && kubectl scale deploy "$D" -n nvsentinel --replicas=0 && kubectl wait --for=delete pod -l "app.kubernetes.io/name=$D" -n nvsentinel --timeout=120s; done
 ```
 
-(Events ingested by the platform connectors during this window are lost, which is no worse than path 3b.) Then dump:
+The `kubectl wait` matters: a pod in its termination grace period can still write references, and the dump script counts terminating pods as active writers. (Events ingested by the platform connectors during this window are lost, which is no worse than path 3b.) Then dump:
 
 ```bash
 scripts/mongodb-migration/migrate-data.sh dump /path/to/pre-migration.archive
@@ -115,7 +115,7 @@ Note that the step 5 cleanup removes the quarantine annotations, remediation res
 
 ### Step 4a: GitOps-managed (ArgoCD, Flux)
 
-With reconciliation already stopped (step 2), remove the rendered resources through the controller: on ArgoCD, delete the application with cascading deletion (`argocd app delete nvsentinel`, or delete the Application resource with the resources finalizer); on Flux, delete the HelmRelease or prune through your usual flow. Confirm the NVSentinel workloads are gone before continuing.
+With reconciliation already stopped (step 2), remove the installation. On ArgoCD, delete the application with cascading deletion (`argocd app delete nvsentinel`, or delete the Application resource with the resources finalizer). On Flux, keep the HelmRelease suspended and run `helm uninstall nvsentinel -n nvsentinel` directly (Flux installations are real Helm releases; deleting the HelmRelease while suspended hangs on its finalizer). Confirm the NVSentinel workloads are gone before continuing.
 
 Note that a GitOps-rendered installation is not necessarily a Helm release (ArgoCD renders Helm charts without creating release records), so `helm uninstall` may have nothing to act on; removing the application is the equivalent step. The cleanup script in step 5 works the same either way.
 
@@ -180,7 +180,7 @@ Whichever path deploys it, the values must contain:
 
 ### Step 6a: GitOps-managed
 
-Commit the updated values to git first, then let the controller deploy: recreate the application (if you deleted it in step 4a) or re-enable the reconciliation you stopped in step 2. Git must carry the new values BEFORE the controller reconciles; if the old values come back first, the sync redeploys the old backend. If the application manages the namespace with pruning enabled, double check that the objects this runbook preserves (the pull secrets, a dump archive stored in-cluster, and on path 3a the node annotations and remediation resources) are not pruned as unmanaged resources.
+Commit the updated values to git first, then let the controller deploy: recreate the application (if you deleted it in step 4a) or re-enable the reconciliation you stopped in step 2. Git must carry the new values BEFORE the controller reconciles; if the old values come back first, the sync redeploys the old backend. If the application manages the namespace with pruning enabled, double-check that the objects this runbook preserves (the pull secrets, and on path 3a the node annotations and remediation resources) are not pruned as unmanaged resources. (The dump archive itself is a local file on the machine that ran the dump; no cluster operation can touch it.)
 
 ### Step 6b: Helm-managed
 
@@ -198,17 +198,19 @@ Either way, the deploy takes longer than a Bitnami one because the operator star
 scripts/mongodb-migration/verify.sh
 ```
 
-Five gates, all of which must pass: the `perconaservermongodb` resource reaches `ready`, the `create-mongodb-database` job completes, the mongod pods are ready, `MONGODB_URI` points at the Percona service, and a datastore consumer (health-events-analyzer or fault-quarantine) logs a successful ping. It is normal for consumers to restart a few times while the replica set comes up.
+Five gates, all of which must pass: the `perconaservermongodb` resource reaches `ready`, the `create-mongodb-database` job completes, the mongod pods are ready, `MONGODB_URI` points at the Percona service, and every deployed datastore consumer (health-events-analyzer, fault-quarantine, node-drainer, fault-remediation) logs a successful ping. It is normal for consumers to restart a few times while the replica set comes up. On path 3a, do not move to step 8 until this gate passes: two of the consumers only see restored events through their live change streams, so all of them must be healthy before the restore.
 
 One connection note: the chart-generated `MONGODB_URI` follows the backend automatically (`mongodb-headless` for Bitnami, `mongodb-rs0` for Percona). Only installations that set `global.datastore.connection.host` explicitly need to update it to `mongodb-rs0.<namespace>.svc.cluster.local`.
 
 ## Step 8: Restore and restart (path 3a only)
 
+The consumers stay up during the restore on purpose. This is the opposite of the dump-time rule, and it is not an oversight: the restore is how two of the consumers receive the events (next paragraph), and concurrent live writes are safe because restored documents keep their original IDs while new events get fresh ones. The script enforces this: it refuses to restore (exit 3) while any deployed consumer is not ready, which in practice means step 7 has not passed yet.
+
 ```bash
 scripts/mongodb-migration/migrate-data.sh restore /path/to/pre-migration.archive
 ```
 
-Then restart each datastore consumer that exists in your installation, so their cold-start logic processes the restored events (the restart also matters because they read their connection configuration at startup):
+How the restored events get processed, so you know what the restart below does and does not do: the restore's inserts flow through MongoDB change streams, so fault-quarantine and health-events-analyzer pick them up live (they have no cold-start replay; this is why step 7 requires every consumer healthy before restoring). node-drainer and fault-remediation additionally re-query for unfinished events on every startup, so for them the restart below is a genuine second net. Restart each consumer that exists in your installation:
 
 ```bash
 for D in health-events-analyzer fault-quarantine node-drainer fault-remediation; do kubectl get deploy "$D" -n nvsentinel >/dev/null 2>&1 && kubectl rollout restart deploy "$D" -n nvsentinel; done
@@ -235,6 +237,7 @@ On GitOps-managed clusters these restarts are rollout restarts, not spec changes
 | `create-mongodb-database` job `Failed` with `DeadlineExceeded` after a prolonged wedge | The job never retries after exceeding its deadline | `kubectl delete job create-mongodb-database -n nvsentinel`, then re-apply the deployment (re-run the `helm upgrade`, or re-sync the application); the job is recreated and completes against the healthy replica set |
 | `helm upgrade` fails with `cannot patch "create-mongodb-database" ... field is immutable` | Backend flags were changed on a live installation instead of following this runbook | Run `helm rollback <release> <last-good-revision>` (retry once if it errors), then manually delete everything the failed upgrade created: the `perconaservermongodb` resource, the `nvsentinel-psmdb-operator` deployment and its ServiceAccount, Role and RoleBinding, the `mongod-data-*` PVCs, and the `internal-mongodb-users`, `percona-server-mongodb-users` and `mongodb-encryption-key` secrets. Helm no longer tracks these objects after the rollback, so `helm uninstall` will not remove them either. Then follow this runbook from step 1 |
 | node-drainer logs repeat `unexpected number of events for node ...` every minute | A node annotation references an event that does not exist in the datastore (path 3b with fault state kept, or a partial restore) | Clear that node's quarantine annotations per step 5 |
+| `cleanup.sh --clear-fault-state` reports resources stuck deleting | Some remediation resources carry janitor-managed finalizers, and janitor is uninstalled by this point | Remove the finalizers with the `kubectl patch` command the script prints, then re-run the cleanup |
 
 ## Rolling back
 

@@ -19,6 +19,13 @@ allowed-tools: Bash(kubectl *), Bash(helm *), Bash(scripts/mongodb-migration/*),
 Use this skill **after** `migrate-mongodb-to-percona`, or standalone to
 health-check a Percona-backed installation.
 
+Hard gate for step 2: the restore is a mutating operation. Run it ONLY when
+this skill is part of a migration run started by the readiness and migration
+skills AND the operator has confirmed, in this conversation, the specific
+archive file to restore. In standalone health-check mode, steps 2 and 3 are
+always skipped: never restore an archive into an installation as part of a
+health check.
+
 ## Inputs
 
 - `NVSENTINEL_NAMESPACE` (default `nvsentinel`)
@@ -40,24 +47,38 @@ export NVSENTINEL_NAMESPACE="nvsentinel"
    ```
 
    Five gates: psmdb resource `ready`, initialization job `Complete`, mongod
-   pods ready, `MONGODB_URI` pointing at `mongodb-rs0`, and a consumer
-   logging `Successfully pinged`. All five must pass. Gate five requires at
-   least one of health-events-analyzer or fault-quarantine to be deployed;
-   the script fails the gate when neither exists, because connectivity
-   cannot be confirmed. Timeouts are tunable
+   pods ready, `MONGODB_URI` pointing at `mongodb-rs0`, and EVERY deployed
+   datastore consumer (health-events-analyzer, fault-quarantine,
+   node-drainer, fault-remediation) logging `Successfully pinged`. All five
+   must pass; the script fails gate five when no consumer exists at all,
+   because connectivity cannot be confirmed. On the restore path this gate
+   matters doubly: fault-quarantine and health-events-analyzer only see
+   restored events through their live change streams, so every consumer
+   must be healthy BEFORE the restore runs. Timeouts are tunable
    via `VERIFY_CR_TIMEOUT`, `VERIFY_JOB_TIMEOUT`, `VERIFY_POD_TIMEOUT`,
    `VERIFY_PING_RETRIES`. A consumer stuck in `CrashLoopBackOff` with old
    restart counts may just be in backoff from the bring-up window; delete
    the pod to skip the backoff before diagnosing.
 
-2. **Restore (default preserve path; skipped only on the clean path):**
+2. **Restore (only within a migration run on the preserve path, with the
+   archive confirmed by the operator; skipped on the clean path and always
+   skipped in standalone health-check mode):**
+
+   All gates from step 1 must have passed first, so every consumer is
+   running and streaming when the restored documents arrive.
 
    ```bash
    scripts/mongodb-migration/migrate-data.sh restore <ARCHIVE>
    ```
 
-   Then restart the datastore consumers so their cold-start logic processes
-   the restored events:
+   The script exits 3 (refused) if any deployed consumer is not ready; that
+   means a consumer went unready since the gates ran, so go back to step 1
+   rather than overriding. The consumers stay up during the restore on
+   purpose: fault-quarantine and health-events-analyzer process the restored
+   events through their live change streams as the inserts happen.
+
+   Then restart the datastore consumers, so node-drainer and
+   fault-remediation also re-query for unfinished events on startup:
 
    ```bash
    for D in health-events-analyzer fault-quarantine node-drainer fault-remediation; do

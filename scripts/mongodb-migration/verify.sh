@@ -66,40 +66,51 @@ case "$URI" in
 esac
 
 echo "Gate 5/5: datastore consumers connected (up to $PING_RETRIES x10s)..."
-CONSUMER_OK=0
-CONSUMER=""
-for D in health-events-analyzer fault-quarantine; do
+# Every deployed datastore consumer must confirm connectivity: on the restore
+# path all of them must be healthy before restored events can be processed.
+CONSUMERS=""
+for D in health-events-analyzer fault-quarantine node-drainer fault-remediation; do
   if kubectl get deploy "$D" -n "$NS" >/dev/null 2>&1; then
-    CONSUMER="$D"
-    break
+    CONSUMERS="$CONSUMERS $D"
   fi
 done
-if [ -z "$CONSUMER" ]; then
-  row FAIL "consumer connectivity" "no datastore consumer deployment found (need health-events-analyzer or fault-quarantine); cannot confirm the datastore is reachable. Enable one, or verify connectivity manually"
+if [ -z "$CONSUMERS" ]; then
+  row FAIL "consumer connectivity" "no datastore consumer deployment found (need at least health-events-analyzer or fault-quarantine); cannot confirm the datastore is reachable"
 else
+  PENDING="$CONSUMERS"
   I=0
-  while [ "$I" -lt "$PING_RETRIES" ]; do
-    if kubectl logs -n "$NS" "deploy/$CONSUMER" --tail 200 2>/dev/null | grep -q "Successfully pinged"; then
-      CONSUMER_OK=1
-      break
+  while [ "$I" -lt "$PING_RETRIES" ] && [ -n "$PENDING" ]; do
+    STILL=""
+    for D in $PENDING; do
+      # Capture logs, then grep without -q: -q under pipefail can SIGPIPE the
+      # producer and turn a successful match into a failed pipeline.
+      LOGTXT="$(kubectl logs -n "$NS" "deploy/$D" --tail 200 2>/dev/null || true)"
+      if printf '%s\n' "$LOGTXT" | grep "Successfully pinged" >/dev/null; then
+        continue
+      fi
+      STILL="$STILL $D"
+    done
+    PENDING="$STILL"
+    if [ -n "$PENDING" ]; then
+      sleep 10
+      I=$((I + 1))
     fi
-    sleep 10
-    I=$((I + 1))
   done
-  if [ "$CONSUMER_OK" -eq 1 ]; then
-    row PASS "consumer connectivity" "$CONSUMER logged 'Successfully pinged' (a few early restarts are normal)"
+  if [ -z "$PENDING" ]; then
+    row PASS "consumer connectivity" "all deployed consumers pinged:$CONSUMERS (a few early restarts are normal)"
   else
-    # Bounded extraction of the structured error value; fall back to the raw line.
-    ERRLINE="$(kubectl logs -n "$NS" "deploy/$CONSUMER" --tail 50 --previous 2>/dev/null | grep -oE '"error":"[^"]{1,300}' | tail -1 || true)"
+    FIRST="${PENDING# }"
+    FIRST="${FIRST%% *}"
+    ERRLINE="$(kubectl logs -n "$NS" "deploy/$FIRST" --tail 50 --previous 2>/dev/null | grep -oE '"error":"[^"]{1,300}' | tail -1 || true)"
     if [ -z "$ERRLINE" ]; then
-      ERRLINE="$(kubectl logs -n "$NS" "deploy/$CONSUMER" --tail 20 2>/dev/null | grep -iE 'error|fatal' | tail -1 | cut -c1-200 || true)"
+      ERRLINE="$(kubectl logs -n "$NS" "deploy/$FIRST" --tail 20 2>/dev/null | grep -iE 'error|fatal' | tail -1 | cut -c1-200 || true)"
     fi
     HINT="see the runbook troubleshooting table"
     case "$ERRLINE" in
       *tls*|*TLS*|*certificate*|*handshake*|*"connection closed"*) HINT="TLS failures here usually mean leftover secrets from the old backend (rerun cleanup)" ;;
       *NoPrimary*|*RSGhost*|*"server selection"*) HINT="replica set has no primary; check the psmdb resource and operator logs" ;;
     esac
-    row FAIL "consumer connectivity" "$CONSUMER never pinged. Last error: ${ERRLINE:-none}. Hint: $HINT."
+    row FAIL "consumer connectivity" "never pinged:$PENDING. Last error from $FIRST: ${ERRLINE:-none}. Hint: $HINT."
   fi
 fi
 

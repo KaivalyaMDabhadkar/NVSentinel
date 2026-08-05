@@ -171,17 +171,19 @@ The removal of the per-replica server certificate generation (the `{{- range $i 
 
 The full, tested procedure lives in the [MongoDB Bitnami to Percona migration runbook](../runbooks/mongodb-bitnami-to-percona-migration.md). The runbook is the canonical reference; the summary below only records the shape of the procedure and the pitfalls found while validating it on real clusters (amd64 on OCI and arm64 on AWS, August 2026).
 
-The migration is a clean installation. **Existing data will not be preserved.**
+The migration is a remove-and-redeploy of the datastore. On the runbook's default path, health event data is preserved with a dump before removal and a restore afterward (document IDs survive, so node annotations and remediation resources stay valid); on the opt-out clean path, existing data is dropped.
 
-1. **Uninstall** the existing Helm release.
+1. **Dump** (default path): stop the reference-writing components, then stream a mongodump archive out of the old backend, always excluding `ResumeTokens`.
 
-2. **Cleanup.** `helm uninstall` leaves behind the PVCs, the `mongodb` credentials secret (kept by resource policy), the cert-manager TLS secrets (`mongo-ca-secret`, `mongo-root-ca-secret`, `mongo-app-client-cert-secret`, and one `mongo-server-cert-<n>` per replica), and two runtime-created ConfigMaps (`resume-control` and `circuit-breaker`). All of them must be deleted. Leftover TLS secrets are the sharpest edge: they belong to the old certificate authority, and if they survive, every datastore consumer crash-loops against the new deployment with generic connection errors.
+2. **Remove** the installation (through the GitOps controller, or `helm uninstall`).
 
-3. **Clear fault-handling state** on production clusters: node annotations (`quarantineHealthEvent*`, `latestFaultRemediationState`) and remediation resources embed database IDs from the old datastore. Stale quarantine annotations in particular cause node-drainer to retry a missing event lookup every minute, indefinitely.
+3. **Cleanup.** The removal leaves behind the PVCs, the `mongodb` credentials secret (kept by resource policy), the TLS secrets (`mongo-root-ca-secret`, `mongo-app-client-cert-secret`, and one `mongo-server-cert-<n>` per replica from cert-manager, plus the job-created `mongo-ca-secret`), and two runtime-created ConfigMaps (`resume-control` and `circuit-breaker`). All of them must be deleted. Leftover TLS secrets are the sharpest edge: they belong to the old certificate authority, and if they survive, every datastore consumer crash-loops against the new deployment with generic connection errors.
 
-4. **Install** with Percona enabled (`mongodb-store.useBitnami=false`, `mongodb-store.usePerconaOperator=true`, `global.mongodbStore.enabled=true`). Set the psmdb volume size to at least the cloud provider's minimum block volume size (on OCI, 50Gi); otherwise the operator refuses to reconcile and the replica set never initializes.
+4. **Clear fault-handling state** (clean path only): node annotations (`quarantineHealthEvent*`, `latestFaultRemediationState`) and remediation resources embed database IDs from the old datastore. Stale quarantine annotations in particular cause node-drainer to retry a missing event lookup every minute, indefinitely. On the default path this state is kept, because the restore makes it valid again.
 
-5. **Verification:** the `PerconaServerMongoDB` resource reaches `ready`, the `create-mongodb-database` job completes, and services log successful database pings after their usual restart-until-ready cycle.
+5. **Redeploy** with Percona enabled (`mongodb-store.useBitnami=false`, `mongodb-store.usePerconaOperator=true`, `global.mongodbStore.enabled=true`). Set the psmdb volume size to at least the cloud provider's minimum block volume size (on OCI, 50Gi); otherwise the operator refuses to reconcile and the replica set never initializes.
+
+6. **Verify and restore:** five gates must pass (the `PerconaServerMongoDB` resource reaches `ready`, the `create-mongodb-database` job completes, the mongod pods are ready, `MONGODB_URI` points at the Percona service, and every deployed datastore consumer logs a successful ping), then on the default path the archive is restored and the consumers restarted.
 
 **Do not attempt the switch as an in-place `helm upgrade` on an existing release.** The backend flags change the immutable pod template of the `create-mongodb-database` Job, so the upgrade fails partway through and leaves both backends partially deployed, with the service configuration already pointing at the not-yet-functional Percona endpoint. Recovery requires a Helm rollback plus manual deletion of the resources the failed upgrade created.
 
@@ -207,7 +209,7 @@ The migration is a clean installation. **Existing data will not be preserved.**
 ### Breaking Changes
 
 - **Bitnami Chart Status:** The Bitnami subchart is controlled by the `useBitnami` flag. We plan to remove the Bitnami path in a future release once the Percona Operator integration is fully validated.
-- **Storage:** Switching to the Percona Operator involves new Persistent Volume Claims. As described in the Migration Procedure, this is a clean installation; existing data in Bitnami volumes is **not preserved** and will be lost.
+- **Storage:** Switching to the Percona Operator involves new Persistent Volume Claims; the Bitnami volumes themselves are deleted during the migration. The data they held is preserved only via the runbook's default dump-and-restore path; on the opt-out clean path it is lost.
 - **Configuration:** `values.yaml` structure for MongoDB configuration has changed. `mongodb.*` values (Bitnami) are ignored when `usePerconaOperator` is enabled, replaced by `psmdb-db.*` and `psmdb-operator.*`.
 
 ### Trade-offs and Considerations

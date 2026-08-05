@@ -25,6 +25,12 @@ NS="${NVSENTINEL_NAMESPACE:-nvsentinel}"
 RELEASE="${NVSENTINEL_RELEASE:-nvsentinel}"
 # Volume size the Percona install will request (chart default 8Gi unless overridden).
 TARGET_PVC_SIZE_GI="${MIGRATION_PVC_SIZE_GI:-8}"
+case "$TARGET_PVC_SIZE_GI" in
+  ''|*[!0-9]*)
+    echo "ERROR: MIGRATION_PVC_SIZE_GI must be a plain integer number of Gi (got '$TARGET_PVC_SIZE_GI')." >&2
+    exit 1
+    ;;
+esac
 
 FAIL=0
 REVIEW=0
@@ -100,7 +106,7 @@ fi
 # --- 6. quarantined nodes -----------------------------------------------------
 QUARANTINED="$(kubectl get nodes -o custom-columns=NAME:.metadata.name,Q:.metadata.annotations.quarantineHealthEvent --no-headers 2>/dev/null | awk '$2 != "<none>" {print $1}' || true)"
 if [ -n "$QUARANTINED" ]; then
-  row REVIEW "Quarantined nodes" "$(echo "$QUARANTINED" | tr '\n' ' ')(the default preserve path carries these over; on the clean path record this list, because one-time events like XIDs are never re-detected)"
+  row REVIEW "Quarantined nodes" "$(echo "$QUARANTINED" | tr '\n' ' ') (the default preserve path carries these over; on the clean path record this list, because one-time events like XIDs are never re-detected)"
 else
   row PASS "Quarantined nodes" "none"
 fi
@@ -113,14 +119,15 @@ UNLABELED_COUNT=0
 for KIND in rebootnodes terminatenodes gpuresets externalremediationrequests; do
   N="$(kubectl get "$KIND" -l app.kubernetes.io/managed-by=nvsentinel --no-headers 2>/dev/null | wc -l || true)"
   CR_COUNT=$((CR_COUNT + N))
-  U="$(kubectl get "$KIND" --no-headers 2>/dev/null | awk '{print $1}' | grep -cE '^(maintenance|drain)-' || true)"
-  UNLABELED_COUNT=$((UNLABELED_COUNT + U - N))
+  # Exact per-kind count of resources WITHOUT the ownership label (cleanup will
+  # list these for manual review, never delete them).
+  U="$(kubectl get "$KIND" -l '!app.kubernetes.io/managed-by' --no-headers 2>/dev/null | wc -l || true)"
+  UNLABELED_COUNT=$((UNLABELED_COUNT + U))
 done
-if [ "$UNLABELED_COUNT" -lt 0 ]; then UNLABELED_COUNT=0; fi
 JOB_COUNT="$(kubectl get jobs -n "$NS" -l dgxc.nvidia.com/event-id --no-headers 2>/dev/null | wc -l || true)"
 if [ "$CR_COUNT" -gt 0 ] || [ "$JOB_COUNT" -gt 0 ] || [ "$UNLABELED_COUNT" -gt 0 ]; then
   DETAIL="$CR_COUNT managed remediation CR(s), $JOB_COUNT log-collector job(s) reference old event IDs; cleanup.sh --clear-fault-state removes them"
-  if [ "$UNLABELED_COUNT" -gt 0 ]; then DETAIL="$DETAIL. $UNLABELED_COUNT maintenance-style CR(s) lack the nvsentinel managed-by label and need manual review"; fi
+  if [ "$UNLABELED_COUNT" -gt 0 ]; then DETAIL="$DETAIL. $UNLABELED_COUNT CR(s) lack the nvsentinel managed-by label and need manual review"; fi
   row REVIEW "In-flight remediation" "$DETAIL"
 else
   row PASS "In-flight remediation" "none"
@@ -167,5 +174,6 @@ if [ "$REVIEW" -gt 0 ]; then
 else
   echo "VERDICT: READY."
 fi
-echo "Reminder: this migration is a clean reinstall. ALL health event data will be lost."
+echo "Reminder: the default path (dump and restore, runbook step 3a) preserves health"
+echo "event data; only the opt-out clean path (3b) drops it."
 exit 0

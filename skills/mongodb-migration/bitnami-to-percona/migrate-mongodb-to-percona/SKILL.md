@@ -11,7 +11,7 @@ description: >-
 maturity: experimental
 lifecycle: evergreen
 api-version: nvsentinel.skills/v1
-allowed-tools: Bash(kubectl *), Bash(helm *), Bash(scripts/mongodb-migration/*), Read, Grep
+allowed-tools: Bash(kubectl *), Bash(helm *), Bash(argocd *), Bash(flux *), Bash(git *), Bash(scripts/mongodb-migration/*), Read, Grep
 ---
 
 # Migrate MongoDB to Percona
@@ -32,6 +32,9 @@ readiness skill.
 - `DATA_PATH` (`restore` is the default, `clean` is the opt-out): the
   confirmed data-handling decision
 - `VALUES_FILES`: the operator's values file(s) for the install
+- `CHART_REF`: the chart to deploy in step 5 (path or repo reference plus
+  version), captured during readiness so the migration does not silently
+  upgrade or downgrade NVSentinel as a side effect
 - `ARCHIVE`: dump archive path (restore path only)
 - GitOps status from readiness (if managed: reconciliation suspended before
   step 1, git updated before resuming; runbook steps 2, 4a and 6a)
@@ -45,6 +48,14 @@ export NVSENTINEL_RELEASE="nvsentinel"
 
 ## Trigger order (required)
 
+0. **GitOps only: confirm reconciliation is stopped** (runbook step 2)
+   BEFORE anything below mutates the cluster; with automated sync or
+   self-heal active, the controller reverts the step 1 scale-downs and
+   re-creates whatever step 2 removes. On ArgoCD, automated sync is
+   disabled or a deny sync window covers the migration; on Flux, the
+   HelmRelease is suspended. If it is not stopped, stop it now and verify
+   before continuing.
+
 1. **Dump (default preserve path; skipped only on the clean path):**
 
    ```bash
@@ -52,8 +63,10 @@ export NVSENTINEL_RELEASE="nvsentinel"
    ```
 
    Scale fault-quarantine, node-drainer, and fault-remediation to zero
-   first and wait for their pods to terminate; the script fails closed
-   while they run or while their state cannot be determined. There is no
+   first and wait for their pods to be GONE, not just scaling down
+   (`kubectl wait --for=delete pod -l app.kubernetes.io/name=<name>`); the
+   script fails closed while any writer pod exists, including terminating
+   ones, or while their state cannot be determined. There is no
    override on the restore path: an archive taken with active writers can
    contain dangling references and must not be used to preserve fault
    state. The script auto-detects the source backend and always excludes
@@ -84,9 +97,12 @@ export NVSENTINEL_RELEASE="nvsentinel"
    Add `--clear-fault-state` ONLY on the clean path. On the restore path,
    fault state (node annotations, remediation resources) must be kept:
    restored documents keep their IDs, so those references become valid
-   again. Gate: exit 0. A non-zero exit means leftovers remain; leftover
-   TLS secrets cause opaque connection-closed crash loops on the next
-   install. Do not continue until cleanup verifies clean.
+   again. Gate: exit 0. Exit 3 means the script refused (a Helm release
+   still exists: finish step 2 first, or the confirmation was declined).
+   Exit 1 means an error or leftovers remain; leftover TLS secrets cause
+   opaque connection-closed crash loops on the next install, and
+   remediation resources stuck on finalizers are reported with the manual
+   patch command. Do not continue until cleanup verifies clean.
 
 4. **Values.** Confirm the operator's values contain:
    - `mongodb-store.useBitnami: false` and
@@ -109,7 +125,7 @@ export NVSENTINEL_RELEASE="nvsentinel"
    - Helm-managed:
 
      ```bash
-     helm upgrade --install "$NVSENTINEL_RELEASE" <chart> -n "$NVSENTINEL_NAMESPACE" \
+     helm upgrade --install "$NVSENTINEL_RELEASE" <CHART_REF> -n "$NVSENTINEL_NAMESPACE" \
        -f <VALUES_FILES...> --timeout 20m --wait --wait-for-jobs
      ```
 
