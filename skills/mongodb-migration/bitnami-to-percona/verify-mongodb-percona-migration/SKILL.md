@@ -41,7 +41,10 @@ export NVSENTINEL_NAMESPACE="nvsentinel"
 
    Five gates: psmdb resource `ready`, initialization job `Complete`, mongod
    pods ready, `MONGODB_URI` pointing at `mongodb-rs0`, and a consumer
-   logging `Successfully pinged`. All five must pass. Timeouts are tunable
+   logging `Successfully pinged`. All five must pass. Gate five requires at
+   least one of health-events-analyzer or fault-quarantine to be deployed;
+   the script fails the gate when neither exists, because connectivity
+   cannot be confirmed. Timeouts are tunable
    via `VERIFY_CR_TIMEOUT`, `VERIFY_JOB_TIMEOUT`, `VERIFY_POD_TIMEOUT`,
    `VERIFY_PING_RETRIES`. A consumer stuck in `CrashLoopBackOff` with old
    restart counts may just be in backoff from the bring-up window; delete
@@ -74,9 +77,11 @@ export NVSENTINEL_NAMESPACE="nvsentinel"
      carries the old ones).
 
 4. **Aftermath.** Walk the operator through what to expect either way:
-   - The CSP health monitor re-ingests provider maintenance events still
-     visible in the provider API (its watermark lived in the wiped
-     database). Expect one polling cycle of replay.
+   - Plain path only: the CSP health monitor re-ingests provider
+     maintenance events still visible in the provider API (its watermark
+     lived in the wiped database). Expect one polling cycle of replay. On
+     the restore path this does not happen, because the restored
+     maintenance events preserve the watermark.
    - The event exporter has no resume token, so on the restore path it
      re-exports every restored event to its sink: warn the downstream
      owners about duplicates.

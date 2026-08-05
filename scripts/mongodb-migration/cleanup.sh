@@ -109,9 +109,19 @@ if [ "$CLEAR_FAULT_STATE" -eq 1 ]; then
     quarantineHealthEvent- quarantineHealthEventAppliedTaints- \
     quarantineHealthEventAppliedLabels- quarantineHealthEventIsCordoned- \
     quarantineHealthEventCordonPreExisting- latestFaultRemediationState-
+  # These CRDs are cluster scoped (the namespace flag is ignored), so scope the
+  # deletion to NVSentinel-owned resources via the label fault-remediation stamps
+  # on everything it creates. Unlabeled leftovers are listed, never deleted.
+  MANAGED="app.kubernetes.io/managed-by=nvsentinel"
   for KIND in rebootnodes terminatenodes gpuresets externalremediationrequests; do
-    if kubectl get "$KIND" -n "$NS" >/dev/null 2>&1; then
-      run kubectl delete "$KIND" --all -n "$NS" --ignore-not-found=true
+    if kubectl get "$KIND" >/dev/null 2>&1; then
+      run kubectl delete "$KIND" -l "$MANAGED" --ignore-not-found=true
+      UNLABELED="$(kubectl get "$KIND" --no-headers 2>/dev/null | awk '{print $1}' | grep -E '^(maintenance|drain)-' || true)"
+      if [ -n "$UNLABELED" ]; then
+        echo "WARNING: $KIND resources without the $MANAGED label were left in place;" >&2
+        echo "review and delete them manually if they belong to this installation:" >&2
+        echo "$UNLABELED" | sed 's/^/  /' >&2
+      fi
     fi
   done
   run kubectl delete jobs -n "$NS" -l dgxc.nvidia.com/event-id --ignore-not-found=true

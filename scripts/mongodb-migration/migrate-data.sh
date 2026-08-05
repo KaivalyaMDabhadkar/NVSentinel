@@ -40,8 +40,32 @@ fi
 
 case "$MODE" in
 dump)
+  # Guard: writers that create references to events (annotations, remediation CRs)
+  # should be stopped before the dump. An event written after the dump is absent
+  # from the archive, and a reference created for it would dangle after restore.
+  ACTIVE_WRITERS=""
+  for D in fault-quarantine node-drainer fault-remediation; do
+    R="$(kubectl get deploy "$D" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
+    [ -n "$R" ] && [ "$R" != "0" ] && ACTIVE_WRITERS="$ACTIVE_WRITERS $D"
+  done
+  if [ -n "$ACTIVE_WRITERS" ] && [ "${ALLOW_ACTIVE_WRITERS:-0}" != "1" ]; then
+    echo "WARNING: these components are still running and can create references to events" >&2
+    echo "written after the dump:$ACTIVE_WRITERS" >&2
+    echo "Scale them to 0 first (kubectl scale deploy$ACTIVE_WRITERS --replicas=0 -n $NS)," >&2
+    echo "or re-run with ALLOW_ACTIVE_WRITERS=1 to accept the risk." >&2
+    if [ -t 0 ]; then
+      echo "Type YES to continue anyway:"
+      read -r ANSWER
+      [ "$ANSWER" = "YES" ] || { echo "aborted."; exit 3; }
+    else
+      exit 3
+    fi
+  fi
+
   # Detect the source backend: Bitnami (statefulset/mongodb) or Percona (psmdb/mongodb).
   # Server certificates on both sides are issued for pod/service FQDNs, never localhost.
+  # Credentials are passed to the pod over stdin (never on a command line), which also
+  # keeps passwords with shell-significant characters intact.
   if kubectl get statefulset mongodb -n "$NS" >/dev/null 2>&1; then
     PASSWORD="$(kubectl get secret mongodb -n "$NS" -o jsonpath='{.data.mongodb-root-password}' | base64 -d)"
     if [ -z "$PASSWORD" ]; then
@@ -50,9 +74,9 @@ dump)
     fi
     DUMP_HOST="mongodb-0.mongodb-headless.$NS.svc.cluster.local"
     echo "Dumping $DB (excluding $TOKEN_COLLECTION) from Bitnami mongodb-0..."
-    kubectl exec -n "$NS" mongodb-0 -c mongodb -- bash -c \
-      "mongodump --host '$DUMP_HOST' --db '$DB' --excludeCollection '$TOKEN_COLLECTION' \
-        --username root --password '$PASSWORD' --authenticationDatabase admin \
+    printf '%s\n' "$PASSWORD" | kubectl exec -i -n "$NS" mongodb-0 -c mongodb -- bash -c \
+      "IFS= read -r MPW; mongodump --host '$DUMP_HOST' --db '$DB' --excludeCollection '$TOKEN_COLLECTION' \
+        --username root --password \"\$MPW\" --authenticationDatabase admin \
         --ssl --sslCAFile certs/mongodb-ca-cert --sslPEMKeyFile certs/mongodb.pem \
         --archive --quiet" > "$ARCHIVE"
     RC=$?
@@ -66,10 +90,11 @@ dump)
     fi
     DUMP_HOST="mongodb-rs0-0.mongodb-rs0.$NS.svc.cluster.local"
     echo "Dumping $DB (excluding $TOKEN_COLLECTION) from Percona mongodb-rs0-0..."
-    kubectl exec -n "$NS" mongodb-rs0-0 -c mongod -- sh -c \
-      "cat /etc/mongodb-ssl-internal/tls.crt /etc/mongodb-ssl-internal/tls.key > /tmp/dump.pem; \
+    printf '%s\n%s\n' "$PU" "$PP" | kubectl exec -i -n "$NS" mongodb-rs0-0 -c mongod -- sh -c \
+      "IFS= read -r MUSER; IFS= read -r MPW; \
+       cat /etc/mongodb-ssl-internal/tls.crt /etc/mongodb-ssl-internal/tls.key > /tmp/dump.pem; \
        mongodump --host '$DUMP_HOST' --db '$DB' --excludeCollection '$TOKEN_COLLECTION' \
-        --username '$PU' --password '$PP' --authenticationDatabase admin \
+        --username \"\$MUSER\" --password \"\$MPW\" --authenticationDatabase admin \
         --ssl --sslCAFile /etc/mongodb-ssl-internal/ca.crt --sslPEMKeyFile /tmp/dump.pem \
         --archive --quiet" > "$ARCHIVE"
     RC=$?
@@ -97,14 +122,19 @@ restore)
     exit 1
   fi
   # The internal certificate is issued for the pod/service FQDNs, not localhost.
+  # Credentials travel over stdin ahead of the archive bytes (never on a command
+  # line): the two 'read' calls consume the credential lines and mongorestore
+  # reads the remainder of the stream as the archive.
   RESTORE_HOST="mongodb-rs0-0.mongodb-rs0.$NS.svc.cluster.local"
   echo "Restoring $DB into mongodb-rs0-0 (ObjectIDs preserved)..."
-  kubectl exec -i -n "$NS" mongodb-rs0-0 -c mongod -- sh -c \
-    "cat /etc/mongodb-ssl-internal/tls.crt /etc/mongodb-ssl-internal/tls.key > /tmp/restore.pem; \
+  { printf '%s\n%s\n' "$PU" "$PP"; cat "$ARCHIVE"; } | \
+    kubectl exec -i -n "$NS" mongodb-rs0-0 -c mongod -- sh -c \
+    "IFS= read -r MUSER; IFS= read -r MPW; \
+     cat /etc/mongodb-ssl-internal/tls.crt /etc/mongodb-ssl-internal/tls.key > /tmp/restore.pem; \
      mongorestore --host '$RESTORE_HOST' --nsInclude '$DB.*' \
-      --username '$PU' --password '$PP' --authenticationDatabase admin \
+      --username \"\$MUSER\" --password \"\$MPW\" --authenticationDatabase admin \
       --ssl --sslCAFile /etc/mongodb-ssl-internal/ca.crt --sslPEMKeyFile /tmp/restore.pem \
-      --archive --quiet" < "$ARCHIVE"
+      --archive --quiet"
   RC=$?
   if [ "$RC" -ne 0 ]; then
     echo "ERROR: restore failed (rc=$RC)." >&2

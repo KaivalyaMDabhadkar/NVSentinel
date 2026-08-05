@@ -106,14 +106,22 @@ else
 fi
 
 # --- 7. in-flight remediation objects ------------------------------------------
+# The remediation CRDs are cluster scoped; count NVSentinel-owned resources by the
+# managed-by label and report unlabeled maintenance-style resources separately.
 CR_COUNT=0
+UNLABELED_COUNT=0
 for KIND in rebootnodes terminatenodes gpuresets externalremediationrequests; do
-  N="$(kubectl get "$KIND" -n "$NS" --no-headers 2>/dev/null | wc -l)"
+  N="$(kubectl get "$KIND" -l app.kubernetes.io/managed-by=nvsentinel --no-headers 2>/dev/null | wc -l)"
   CR_COUNT=$((CR_COUNT + N))
+  U="$(kubectl get "$KIND" --no-headers 2>/dev/null | awk '{print $1}' | grep -cE '^(maintenance|drain)-' || true)"
+  UNLABELED_COUNT=$((UNLABELED_COUNT + U - N))
 done
+[ "$UNLABELED_COUNT" -lt 0 ] && UNLABELED_COUNT=0
 JOB_COUNT="$(kubectl get jobs -n "$NS" -l dgxc.nvidia.com/event-id --no-headers 2>/dev/null | wc -l)"
-if [ "$CR_COUNT" -gt 0 ] || [ "$JOB_COUNT" -gt 0 ]; then
-  row REVIEW "In-flight remediation" "$CR_COUNT remediation CR(s), $JOB_COUNT log-collector job(s) reference old event IDs; cleanup.sh --clear-fault-state removes them"
+if [ "$CR_COUNT" -gt 0 ] || [ "$JOB_COUNT" -gt 0 ] || [ "$UNLABELED_COUNT" -gt 0 ]; then
+  DETAIL="$CR_COUNT managed remediation CR(s), $JOB_COUNT log-collector job(s) reference old event IDs; cleanup.sh --clear-fault-state removes them"
+  [ "$UNLABELED_COUNT" -gt 0 ] && DETAIL="$DETAIL. $UNLABELED_COUNT maintenance-style CR(s) lack the nvsentinel managed-by label and need manual review"
+  row REVIEW "In-flight remediation" "$DETAIL"
 else
   row PASS "In-flight remediation" "none"
 fi

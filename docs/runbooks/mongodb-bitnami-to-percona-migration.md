@@ -60,17 +60,31 @@ By default this migration drops all health event data. If the cluster has active
 
 The restore path is the same procedure with three changes:
 
-1. **Dump before uninstalling** (while the old backend is still up):
+1. **Stop the reference-writing components, then dump** (while the old
+   backend is still up). An event written after the dump is absent from the
+   archive; if fault-quarantine then annotates a node for it, that
+   annotation would point at a document the restore does not contain. Scale
+   down the components that write such references first:
+
+   ```bash
+   kubectl scale deploy fault-quarantine node-drainer fault-remediation -n nvsentinel --replicas=0
+   ```
+
+   (Scale only the deployments that exist in your installation. Events
+   ingested by the platform connectors during this window are lost, which
+   is no worse than the plain path.) Then dump:
 
    ```bash
    scripts/mongodb-migration/migrate-data.sh dump /path/to/pre-migration.archive
    ```
 
-   The script detects the current backend and always excludes the
-   `ResumeTokens` collection. Resume tokens are only valid on the cluster
-   that created them and must never travel; consumers write fresh ones on
-   their next start. Confirm the reported archive size is non-zero before
-   moving on.
+   The script refuses to run while those components are still up unless you
+   confirm or set `ALLOW_ACTIVE_WRITERS=1`. It detects the current backend
+   and always excludes the `ResumeTokens` collection. Resume tokens are
+   only valid on the cluster that created them and must never travel;
+   consumers write fresh ones on their next start. Confirm the reported
+   archive size is non-zero before moving on, then proceed straight to the
+   uninstall.
 
 2. **Keep the fault-handling state.** Skip step 3 entirely: do not clear the
    node annotations, do not delete the remediation resources or the
@@ -181,14 +195,14 @@ If NVSentinel cordoned or tainted nodes as part of a quarantine, uncordon them a
 Delete remediation resources whose names and specs reference old event IDs:
 
 ```bash
-kubectl delete rebootnodes,terminatenodes,gpuresets --all -n nvsentinel --ignore-not-found=true
+kubectl delete rebootnodes,terminatenodes,gpuresets -l app.kubernetes.io/managed-by=nvsentinel --ignore-not-found=true
 ```
-
-Note that these remediation resources are cluster scoped; kubectl ignores the namespace flag for them (with a warning) and `--all` deletes every instance on the cluster. For NVSentinel they all belong to the one installation, so that is the intended behavior.
 
 ```bash
-kubectl delete externalremediationrequests --all -n nvsentinel --ignore-not-found=true
+kubectl delete externalremediationrequests -l app.kubernetes.io/managed-by=nvsentinel --ignore-not-found=true
 ```
+
+These remediation resources are cluster scoped (kubectl ignores any namespace flag for them), so the commands select by the ownership label fault-remediation puts on everything it creates rather than deleting every instance on the cluster. If `kubectl get rebootnodes` still lists `maintenance-*` resources afterwards, they were created without the label (for example by an older release); review them and delete by name if they belong to this installation.
 
 ```bash
 kubectl delete jobs -l dgxc.nvidia.com/event-id -n nvsentinel

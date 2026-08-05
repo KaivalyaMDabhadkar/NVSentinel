@@ -69,7 +69,7 @@ for D in health-events-analyzer fault-quarantine; do
   kubectl get deploy "$D" -n "$NS" >/dev/null 2>&1 && CONSUMER="$D" && break
 done
 if [ -z "$CONSUMER" ]; then
-  row REVIEW "consumer connectivity" "no known consumer deployment found to check"
+  row FAIL "consumer connectivity" "no datastore consumer deployment found (need health-events-analyzer or fault-quarantine); cannot confirm the datastore is reachable. Enable one, or verify connectivity manually"
 else
   I=0
   while [ "$I" -lt "$PING_RETRIES" ]; do

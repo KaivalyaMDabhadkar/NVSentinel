@@ -63,7 +63,10 @@ export MIGRATION_PVC_SIZE_GI="8"
      remediation resources stay valid; in-flight fault handling resumes
      after restore). On clusters with active quarantines, recommend
      dump/restore: with the plain path, one-time faults such as GPU XIDs
-     are never re-detected.
+     are never re-detected. The restore path additionally requires scaling
+     fault-quarantine, node-drainer, and fault-remediation to zero before
+     the dump, so no references get created for events the archive will
+     not contain; capture that as part of the plan.
    - **Quarantined nodes:** record the list from the REVIEW row. With the
      plain path the operator must decide per node: remediate first, keep
      cordoned for manual review, or return to service.

@@ -48,15 +48,29 @@ export NVSENTINEL_RELEASE="nvsentinel"
    scripts/mongodb-migration/migrate-data.sh dump <ARCHIVE>
    ```
 
-   The script auto-detects the source backend and always excludes
-   `ResumeTokens` (change-stream tokens are only valid on the cluster that
-   created them). Gate: the script must report a non-empty archive.
+   Scale fault-quarantine, node-drainer, and fault-remediation to zero
+   first; the script refuses to dump while they run (override with
+   `ALLOW_ACTIVE_WRITERS=1` only if the operator accepts that references
+   may be created for events the archive will not contain). The script
+   auto-detects the source backend and always excludes `ResumeTokens`
+   (change-stream tokens are only valid on the cluster that created them).
+   Gate: the script must report a non-empty archive.
 
-2. **Uninstall:**
+2. **Remove the current installation.** How depends on who manages it:
+   - Helm-managed (a release exists, `helm status` succeeds):
 
-   ```bash
-   helm uninstall "$NVSENTINEL_RELEASE" -n "$NVSENTINEL_NAMESPACE"
-   ```
+     ```bash
+     helm uninstall "$NVSENTINEL_RELEASE" -n "$NVSENTINEL_NAMESPACE"
+     ```
+
+   - GitOps-managed: there may be no Helm release at all (ArgoCD renders
+     charts without creating release records), so `helm uninstall` has
+     nothing to act on. Follow the pattern chosen during readiness (see the
+     runbook's GitOps section): either reconciliation is already paused and
+     you remove the rendered resources through the controller, or you
+     delete the NVSentinel application so the controller removes them.
+     Confirm the workloads are gone before continuing. The cleanup script
+     works the same either way.
 
 3. **Cleanup:**
 
@@ -92,6 +106,12 @@ export NVSENTINEL_RELEASE="nvsentinel"
 
    `--wait-for-jobs` matters: `--wait` alone does not wait for the database
    initialization job.
+
+   GitOps-managed: instead of running helm directly, commit the updated
+   values to git and let the controller deploy (recreate the application,
+   or resume reconciliation). Git must carry the new values BEFORE the
+   controller reconciles, otherwise the first sync redeploys the old
+   backend.
 
 ## Failure branches (validated)
 
