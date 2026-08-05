@@ -59,17 +59,19 @@ export NVSENTINEL_RELEASE="nvsentinel"
 1. **Dump (default preserve path; skipped only on the clean path):**
 
    ```bash
-   scripts/mongodb-migration/migrate-data.sh dump <ARCHIVE>
+   scripts/mongodb-migration/migrate-data.sh dump <ARCHIVE> --stop-writers
    ```
 
-   Scale fault-quarantine, node-drainer, and fault-remediation to zero
-   first and wait for their pods to be GONE, not just scaling down
-   (`kubectl wait --for=delete pod -l app.kubernetes.io/name=<name>`); the
-   script fails closed while any writer pod exists, including terminating
-   ones, or while their state cannot be determined. There is no
-   override on the restore path: an archive taken with active writers can
-   contain dangling references and must not be used to preserve fault
-   state. The script auto-detects the source backend and always excludes
+   `--stop-writers` scales fault-quarantine, node-drainer, and
+   fault-remediation to zero and waits for their pods to be GONE, not just
+   scaling down (a terminating pod can still write references). This stops
+   fault handling until step 8, so it is part of the migration the operator
+   confirmed, not an extra decision. Either way the script fails closed: it
+   refuses while any writer pod exists, including terminating ones, or
+   while their state cannot be determined. Never work around a refusal on
+   the preserve path: an archive taken with active writers can contain
+   dangling references and must not be used to preserve fault state. The
+   script auto-detects the source backend and always excludes
    `ResumeTokens` (change-stream tokens are only valid on the cluster that
    created them). Gate: the script must report a non-empty archive.
 

@@ -22,8 +22,12 @@
 #          annotations and CR names that reference event IDs stay valid.
 #
 # Usage:
-#   migrate-data.sh dump    <archive-file>     (run while the old backend is up)
-#   migrate-data.sh restore <archive-file>     (run after verify.sh passes on Percona)
+#   migrate-data.sh dump    <archive-file> [--stop-writers]
+#                                               (run while the old backend is up;
+#                                               --stop-writers scales the reference-writing
+#                                               components to zero and waits for their pods
+#                                               to terminate before dumping)
+#   migrate-data.sh restore <archive-file>      (run after verify.sh passes on Percona)
 #
 # Exit codes: 0 = success, 1 = error,
 #             3 = refused (dump: writers still active; restore: consumers not ready).
@@ -35,13 +39,40 @@ TOKEN_COLLECTION="${NVSENTINEL_TOKEN_COLLECTION:-ResumeTokens}"
 
 MODE="${1:-}"
 ARCHIVE="${2:-}"
+STOP_WRITERS=0
+for ARG in "${@:3}"; do
+  case "$ARG" in
+    --stop-writers) STOP_WRITERS=1 ;;
+    *)
+      echo "usage: $0 dump|restore <archive-file> [--stop-writers]" >&2
+      exit 1
+      ;;
+  esac
+done
 if [ -z "$MODE" ] || [ -z "$ARCHIVE" ]; then
-  echo "usage: $0 dump|restore <archive-file>" >&2
+  echo "usage: $0 dump|restore <archive-file> [--stop-writers]" >&2
+  exit 1
+fi
+if [ "$STOP_WRITERS" -eq 1 ] && [ "$MODE" != "dump" ]; then
+  echo "ERROR: --stop-writers applies to dump only; the restore needs the consumers running." >&2
   exit 1
 fi
 
 case "$MODE" in
 dump)
+  if [ "$STOP_WRITERS" -eq 1 ]; then
+    # Automation of the manual pre-dump step: scale the reference writers to
+    # zero and wait for their pods to be deleted (a pod in its termination
+    # grace period can still write). The fail-closed guard below still runs
+    # afterwards and stays the source of truth.
+    for D in fault-quarantine node-drainer fault-remediation; do
+      if kubectl get deploy "$D" -n "$NS" >/dev/null 2>&1; then
+        echo "Stopping writer $D (scale to 0, wait for pod deletion)..."
+        kubectl scale deploy "$D" -n "$NS" --replicas=0
+        kubectl wait --for=delete pod -l "app.kubernetes.io/name=$D" -n "$NS" --timeout=120s
+      fi
+    done
+  fi
   # Guard: writers that create references to events (annotations, remediation CRs)
   # must be stopped before the dump. An event written after the dump is absent
   # from the archive, and a reference created for it would dangle after restore.
@@ -88,7 +119,8 @@ dump)
     else
       echo "REFUSED: these components are still running and can create references to" >&2
       echo "events written after the dump:$ACTIVE_WRITERS" >&2
-      echo "Scale them to zero and wait for their pods to terminate:" >&2
+      echo "Re-run with --stop-writers to have this script scale them to zero and wait" >&2
+      echo "for their pods to terminate, or do it yourself:" >&2
       for D in $ACTIVE_WRITERS; do
         echo "  kubectl scale deploy ${D%%(*} -n $NS --replicas=0" >&2
         echo "  kubectl wait --for=delete pod -l app.kubernetes.io/name=${D%%(*} -n $NS --timeout=120s" >&2

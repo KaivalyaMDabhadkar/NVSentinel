@@ -37,7 +37,7 @@ The repository ships scripts that implement the mechanical parts of this runbook
 | Script | Step | What it does |
 | ------ | ---- | ------------ |
 | `preflight.sh` | step 1 | Read-only readiness check: current backend, cert-manager, storage class minimums vs the requested volume size, quarantined nodes, in-flight remediation objects. Prints a verdict table; exits 2 when blocked. |
-| `migrate-data.sh` | steps 3a and 8 | `dump` streams a mongodump archive out of the old backend (always excluding `ResumeTokens`) and fails closed while reference-writing components are still running; `restore` streams the archive into the new backend and fails closed while any deployed datastore consumer is not ready. Document IDs are preserved, so node annotations and remediation resource names stay valid. |
+| `migrate-data.sh` | steps 3a and 8 | `dump` streams a mongodump archive out of the old backend (always excluding `ResumeTokens`) and fails closed while reference-writing components are still running; `--stop-writers` scales them down and waits for their pods to terminate first. `restore` streams the archive into the new backend and fails closed while any deployed datastore consumer is not ready. Document IDs are preserved, so node annotations and remediation resource names stay valid. |
 | `cleanup.sh` | step 5 | Deletes everything the removal leaves behind, then verifies nothing remains. Refuses to run while a Helm release is still installed and asks for confirmation. `--dry-run` prints the plan; `--clear-fault-state` also clears node annotations and NVSentinel-owned remediation objects. |
 | `verify.sh` | step 7 | Waits on the five post-install gates and prints a verdict table. |
 
@@ -89,19 +89,19 @@ Reconciliation stays off until step 6a, after the new values are in git. One Flu
 
 ### Step 3a: Preserve health event data (default)
 
-Stop the components that write references to events, and wait for their pods to terminate. An event written after the dump is absent from the archive; if fault-quarantine then annotated a node for it, that annotation would point at a document the restore does not contain. Scale down each of these that exists in your installation (reconciliation is already off on GitOps-managed clusters, so nothing scales them back up):
+Stop the components that write references to events, then dump. An event written after the dump is absent from the archive; if fault-quarantine then annotated a node for it, that annotation would point at a document the restore does not contain. The dump script does both with the `--stop-writers` flag (reconciliation is already off on GitOps-managed clusters, so nothing scales the components back up):
+
+```bash
+scripts/mongodb-migration/migrate-data.sh dump /path/to/pre-migration.archive --stop-writers
+```
+
+The flag scales down each of fault-quarantine, node-drainer, and fault-remediation that exists in your installation, and waits for their pods to be deleted rather than just accepting the scale-down, because a pod in its termination grace period can still write references. (Events ingested by the platform connectors during this window are lost, which is no worse than path 3b.) To stop them yourself instead, run this and then the dump without the flag:
 
 ```bash
 for D in fault-quarantine node-drainer fault-remediation; do kubectl get deploy "$D" -n nvsentinel >/dev/null 2>&1 && kubectl scale deploy "$D" -n nvsentinel --replicas=0 && kubectl wait --for=delete pod -l "app.kubernetes.io/name=$D" -n nvsentinel --timeout=120s; done
 ```
 
-The `kubectl wait` matters: a pod in its termination grace period can still write references, and the dump script counts terminating pods as active writers. (Events ingested by the platform connectors during this window are lost, which is no worse than path 3b.) Then dump:
-
-```bash
-scripts/mongodb-migration/migrate-data.sh dump /path/to/pre-migration.archive
-```
-
-The script fails closed: it refuses while those components run or while their state cannot be determined, because an archive taken with active writers must not be used to preserve fault state. It detects the current backend automatically and always excludes the `ResumeTokens` collection (resume tokens are only valid on the cluster that created them; consumers write fresh ones on their next start). Confirm the reported archive size is non-zero, then move straight to step 4.
+The script fails closed either way: it refuses while those components run or while their state cannot be determined, because an archive taken with active writers must not be used to preserve fault state. It detects the current backend automatically and always excludes the `ResumeTokens` collection (resume tokens are only valid on the cluster that created them; consumers write fresh ones on their next start). Confirm the reported archive size is non-zero, then move straight to step 4.
 
 The dump deliberately includes resolved and already remediated events, and that is safe. Fault-remediation's cold start only enqueues events whose remediation is incomplete, so finished events are never re-processed. Remediation resource names are derived from the event ID, so even a re-processed event finds its existing resource instead of creating a duplicate. The health events collection carries a TTL index on the creation timestamp, so restored history ages out on its original schedule. Keeping the history also preserves the analyzer's context for rules that consider past events.
 
