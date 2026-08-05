@@ -241,7 +241,7 @@ On GitOps-managed clusters these restarts are rollout restarts, not spec changes
 
 ## Rolling back
 
-Going back to Bitnami is the same procedure in the other direction: stop reconciliation if GitOps-managed, remove the installation, delete the Percona leftovers, and redeploy with `useBitnami: true` and `usePerconaOperator: false`. The dump and restore work the same way (the dump auto-detects the Percona source). The Percona leftovers to delete after removal:
+Going back to Bitnami is the same procedure in the other direction: stop reconciliation if GitOps-managed, remove the installation, delete the Percona leftovers, and redeploy with `useBitnami: true` and `usePerconaOperator: false`. The dump and restore work the same way (the dump auto-detects the Percona source and takes the same `--stop-writers` flag). The Percona leftovers to delete after removal:
 
 ```bash
 kubectl delete pvc mongod-data-mongodb-rs0-0 mongod-data-mongodb-rs0-1 mongod-data-mongodb-rs0-2 -n nvsentinel --ignore-not-found=true
