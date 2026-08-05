@@ -2,26 +2,28 @@
 # WARNING: This will affect ALL log-collector pods cluster-wide while active
 # The test MUST run in isolation and clean up the Stage in teardown
 # Weight: 10 ensures this Stage takes precedence over default stage-fast (weight 0)
+# resourceRef must be spelled exactly {apiGroup: v1, kind: Pod}: any other
+# spelling (including apiGroup: "") routes the Stage to kwok's generic
+# controller, which has no node scoping and patches pods on REAL nodes.
 apiVersion: kwok.x-k8s.io/v1alpha1
 kind: Stage
 metadata:
   name: log-collector-failure
 spec:
   resourceRef:
-    apiGroup: ""
+    apiGroup: v1
     kind: Pod
   selector:
     matchLabels:
       app: log-collector
+    matchExpressions:
+    - key: '.status.phase'
+      operator: 'In'
+      values:
+      - 'Pending'
   weight: 10
   delay:
     durationMilliseconds: 100
-  when:
-  - field: status.phase
-    operator: In
-    values:
-    - ""
-    - "Pending"
   next:
     statusTemplate: |
       {{ $now := Now }}
