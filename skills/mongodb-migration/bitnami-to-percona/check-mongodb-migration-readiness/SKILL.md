@@ -8,7 +8,7 @@ description: >-
   Use this first, before any migration step.
 maturity: experimental
 lifecycle: evergreen
-api-version: nke.skills/v1
+api-version: nvsentinel.skills/v1
 allowed-tools: Bash(kubectl *), Bash(helm *), Bash(scripts/mongodb-migration/preflight.sh*), Read, Grep
 ---
 
@@ -58,21 +58,21 @@ export MIGRATION_PVC_SIZE_GI="8"
      not yours. Do not proceed until each is acknowledged in conversation.
 
 3. Capture the decisions the migration skill needs:
-   - **Data handling:** plain path (all health event data lost) or
-     dump/restore path (document IDs preserved; node annotations and
-     remediation resources stay valid; in-flight fault handling resumes
-     after restore). On clusters with active quarantines, recommend
-     dump/restore: with the plain path, one-time faults such as GPU XIDs
-     are never re-detected. The restore path additionally requires scaling
-     fault-quarantine, node-drainer, and fault-remediation to zero before
-     the dump, so no references get created for events the archive will
-     not contain; capture that as part of the plan.
+   - **Data handling:** the preserve path (dump and restore) is the
+     DEFAULT: document IDs are preserved, node annotations and remediation
+     resources stay valid, and in-flight fault handling resumes after the
+     restore. It requires scaling fault-quarantine, node-drainer, and
+     fault-remediation to zero before the dump, so no references get
+     created for events the archive will not contain; capture that as part
+     of the plan. The clean path (no dump, all health event data lost) is
+     the opt-out: one-time faults such as GPU XIDs are never re-detected
+     on it, so the operator must explicitly choose it.
    - **Quarantined nodes:** record the list from the REVIEW row. With the
-     plain path the operator must decide per node: remediate first, keep
+     clean path the operator must decide per node: remediate first, keep
      cordoned for manual review, or return to service.
    - **GitOps:** ask whether ArgoCD/Flux manages the installation. If yes,
      reconciliation must be suspended before the migration and the desired
-     state in git updated before resuming (runbook, GitOps section).
+     state in git updated before resuming (runbook steps 2, 4a and 6a).
 
 ## Output
 

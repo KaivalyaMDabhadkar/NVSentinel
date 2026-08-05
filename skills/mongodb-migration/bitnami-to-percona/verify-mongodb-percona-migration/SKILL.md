@@ -8,7 +8,7 @@ description: >-
   own to health-check an existing Percona-backed installation.
 maturity: experimental
 lifecycle: evergreen
-api-version: nke.skills/v1
+api-version: nvsentinel.skills/v1
 allowed-tools: Bash(kubectl *), Bash(helm *), Bash(scripts/mongodb-migration/*), Read, Grep
 ---
 
@@ -22,8 +22,8 @@ health-check a Percona-backed installation.
 ## Inputs
 
 - `NVSENTINEL_NAMESPACE` (default `nvsentinel`)
-- `DATA_PATH` (`plain` / `restore`) and `ARCHIVE` (restore path only), carried
-  over from the migration skill
+- `DATA_PATH` (`restore` is the default, `clean` is the opt-out) and
+  `ARCHIVE` (restore path only), carried over from the migration skill
 
 ## Setup
 
@@ -50,7 +50,7 @@ export NVSENTINEL_NAMESPACE="nvsentinel"
    restart counts may just be in backoff from the bring-up window; delete
    the pod to skip the backoff before diagnosing.
 
-2. **Restore (restore path only):**
+2. **Restore (default preserve path; skipped only on the clean path):**
 
    ```bash
    scripts/mongodb-migration/migrate-data.sh restore <ARCHIVE>
@@ -60,12 +60,14 @@ export NVSENTINEL_NAMESPACE="nvsentinel"
    the restored events:
 
    ```bash
-   kubectl -n "$NVSENTINEL_NAMESPACE" rollout restart \
-     deploy/health-events-analyzer deploy/fault-quarantine \
-     deploy/node-drainer deploy/fault-remediation
+   for D in health-events-analyzer fault-quarantine node-drainer fault-remediation; do
+     kubectl get deploy "$D" -n "$NVSENTINEL_NAMESPACE" >/dev/null 2>&1 && \
+       kubectl rollout restart deploy "$D" -n "$NVSENTINEL_NAMESPACE"
+   done
    ```
 
-   (Restart only the deployments that exist in this installation.)
+   The loop restarts only the deployments that exist in this installation.
+   Rollout restarts are not spec changes, so they create no GitOps drift.
 
 3. **Restore continuity checks (restore path only):**
    - Quarantined nodes are still cordoned and their `quarantineHealthEvent`
@@ -77,18 +79,18 @@ export NVSENTINEL_NAMESPACE="nvsentinel"
      carries the old ones).
 
 4. **Aftermath.** Walk the operator through what to expect either way:
-   - Plain path only: the CSP health monitor re-ingests provider
-     maintenance events still visible in the provider API (its watermark
-     lived in the wiped database). Expect one polling cycle of replay. On
-     the restore path this does not happen, because the restored
-     maintenance events preserve the watermark.
-   - The event exporter has no resume token, so on the restore path it
-     re-exports every restored event to its sink: warn the downstream
-     owners about duplicates.
-   - On the plain path, one-time faults (GPU XIDs) are not re-detected;
-     the operator must work through the quarantined-node list recorded
-     during readiness. Persistent faults are re-detected on the next
-     monitoring cycle.
+   - Restore path (default): the event exporter has no resume token, so it
+     re-exports every restored event to its sink; warn the downstream
+     owners about duplicates. Restored quarantine state is latent until
+     the next event or cold start touches the node. There is NO CSP
+     maintenance replay, because the restored maintenance events preserve
+     the watermark.
+   - Clean path: the CSP health monitor re-ingests provider maintenance
+     events still visible in the provider API (its watermark lived in the
+     wiped database); expect one polling cycle of replay. One-time faults
+     (GPU XIDs) are not re-detected; the operator must work through the
+     quarantined-node list recorded during readiness. Persistent faults
+     are re-detected on the next monitoring cycle.
 
 ## Output
 

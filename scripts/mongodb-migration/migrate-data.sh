@@ -25,7 +25,7 @@
 #   migrate-data.sh restore <archive-file>     (run after verify.sh passes on Percona)
 #
 # Exit codes: 0 = success, 1 = error.
-set -uo pipefail
+set -euo pipefail
 
 NS="${NVSENTINEL_NAMESPACE:-nvsentinel}"
 DB="${NVSENTINEL_DATABASE:-HealthEventsDatabase}"
@@ -41,23 +41,45 @@ fi
 case "$MODE" in
 dump)
   # Guard: writers that create references to events (annotations, remediation CRs)
-  # should be stopped before the dump. An event written after the dump is absent
+  # must be stopped before the dump. An event written after the dump is absent
   # from the archive, and a reference created for it would dangle after restore.
+  # This check fails closed: a deployment must be provably absent or provably at
+  # zero (desired and remaining replicas), and any query error aborts the dump.
   ACTIVE_WRITERS=""
   for D in fault-quarantine node-drainer fault-remediation; do
-    R="$(kubectl get deploy "$D" -n "$NS" -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"
-    [ -n "$R" ] && [ "$R" != "0" ] && ACTIVE_WRITERS="$ACTIVE_WRITERS $D"
+    STATE=""
+    if ! STATE="$(kubectl get deploy "$D" -n "$NS" -o jsonpath='{.spec.replicas}/{.status.replicas}' 2>&1)"; then
+      case "$STATE" in
+        *NotFound*) continue ;;  # deployment not part of this installation
+        *)
+          echo "ERROR: could not determine the state of deployment '$D': $STATE" >&2
+          echo "Refusing to dump while writer quiescence cannot be proved." >&2
+          exit 1
+          ;;
+      esac
+    fi
+    DESIRED="${STATE%%/*}"
+    REMAINING="${STATE##*/}"
+    if [ "${DESIRED:-0}" != "0" ]; then
+      ACTIVE_WRITERS="$ACTIVE_WRITERS $D"
+    elif [ -n "$REMAINING" ] && [ "$REMAINING" != "0" ]; then
+      ACTIVE_WRITERS="$ACTIVE_WRITERS $D"
+    fi
   done
-  if [ -n "$ACTIVE_WRITERS" ] && [ "${ALLOW_ACTIVE_WRITERS:-0}" != "1" ]; then
-    echo "WARNING: these components are still running and can create references to events" >&2
-    echo "written after the dump:$ACTIVE_WRITERS" >&2
-    echo "Scale them to 0 first (kubectl scale deploy$ACTIVE_WRITERS --replicas=0 -n $NS)," >&2
-    echo "or re-run with ALLOW_ACTIVE_WRITERS=1 to accept the risk." >&2
-    if [ -t 0 ]; then
-      echo "Type YES to continue anyway:"
-      read -r ANSWER
-      [ "$ANSWER" = "YES" ] || { echo "aborted."; exit 3; }
+  if [ -n "$ACTIVE_WRITERS" ]; then
+    if [ "${DUMP_WITHOUT_FAULT_STATE_GUARANTEES:-0}" = "1" ]; then
+      echo "WARNING: dumping with active writers:$ACTIVE_WRITERS" >&2
+      echo "This archive is NOT suitable for the fault-state-preserving restore path:" >&2
+      echo "references created after the dump may point at documents it does not contain." >&2
     else
+      echo "REFUSED: these components are still running and can create references to" >&2
+      echo "events written after the dump:$ACTIVE_WRITERS" >&2
+      echo "Scale them to zero and wait for their pods to terminate:" >&2
+      for D in $ACTIVE_WRITERS; do
+        echo "  kubectl scale deploy $D -n $NS --replicas=0" >&2
+      done
+      echo "(Set DUMP_WITHOUT_FAULT_STATE_GUARANTEES=1 only for a plain backup that" >&2
+      echo "will not be used to preserve fault state.)" >&2
       exit 3
     fi
   fi
@@ -67,27 +89,28 @@ dump)
   # Credentials are passed to the pod over stdin (never on a command line), which also
   # keeps passwords with shell-significant characters intact.
   if kubectl get statefulset mongodb -n "$NS" >/dev/null 2>&1; then
-    PASSWORD="$(kubectl get secret mongodb -n "$NS" -o jsonpath='{.data.mongodb-root-password}' | base64 -d)"
+    PASSWORD="$(kubectl get secret mongodb -n "$NS" -o jsonpath='{.data.mongodb-root-password}' | base64 -d || true)"
     if [ -z "$PASSWORD" ]; then
       echo "ERROR: could not read the Bitnami root password (secret 'mongodb')." >&2
       exit 1
     fi
+    RC=0
     DUMP_HOST="mongodb-0.mongodb-headless.$NS.svc.cluster.local"
     echo "Dumping $DB (excluding $TOKEN_COLLECTION) from Bitnami mongodb-0..."
     printf '%s\n' "$PASSWORD" | kubectl exec -i -n "$NS" mongodb-0 -c mongodb -- bash -c \
       "IFS= read -r MPW; mongodump --host '$DUMP_HOST' --db '$DB' --excludeCollection '$TOKEN_COLLECTION' \
         --username root --password \"\$MPW\" --authenticationDatabase admin \
         --ssl --sslCAFile certs/mongodb-ca-cert --sslPEMKeyFile certs/mongodb.pem \
-        --archive --quiet" > "$ARCHIVE"
-    RC=$?
+        --archive --quiet" > "$ARCHIVE" || RC=$?
   elif kubectl get psmdb mongodb -n "$NS" >/dev/null 2>&1; then
-    PU="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_BACKUP_USER}' | base64 -d)"
-    PP="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_BACKUP_PASSWORD}' | base64 -d)"
+    PU="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_BACKUP_USER}' | base64 -d || true)"
+    PP="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_BACKUP_PASSWORD}' | base64 -d || true)"
     if [ -z "$PU" ] || [ -z "$PP" ]; then
       # Fall back to the database admin user if the backup user is absent.
-      PU="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_USER}' | base64 -d)"
-      PP="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d)"
+      PU="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_USER}' | base64 -d || true)"
+      PP="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d || true)"
     fi
+    RC=0
     DUMP_HOST="mongodb-rs0-0.mongodb-rs0.$NS.svc.cluster.local"
     echo "Dumping $DB (excluding $TOKEN_COLLECTION) from Percona mongodb-rs0-0..."
     printf '%s\n%s\n' "$PU" "$PP" | kubectl exec -i -n "$NS" mongodb-rs0-0 -c mongod -- sh -c \
@@ -96,8 +119,7 @@ dump)
        mongodump --host '$DUMP_HOST' --db '$DB' --excludeCollection '$TOKEN_COLLECTION' \
         --username \"\$MUSER\" --password \"\$MPW\" --authenticationDatabase admin \
         --ssl --sslCAFile /etc/mongodb-ssl-internal/ca.crt --sslPEMKeyFile /tmp/dump.pem \
-        --archive --quiet" > "$ARCHIVE"
-    RC=$?
+        --archive --quiet" > "$ARCHIVE" || RC=$?
   else
     echo "ERROR: no MongoDB backend found in '$NS' (neither statefulset/mongodb nor psmdb/mongodb)." >&2
     exit 1
@@ -115,8 +137,8 @@ restore)
     exit 1
   fi
   # Percona: databaseAdmin credentials from internal-mongodb-users, internal TLS certs.
-  PU="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_USER}' | base64 -d)"
-  PP="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d)"
+  PU="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_USER}' | base64 -d || true)"
+  PP="$(kubectl get secret internal-mongodb-users -n "$NS" -o jsonpath='{.data.MONGODB_DATABASE_ADMIN_PASSWORD}' | base64 -d || true)"
   if [ -z "$PU" ] || [ -z "$PP" ]; then
     echo "ERROR: could not read Percona credentials (secret 'internal-mongodb-users')." >&2
     exit 1
@@ -125,6 +147,7 @@ restore)
   # Credentials travel over stdin ahead of the archive bytes (never on a command
   # line): the two 'read' calls consume the credential lines and mongorestore
   # reads the remainder of the stream as the archive.
+  RC=0
   RESTORE_HOST="mongodb-rs0-0.mongodb-rs0.$NS.svc.cluster.local"
   echo "Restoring $DB into mongodb-rs0-0 (ObjectIDs preserved)..."
   { printf '%s\n%s\n' "$PU" "$PP"; cat "$ARCHIVE"; } | \
@@ -134,8 +157,7 @@ restore)
      mongorestore --host '$RESTORE_HOST' --nsInclude '$DB.*' \
       --username \"\$MUSER\" --password \"\$MPW\" --authenticationDatabase admin \
       --ssl --sslCAFile /etc/mongodb-ssl-internal/ca.crt --sslPEMKeyFile /tmp/restore.pem \
-      --archive --quiet"
-  RC=$?
+      --archive --quiet" || RC=$?
   if [ "$RC" -ne 0 ]; then
     echo "ERROR: restore failed (rc=$RC)." >&2
     exit 1

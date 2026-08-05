@@ -2,14 +2,15 @@
 name: migrate-mongodb-to-percona
 description: >-
   Execute the NVSentinel MongoDB backend migration from Bitnami to the
-  Percona Operator after readiness is confirmed: optional data dump,
-  uninstall, cleanup of surviving objects, values preparation, and the
-  Percona install. Destructive: wipes health event data unless the dump
-  path was chosen. Use only after check-mongodb-migration-readiness
-  reports READY and the operator confirmed the decisions.
+  Percona Operator after readiness is confirmed: data dump (default
+  preserve path), removal of the installation, cleanup of surviving
+  objects, values preparation, and the Percona deployment. Destructive:
+  on the opt-out clean path all health event data is wiped. Use only
+  after check-mongodb-migration-readiness reports READY and the operator
+  confirmed the decisions.
 maturity: experimental
 lifecycle: evergreen
-api-version: nke.skills/v1
+api-version: nvsentinel.skills/v1
 allowed-tools: Bash(kubectl *), Bash(helm *), Bash(scripts/mongodb-migration/*), Read, Grep
 ---
 
@@ -20,18 +21,20 @@ allowed-tools: Bash(kubectl *), Bash(helm *), Bash(scripts/mongodb-migration/*),
 Use this skill **after** `check-mongodb-migration-readiness` reports READY.
 
 Hard gate: do NOT run any step below until the operator has confirmed, in
-this conversation, (a) the data-handling decision (data loss accepted, or
-dump path chosen) and (b) what happens to each quarantined node. If either
-is missing, go back to the readiness skill.
+this conversation, (a) the data-handling decision (the default preserve
+path, or the clean path with data loss explicitly accepted) and (b) what
+happens to each quarantined node. If either is missing, go back to the
+readiness skill.
 
 ## Inputs
 
 - `NVSENTINEL_NAMESPACE`, `NVSENTINEL_RELEASE` (default `nvsentinel`)
-- `DATA_PATH` (`plain` / `restore`): the confirmed data-handling decision
+- `DATA_PATH` (`restore` is the default, `clean` is the opt-out): the
+  confirmed data-handling decision
 - `VALUES_FILES`: the operator's values file(s) for the install
 - `ARCHIVE`: dump archive path (restore path only)
 - GitOps status from readiness (if managed: reconciliation suspended before
-  step 1, git updated before resuming; runbook GitOps section)
+  step 1, git updated before resuming; runbook steps 2, 4a and 6a)
 
 ## Setup
 
@@ -42,35 +45,35 @@ export NVSENTINEL_RELEASE="nvsentinel"
 
 ## Trigger order (required)
 
-1. **Dump (restore path only):**
+1. **Dump (default preserve path; skipped only on the clean path):**
 
    ```bash
    scripts/mongodb-migration/migrate-data.sh dump <ARCHIVE>
    ```
 
    Scale fault-quarantine, node-drainer, and fault-remediation to zero
-   first; the script refuses to dump while they run (override with
-   `ALLOW_ACTIVE_WRITERS=1` only if the operator accepts that references
-   may be created for events the archive will not contain). The script
-   auto-detects the source backend and always excludes `ResumeTokens`
-   (change-stream tokens are only valid on the cluster that created them).
-   Gate: the script must report a non-empty archive.
+   first and wait for their pods to terminate; the script fails closed
+   while they run or while their state cannot be determined. There is no
+   override on the restore path: an archive taken with active writers can
+   contain dangling references and must not be used to preserve fault
+   state. The script auto-detects the source backend and always excludes
+   `ResumeTokens` (change-stream tokens are only valid on the cluster that
+   created them). Gate: the script must report a non-empty archive.
 
 2. **Remove the current installation.** How depends on who manages it:
+   - GitOps-managed (the common case): reconciliation must already be
+     stopped (runbook step 2) BEFORE the step 1 scale-downs, otherwise the
+     controller reverts them. There may be no Helm release at all (ArgoCD
+     renders charts without creating release records), so `helm uninstall`
+     has nothing to act on; remove the rendered resources through the
+     controller instead, for example by deleting the NVSentinel application
+     with cascading deletion (runbook step 4a). Confirm the workloads are
+     gone before continuing. The cleanup script works the same either way.
    - Helm-managed (a release exists, `helm status` succeeds):
 
      ```bash
      helm uninstall "$NVSENTINEL_RELEASE" -n "$NVSENTINEL_NAMESPACE"
      ```
-
-   - GitOps-managed: there may be no Helm release at all (ArgoCD renders
-     charts without creating release records), so `helm uninstall` has
-     nothing to act on. Follow the pattern chosen during readiness (see the
-     runbook's GitOps section): either reconciliation is already paused and
-     you remove the rendered resources through the controller, or you
-     delete the NVSentinel application so the controller removes them.
-     Confirm the workloads are gone before continuing. The cleanup script
-     works the same either way.
 
 3. **Cleanup:**
 
@@ -78,7 +81,7 @@ export NVSENTINEL_RELEASE="nvsentinel"
    scripts/mongodb-migration/cleanup.sh --yes
    ```
 
-   Add `--clear-fault-state` ONLY on the plain path. On the restore path,
+   Add `--clear-fault-state` ONLY on the clean path. On the restore path,
    fault state (node annotations, remediation resources) must be kept:
    restored documents keep their IDs, so those references become valid
    again. Gate: exit 0. A non-zero exit means leftovers remain; leftover
@@ -97,21 +100,21 @@ export NVSENTINEL_RELEASE="nvsentinel"
      `mongodb-store.psmdb-db.replsets.rs0.affinity.antiAffinityTopologyKey: "none"`
      (the psmdb default is required anti-affinity across hostnames)
 
-5. **Install:**
+5. **Deploy.** How depends on who manages it:
+   - GitOps-managed (the common case): commit the updated values to git
+     first, then let the controller deploy (recreate the application, or
+     resume the reconciliation stopped in runbook step 2). Git must carry
+     the new values BEFORE the controller reconciles, otherwise the first
+     sync redeploys the old backend.
+   - Helm-managed:
 
-   ```bash
-   helm upgrade --install "$NVSENTINEL_RELEASE" <chart> -n "$NVSENTINEL_NAMESPACE" \
-     -f <VALUES_FILES...> --timeout 20m --wait --wait-for-jobs
-   ```
+     ```bash
+     helm upgrade --install "$NVSENTINEL_RELEASE" <chart> -n "$NVSENTINEL_NAMESPACE" \
+       -f <VALUES_FILES...> --timeout 20m --wait --wait-for-jobs
+     ```
 
-   `--wait-for-jobs` matters: `--wait` alone does not wait for the database
-   initialization job.
-
-   GitOps-managed: instead of running helm directly, commit the updated
-   values to git and let the controller deploy (recreate the application,
-   or resume reconciliation). Git must carry the new values BEFORE the
-   controller reconciles, otherwise the first sync redeploys the old
-   backend.
+     `--wait-for-jobs` matters: `--wait` alone does not wait for the
+     database initialization job.
 
 ## Failure branches (validated)
 

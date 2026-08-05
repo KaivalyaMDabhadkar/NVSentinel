@@ -20,12 +20,13 @@
 # Usage: cleanup.sh [--dry-run] [--clear-fault-state] [--yes]
 #   --dry-run            print what would be deleted, delete nothing
 #   --clear-fault-state  also remove quarantine node annotations, remediation CRs,
-#                        and event-labeled log-collector jobs (production clusters)
+#                        and event-labeled log-collector jobs. Use ONLY on the clean
+#                        path (no restore); the default preserve path keeps this state
 #   --yes                skip the interactive confirmation
 #
 # Exit codes: 0 = cleanup complete and verified, 1 = error or leftovers remain,
 #             3 = refused (release still installed, or not confirmed)
-set -uo pipefail
+set -euo pipefail
 
 NS="${NVSENTINEL_NAMESPACE:-nvsentinel}"
 RELEASE="${NVSENTINEL_RELEASE:-nvsentinel}"
@@ -75,7 +76,7 @@ fi
 # PVCs: Bitnami volumes carry app.kubernetes.io/name=mongodb, Percona (operator-created)
 # volumes carry app.kubernetes.io/name=percona-server-mongodb. Cover both so the script
 # works for the reverse migration and for cleaning up failed mixed states.
-PVCS="$(kubectl get pvc -n "$NS" -l 'app.kubernetes.io/name in (mongodb, percona-server-mongodb)' -o name 2>/dev/null)"
+PVCS="$(kubectl get pvc -n "$NS" -l 'app.kubernetes.io/name in (mongodb, percona-server-mongodb)' -o name 2>/dev/null || true)"
 
 # Secrets: fixed names plus per-replica server certs discovered by pattern
 # (one mongo-server-cert-<n> per Bitnami replica; discovery avoids hardcoding the count).
@@ -124,9 +125,16 @@ if [ "$CLEAR_FAULT_STATE" -eq 1 ]; then
       fi
     fi
   done
+  # Jobs are namespaced and dgxc.nvidia.com/event-id is only stamped by
+  # fault-remediation's log-collector jobs, so namespace + label is the ownership
+  # boundary here. (The CRs above cannot be scoped by instance yet: fault-remediation
+  # does not stamp an instance label; candidate follow-up for multi-install clusters.)
   run kubectl delete jobs -n "$NS" -l dgxc.nvidia.com/event-id --ignore-not-found=true
+  echo "NOTE: cordons and NVSentinel-applied taints are left in place on purpose."
+  echo "Review each previously quarantined node and return it to service yourself"
+  echo "(kubectl uncordon, remove taints) once you are confident it is healthy."
 else
-  echo "== Skipping fault-state clearing (pass --clear-fault-state on production clusters) =="
+  echo "== Keeping fault-handling state (default; pass --clear-fault-state only on the clean, no-restore path) =="
 fi
 
 # --- verification ------------------------------------------------------------------
@@ -137,17 +145,17 @@ fi
 
 echo "== Verifying nothing is left =="
 LEFT=""
-L="$(kubectl get pvc -n "$NS" -l 'app.kubernetes.io/name in (mongodb, percona-server-mongodb)' -o name 2>/dev/null)"
-[ -n "$L" ] && LEFT="$LEFT $L"
+L="$(kubectl get pvc -n "$NS" -l 'app.kubernetes.io/name in (mongodb, percona-server-mongodb)' -o name 2>/dev/null || true)"
+if [ -n "$L" ]; then LEFT="$LEFT $L"; fi
 for S in $FIXED_SECRETS $STALE_PERCONA $SERVER_CERTS; do
-  kubectl get secret "$S" -n "$NS" >/dev/null 2>&1 && LEFT="$LEFT secret/$S"
+  if kubectl get secret "$S" -n "$NS" >/dev/null 2>&1; then LEFT="$LEFT secret/$S"; fi
 done
 for C in resume-control circuit-breaker; do
-  kubectl get configmap "$C" -n "$NS" >/dev/null 2>&1 && LEFT="$LEFT configmap/$C"
+  if kubectl get configmap "$C" -n "$NS" >/dev/null 2>&1; then LEFT="$LEFT configmap/$C"; fi
 done
 # Catch anything matching the server-cert pattern that appeared between collect and delete.
 L="$(kubectl get secrets -n "$NS" -o name 2>/dev/null | grep -E '^secret/mongo-server-cert-[0-9]+$' || true)"
-[ -n "$L" ] && LEFT="$LEFT $L"
+if [ -n "$L" ]; then LEFT="$LEFT $L"; fi
 
 if [ -n "$LEFT" ]; then
   echo "FAILED: leftovers remain:$LEFT" >&2

@@ -9,19 +9,26 @@ Common reasons to migrate:
 
 The commands below assume the release name `nvsentinel` in the namespace `nvsentinel`. Adjust both if your installation differs.
 
+The runbook is a sequence of steps. Where a step has options, pick the one that matches your setup:
+
+| Step | Options |
+| ---- | ------- |
+| 1. Check readiness | common |
+| 2. Stop reconciliation | GitOps-managed installations only |
+| 3. Capture the data | 3a preserve health event data (default), 3b start clean |
+| 4. Remove the installation | 4a GitOps-managed (ArgoCD, Flux), 4b Helm-managed |
+| 5. Delete the datastore leftovers | common (one extra flag on path 3b) |
+| 6. Deploy the Percona backend | 6a GitOps-managed, 6b Helm-managed |
+| 7. Verify | common |
+| 8. Restore and restart | path 3a only |
+
 ## What to expect
 
-- **Health event data is not preserved**, unless you use the optional restore path described in [Preserving fault state](#preserving-fault-state-optional-dump-and-restore). The default procedure is a clean reinstall of the datastore, not a data migration. NVSentinel stores operational telemetry (health events, resume tokens, maintenance events). Monitors repopulate the new database as they detect issues, but all history is lost.
-- **Do not switch backends with a plain `helm upgrade` on an existing release.** Changing `useBitnami`/`usePerconaOperator` on a live release fails with an immutable field error on the `create-mongodb-database` Job, and by that point the upgrade has already deployed parts of the second backend. You end up with two MongoDB clusters running side by side and a service configuration that points at the broken one. The uninstall and reinstall flow below is the supported path. If you already hit this, see [Troubleshooting](#troubleshooting).
-- Plan a maintenance window. Between the uninstall and the completed reinstall, NVSentinel is not monitoring the cluster.
-
-## Before you begin
-
-You need `helm` and `kubectl` access to the cluster, and cert-manager must be installed (both backends use it for TLS certificates).
-
-On a production cluster, check for in-flight fault handling before you start. Health events are referenced by their database IDs from node annotations and remediation resources. After the database is wiped, those references point at nothing. In particular, node-drainer looks up the event behind the `quarantineHealthEvent` node annotation and retries every minute, forever, when the event is missing. Nodes in that state never drain and never recover on their own.
-
-Step 3 below removes this state. Be aware of the operational consequence: clearing quarantine state returns the affected nodes to service, and not every fault will be detected a second time. Faults that are still observable, such as a failing DCGM health check or a NIC that is still down, are re-detected on the next monitoring cycle. One-time events, such as GPU XID errors that were already read from the logs, will not be raised again. Record the list of quarantined nodes before you start (step 3 shows how) and review each one manually after the migration: remediate it, or keep it cordoned until you are confident it is healthy.
+- **The default path preserves your health event data.** The dump and restore carry the events into the new backend with their document IDs intact, so node annotations and remediation resources stay valid and in-flight fault handling resumes. In testing, a node quarantined before the migration stayed quarantined through it, node-drainer resolved the event behind the annotation without errors, and fault-remediation recognized its existing maintenance resource on cold start instead of creating a duplicate.
+- **The clean path (3b) drops all health event data.** Monitors repopulate the new database as they detect issues, but history is lost, and one-time faults such as GPU XIDs that were already read from the logs are never raised again.
+- **Never switch backends in place.** Changing `useBitnami`/`usePerconaOperator` on a live installation fails with an immutable field error on the `create-mongodb-database` Job, and by that point parts of the second backend are already deployed. You end up with two MongoDB clusters running side by side and the service configuration pointing at the broken one. This runbook's remove-and-redeploy flow is the supported path; if you already hit the mixed state, see [Troubleshooting](#troubleshooting).
+- **No cloud infrastructure changes are required.** Both backends listen on the same ports (27017 for mongod, 9216 for metrics), every Service is cluster-internal, storage comes from the same StorageClass, and nothing calls cloud APIs. The migration is entirely in-cluster. The three things to check on locked-down environments: the Percona images (`percona/*` and the `lachlanevenson/k8s-kubectl` helper) must be pullable from your registry path, whoever runs the migration needs cluster-level Kubernetes RBAC (the Percona path installs cluster-scoped CRDs), and any custom network policies or exposure you built against the old service name need updating.
+- Plan a maintenance window. Between the removal and the completed redeploy, NVSentinel is not monitoring the cluster.
 
 ## Helper scripts
 
@@ -29,125 +36,102 @@ The repository ships scripts that implement the mechanical parts of this runbook
 
 | Script | Step | What it does |
 | ------ | ---- | ------------ |
-| `preflight.sh` | before you begin | Read-only readiness check: current backend, cert-manager, storage class minimums vs the requested volume size, quarantined nodes, in-flight remediation objects. Prints a verdict table; exits 2 when blocked. |
-| `cleanup.sh` | steps 2 and 3 | Deletes everything `helm uninstall` leaves behind, then verifies nothing remains. Refuses to run while the release is still installed and asks for confirmation. `--dry-run` prints the plan; `--clear-fault-state` also clears node annotations and remediation objects. |
-| `migrate-data.sh` | optional | `dump` streams a mongodump archive out of the old backend (always excluding `ResumeTokens`); `restore` streams it into the new one. Document IDs are preserved, so node annotations and remediation resource names stay valid. |
-| `verify.sh` | step 6 | Waits on the five post-install gates and prints a verdict table. |
+| `preflight.sh` | step 1 | Read-only readiness check: current backend, cert-manager, storage class minimums vs the requested volume size, quarantined nodes, in-flight remediation objects. Prints a verdict table; exits 2 when blocked. |
+| `migrate-data.sh` | steps 3a and 8 | `dump` streams a mongodump archive out of the old backend (always excluding `ResumeTokens`) and fails closed while reference-writing components are still running; `restore` streams the archive into the new backend. Document IDs are preserved, so node annotations and remediation resource names stay valid. |
+| `cleanup.sh` | step 5 | Deletes everything the removal leaves behind, then verifies nothing remains. Refuses to run while a Helm release is still installed and asks for confirmation. `--dry-run` prints the plan; `--clear-fault-state` also clears node annotations and NVSentinel-owned remediation objects. |
+| `verify.sh` | step 7 | Waits on the five post-install gates and prints a verdict table. |
 
-All four respect `NVSENTINEL_NAMESPACE` and `NVSENTINEL_RELEASE` (default `nvsentinel` for both). The scripts automate the steps; the decisions (acknowledging data loss, reviewing quarantined nodes) stay with you.
+All four respect `NVSENTINEL_NAMESPACE` and `NVSENTINEL_RELEASE` (default `nvsentinel` for both). The scripts automate the steps; the decisions (choosing the data path, reviewing quarantined nodes) stay with you.
 
-For AI-agent-assisted runs of this procedure, `skills/mongodb-migration/bitnami-to-percona/` contains agent skills (readiness check, migration, verification) that sequence these scripts with the required confirmation gates. They work with any agent that reads the SKILL.md format.
+## Using the agent skills
 
-## GitOps-managed installations (ArgoCD, Flux)
+For AI-agent-assisted runs, `skills/mongodb-migration/bitnami-to-percona/` contains three agent skills that sequence this runbook with the required confirmation gates:
 
-If NVSentinel is deployed by a GitOps controller, stop reconciliation before you start. Otherwise the controller fights the migration: it re-syncs the resources you just removed and reverts the backend change. These are general guidelines; adapt them to how your applications are structured.
+1. `check-mongodb-migration-readiness` (read-only)
+2. `migrate-mongodb-to-percona` (destructive, gated on explicit operator confirmation)
+3. `verify-mongodb-percona-migration`
 
-Two workable patterns:
+They are plain SKILL.md files and work with any agent that reads that format. Two ways to use them:
 
-**Pause and operate.** Suspend reconciliation for the NVSentinel application (ArgoCD: disable automated sync, or use a sync window that denies syncs for the duration; Flux: `flux suspend helmrelease <name>`). Perform the migration manually following this runbook. Update the desired state in git (the two backend flags, the volume size if your provider needs it, scheduling values for the Percona components), then resume reconciliation and confirm the first sync reports no drift.
+- **Point the agent at the files.** Open this repository with your agent (Claude Code, Codex, Cursor, or similar) and ask it to follow `skills/mongodb-migration/bitnami-to-percona/check-mongodb-migration-readiness/SKILL.md`. Each skill ends by naming the next one to run.
+- **Install them as named skills.** Copy the three directories into your agent's skills location (for Claude Code, `.claude/skills/` in a project or `~/.claude/skills/`; for Codex, `$CODEX_HOME/skills/`), then invoke them by name.
 
-**Delete and recreate.** Delete the NVSentinel application from the controller so its resources are removed (this replaces step 1 of this runbook), run the cleanup and state-handling steps manually, update the desired state in git, then recreate the application and let it deploy the Percona-backed installation. Run the verification of step 6 against the result.
+Whichever way you run them, the skills never take a destructive step without the operator explicitly confirming the data-path decision and the quarantined-node plan in the conversation.
 
-Notes that apply to both patterns:
+## Step 1: Check readiness
 
-- Update git before reconciliation resumes. If the old values come back first, the sync flips the backend in place, which is the unsupported switch this runbook exists to avoid.
-- A GitOps-rendered installation is not necessarily a Helm release (ArgoCD renders Helm charts without creating release records), so `helm uninstall` may have nothing to act on; removing the application is the equivalent step. The cleanup script works the same either way.
-- If the application manages the namespace with pruning enabled, double check that the objects this runbook creates or preserves (the pull secrets, a dump archive stored in-cluster, and on the restore path the node annotations and remediation resources) are not pruned as unmanaged resources when reconciliation resumes.
+```bash
+scripts/mongodb-migration/preflight.sh
+```
 
-## Preserving fault state (optional dump and restore)
+Resolve any FAIL rows before continuing (the check exits 2 while blocked). Then settle three decisions the later steps depend on:
 
-By default this migration drops all health event data. If the cluster has active quarantines or in-flight remediations, consider the restore path instead: it carries the health events into the new backend with their document IDs intact, so the node annotations and remediation resources that reference those IDs stay valid, and fault handling picks up where it left off. In testing, a node quarantined before the migration stayed quarantined through it, node-drainer resolved the event behind the annotation without errors, and fault-remediation recognized its existing maintenance resource on cold start instead of creating a duplicate.
+- **Data path:** preserve health event data (3a, the default) or start clean (3b). Prefer 3a whenever the cluster has active quarantines or in-flight remediations.
+- **Management path:** GitOps-managed (steps 2, 4a, 6a) or Helm-managed (4b, 6b).
+- **Quarantined nodes:** record the list the preflight reports. On path 3a they carry over automatically. On path 3b you must decide per node, because one-time faults will not be re-detected:
 
-The restore path is the same procedure with three changes:
+```bash
+kubectl get nodes -o custom-columns=NAME:.metadata.name,QUARANTINE:.metadata.annotations.quarantineHealthEvent --no-headers | grep -v "<none>"
+```
 
-1. **Stop the reference-writing components, then dump** (while the old
-   backend is still up). An event written after the dump is absent from the
-   archive; if fault-quarantine then annotates a node for it, that
-   annotation would point at a document the restore does not contain. Scale
-   down the components that write such references first:
+cert-manager must be installed (both backends use it for TLS certificates).
 
-   ```bash
-   kubectl scale deploy fault-quarantine node-drainer fault-remediation -n nvsentinel --replicas=0
-   ```
+## Step 2: Stop reconciliation (GitOps-managed installations only)
 
-   (Scale only the deployments that exist in your installation. Events
-   ingested by the platform connectors during this window are lost, which
-   is no worse than the plain path.) Then dump:
+If NVSentinel is deployed by a GitOps controller such as ArgoCD/FluxCD, stop reconciliation before anything else touches the cluster. Every following step mutates state the controller believes it owns: with automated sync (and especially ArgoCD self-heal) the controller reverts the step 3a scale-downs within seconds and re-creates whatever step 4 removes. These are general guidelines; adapt them to how your applications are structured.
 
-   ```bash
-   scripts/mongodb-migration/migrate-data.sh dump /path/to/pre-migration.archive
-   ```
+- ArgoCD: disable automated sync (`argocd app set nvsentinel --sync-policy none`, or edit the Application to remove `spec.syncPolicy.automated`), or use a sync window that denies syncs for the duration.
+- Flux: `flux suspend helmrelease nvsentinel`.
 
-   The script refuses to run while those components are still up unless you
-   confirm or set `ALLOW_ACTIVE_WRITERS=1`. It detects the current backend
-   and always excludes the `ResumeTokens` collection. Resume tokens are
-   only valid on the cluster that created them and must never travel;
-   consumers write fresh ones on their next start. Confirm the reported
-   archive size is non-zero before moving on, then proceed straight to the
-   uninstall.
+Reconciliation stays off until step 6a, after the new values are in git. Helm-managed installations skip this step.
 
-2. **Keep the fault-handling state.** Skip step 3 entirely: do not clear the
-   node annotations, do not delete the remediation resources or the
-   log-collector jobs. Restored documents keep their IDs, so all of those
-   references become valid again after the restore. (Steps 1 and 2, the
-   uninstall and the datastore cleanup, still apply unchanged.)
+## Step 3: Capture the data
 
-3. **Restore after verification, then restart the consumers.** Once step 6
-   passes:
+### Step 3a: Preserve health event data (default)
 
-   ```bash
-   scripts/mongodb-migration/migrate-data.sh restore /path/to/pre-migration.archive
-   ```
+Stop the components that write references to events, and wait for their pods to terminate. An event written after the dump is absent from the archive; if fault-quarantine then annotated a node for it, that annotation would point at a document the restore does not contain. Scale down each of these that exists in your installation (reconciliation is already off on GitOps-managed clusters, so nothing scales them back up):
 
-   ```bash
-   kubectl rollout restart deploy/health-events-analyzer deploy/fault-quarantine deploy/node-drainer deploy/fault-remediation -n nvsentinel
-   ```
+```bash
+for D in fault-quarantine node-drainer fault-remediation; do kubectl get deploy "$D" -n nvsentinel >/dev/null 2>&1 && kubectl scale deploy "$D" -n nvsentinel --replicas=0; done
+```
 
-   Restart only the deployments that exist in your installation. The
-   restart matters: the consumers read their connection configuration at
-   startup, and their cold-start logic is what processes the restored
-   events.
+(Events ingested by the platform connectors during this window are lost, which is no worse than path 3b.) Then dump:
 
-The dump deliberately includes resolved and already remediated events, and
-that is safe. Fault-remediation's cold start only enqueues events whose
-remediation is incomplete, so finished events are never re-processed.
-Remediation resource names are derived from the event ID, so even a
-re-processed event finds its existing resource instead of creating a
-duplicate. And the health events collection carries a TTL index on the
-creation timestamp, so restored history ages out on its original schedule.
-Keeping the history also preserves the analyzer's context for rules that
-consider past events.
+```bash
+scripts/mongodb-migration/migrate-data.sh dump /path/to/pre-migration.archive
+```
 
-Behaviors to expect with the restore path:
+The script fails closed: it refuses while those components run or while their state cannot be determined, because an archive taken with active writers must not be used to preserve fault state. It detects the current backend automatically and always excludes the `ResumeTokens` collection (resume tokens are only valid on the cluster that created them; consumers write fresh ones on their next start). Confirm the reported archive size is non-zero, then move straight to step 4.
 
-- **The event exporter re-exports everything**, including resolved events.
-  With no resume token in the new datastore, its backfill treats every
-  restored event as new. In testing this was an exact one-to-one re-export
-  of the whole collection. Warn the owners of the downstream sink to
-  expect duplicates.
-- **Restored quarantine state is latent.** Fault handling is event driven,
-  so a restored quarantine is re-evaluated when the next event or a
-  component cold start touches that node, not spontaneously. This is
-  normal; the state is correct and consistent, it just does not generate
-  activity on its own.
-- **The CSP maintenance replay does not happen on this path.** The restored
-  maintenance events carry the CSP health monitor's progress watermark, so
-  it resumes from where it left off instead of re-ingesting the provider's
-  feed the way the plain path does.
+The dump deliberately includes resolved and already remediated events, and that is safe. Fault-remediation's cold start only enqueues events whose remediation is incomplete, so finished events are never re-processed. Remediation resource names are derived from the event ID, so even a re-processed event finds its existing resource instead of creating a duplicate. The health events collection carries a TTL index on the creation timestamp, so restored history ages out on its original schedule. Keeping the history also preserves the analyzer's context for rules that consider past events.
 
-## Step 1: Uninstall the release
+### Step 3b: Start clean
+
+No dump. All health event data is dropped. Make sure the quarantined-node list from step 1 is recorded somewhere outside the cluster, and plan to review each of those nodes manually after the migration: faults that are still observable (persistent hardware conditions, failing health checks) are re-detected on the next monitoring cycle, but one-time events such as GPU XID errors that were already read from the logs are not raised again.
+
+Note that the step 5 cleanup removes the quarantine annotations, remediation resources, and jobs, but deliberately leaves cordons and NVSentinel-applied taints in place: returning a possibly faulty node to service is your decision, per node. Once you are confident a node is healthy, `kubectl uncordon` it and remove any NVSentinel-applied taints.
+
+## Step 4: Remove the installation
+
+### Step 4a: GitOps-managed (ArgoCD, Flux)
+
+With reconciliation already stopped (step 2), remove the rendered resources through the controller: on ArgoCD, delete the application with cascading deletion (`argocd app delete nvsentinel`, or delete the Application resource with the resources finalizer); on Flux, delete the HelmRelease or prune through your usual flow. Confirm the NVSentinel workloads are gone before continuing.
+
+Note that a GitOps-rendered installation is not necessarily a Helm release (ArgoCD renders Helm charts without creating release records), so `helm uninstall` may have nothing to act on; removing the application is the equivalent step. The cleanup script in step 5 works the same either way.
+
+### Step 4b: Helm-managed
 
 ```bash
 helm uninstall nvsentinel -n nvsentinel
 ```
 
-## Step 2: Delete the datastore leftovers
+## Step 5: Delete the datastore leftovers
 
-`helm uninstall` intentionally leaves several objects behind:
+Removing the installation intentionally leaves several objects behind:
 
 | Leftover | Why it survives |
 | -------- | --------------- |
-| `datadir-mongodb-*` PVCs | StatefulSet volume claims are never deleted by Helm |
+| `datadir-mongodb-*` PVCs | StatefulSet volume claims are never deleted with the workload |
 | `mongodb` secret | Carries a `helm.sh/resource-policy: keep` annotation |
 | `mongo-root-ca-secret`, `mongo-app-client-cert-secret`, `mongo-server-cert-*` secrets | Created by cert-manager, which does not remove secrets when Certificates are deleted |
 | `mongo-ca-secret` secret | Created by an init job outside of Helm ownership |
@@ -157,107 +141,48 @@ helm uninstall nvsentinel -n nvsentinel
 Delete all of them:
 
 ```bash
-kubectl delete pvc -l app.kubernetes.io/name=mongodb -n nvsentinel
+scripts/mongodb-migration/cleanup.sh --yes
 ```
+
+On path 3b, add `--clear-fault-state` to also remove the quarantine node annotations, the NVSentinel-owned remediation resources, and the event-labeled log-collector jobs. On path 3a, do NOT pass that flag: the restored data makes this state valid again.
+
+Do not skip the cleanup. The old TLS secrets belong to the old certificate authority; if they survive, the new installation reuses them, clients present certificates the new database does not trust, and every datastore consumer crash-loops with connection errors that never mention certificates. The script verifies nothing is left and exits non-zero otherwise. It never touches your own secrets (image pull secrets and the like).
+
+If you prefer the manual commands, they are: `kubectl delete pvc -l 'app.kubernetes.io/name in (mongodb, percona-server-mongodb)' -n nvsentinel`, the secret list from the table above (one `mongo-server-cert-<n>` per Bitnami replica, default 3), and `kubectl delete configmap resume-control circuit-breaker -n nvsentinel`. For fault state on path 3b: the six `quarantineHealthEvent*`/`latestFaultRemediationState` node annotations, and the remediation resources by ownership label:
 
 ```bash
-kubectl delete secret mongodb mongo-ca-secret mongo-root-ca-secret mongo-app-client-cert-secret mongo-server-cert-0 mongo-server-cert-1 mongo-server-cert-2 -n nvsentinel --ignore-not-found=true
+kubectl delete rebootnodes,terminatenodes,gpuresets,externalremediationrequests -l app.kubernetes.io/managed-by=nvsentinel --ignore-not-found=true
 ```
 
-There is one `mongo-server-cert-<n>` secret per MongoDB replica. The default replica count is 3. If you changed `mongodb-store.mongodb.replicaCount`, adjust the list.
+These remediation resources are cluster scoped (kubectl ignores any namespace flag for them), so the command selects by the ownership label fault-remediation puts on everything it creates rather than deleting every instance on the cluster. If `kubectl get rebootnodes` still lists `maintenance-*` resources afterwards, they were created without the label (for example by an older release); review them and delete by name if they belong to this installation.
 
-```bash
-kubectl delete configmap resume-control circuit-breaker -n nvsentinel --ignore-not-found=true
-```
+## Step 6: Deploy the Percona backend
 
-Do not skip the secret cleanup. The old TLS secrets belong to the old certificate authority. If they survive, the new installation reuses them, clients present certificates the new database does not trust, and every datastore consumer crash-loops with connection errors that do not mention certificates at all.
+Whichever path deploys it, the values must contain:
 
-Do not delete your image pull secrets or any other secrets you created yourself.
+- `mongodb-store.useBitnami: false` and `mongodb-store.usePerconaOperator: true` (both, always together)
+- a volume size at or above your provider's minimum block volume size. The Percona default requests 8Gi; OCI block volumes, for example, are at least 50Gi, the CSI driver rounds the volume up, and the operator then refuses to reconcile, so the replica set never initializes:
 
-## Step 3: Clear fault-handling state (production clusters)
+  ```yaml
+  mongodb-store:
+    psmdb-db:
+      replsets:
+        rs0:
+          volumeSpec:
+            pvc:
+              resources:
+                requests:
+                  storage: "50Gi"
+  ```
 
-Skip this step entirely if you are following the [restore path](#preserving-fault-state-optional-dump-and-restore); the restored data makes this state valid again. Otherwise, skip it only if you are certain there were no active quarantines or remediations.
+- scheduling for the Percona components where the cluster uses node selectors or taints (`mongodb-store.job`, `mongodb-store.psmdb-operator`, and `mongodb-store.psmdb-db.replsets.rs0`); values under `mongodb-store.mongodb.*` apply only to the Bitnami backend
+- on single-node test clusters only: `mongodb-store.psmdb-db.replsets.rs0.affinity.antiAffinityTopologyKey: "none"` (the psmdb default is required anti-affinity across hostnames)
 
-First, record which nodes are currently quarantined so you can review them after the migration. This matters because one-time events (GPU XIDs, for example) will not be detected again once the event history is gone:
+### Step 6a: GitOps-managed
 
-```bash
-kubectl get nodes -o custom-columns=NAME:.metadata.name,QUARANTINE:.metadata.annotations.quarantineHealthEvent --no-headers | grep -v "<none>"
-```
+Commit the updated values to git first, then let the controller deploy: recreate the application (if you deleted it in step 4a) or re-enable the reconciliation you stopped in step 2. Git must carry the new values BEFORE the controller reconciles; if the old values come back first, the sync redeploys the old backend. If the application manages the namespace with pruning enabled, double check that the objects this runbook preserves (the pull secrets, a dump archive stored in-cluster, and on path 3a the node annotations and remediation resources) are not pruned as unmanaged resources.
 
-Then remove the quarantine and remediation annotations from all nodes:
-
-```bash
-kubectl annotate nodes --all quarantineHealthEvent- quarantineHealthEventAppliedTaints- quarantineHealthEventAppliedLabels- quarantineHealthEventIsCordoned- quarantineHealthEventCordonPreExisting- latestFaultRemediationState-
-```
-
-If NVSentinel cordoned or tainted nodes as part of a quarantine, uncordon them and remove the taints as well, or leave them cordoned if you prefer to review each node manually first.
-
-Delete remediation resources whose names and specs reference old event IDs:
-
-```bash
-kubectl delete rebootnodes,terminatenodes,gpuresets -l app.kubernetes.io/managed-by=nvsentinel --ignore-not-found=true
-```
-
-```bash
-kubectl delete externalremediationrequests -l app.kubernetes.io/managed-by=nvsentinel --ignore-not-found=true
-```
-
-These remediation resources are cluster scoped (kubectl ignores any namespace flag for them), so the commands select by the ownership label fault-remediation puts on everything it creates rather than deleting every instance on the cluster. If `kubectl get rebootnodes` still lists `maintenance-*` resources afterwards, they were created without the label (for example by an older release); review them and delete by name if they belong to this installation.
-
-```bash
-kubectl delete jobs -l dgxc.nvidia.com/event-id -n nvsentinel
-```
-
-If you use a custom drain plugin, also delete its in-flight drain resources (their names start with `drain-`).
-
-Leave the health monitor state files on the nodes alone (for example the syslog monitor state under `/var/run/syslog_monitor/`). They only contain local journal cursors and boot IDs, not database references. Deleting them causes old log entries to be detected again as new faults.
-
-## Step 4: Prepare the Percona values
-
-Add the backend flags to your values. Both flags must be set:
-
-```yaml
-mongodb-store:
-  useBitnami: false
-  usePerconaOperator: true
-```
-
-Three more settings commonly need attention:
-
-**Volume size.** The Percona defaults request 8Gi volumes. Some cloud providers have a larger minimum block volume size. On OCI, for example, block volumes are at least 50Gi, the CSI driver rounds the volume up, and the operator then refuses to reconcile because the volume is larger than requested. The replica set never initializes. Set the size explicitly to at least your provider's minimum:
-
-```yaml
-mongodb-store:
-  psmdb-db:
-    replsets:
-      rs0:
-        volumeSpec:
-          pvc:
-            resources:
-              requests:
-                storage: "50Gi"
-```
-
-**Pod placement.** The Percona components have their own scheduling keys. Values under `mongodb-store.mongodb.*` do not apply to them:
-
-```yaml
-mongodb-store:
-  job:
-    nodeSelector: {}
-    tolerations: []
-  psmdb-operator:
-    nodeSelector: {}
-    tolerations: []
-  psmdb-db:
-    replsets:
-      rs0:
-        nodeSelector: {}
-        tolerations: []
-```
-
-**Connection endpoint.** The two backends expose different services: Bitnami uses `mongodb-headless`, Percona uses `mongodb-rs0`. If you rely on the chart-generated `MONGODB_URI` (the default), nothing to do, it switches automatically with the backend flags. If you set `global.datastore.connection.host` yourself, update it to `mongodb-rs0.<namespace>.svc.cluster.local`.
-
-## Step 5: Install with Percona enabled
+### Step 6b: Helm-managed
 
 ```bash
 helm upgrade --install nvsentinel <chart> -n nvsentinel -f <your-values.yaml> --timeout 20m --wait --wait-for-jobs
@@ -265,49 +190,55 @@ helm upgrade --install nvsentinel <chart> -n nvsentinel -f <your-values.yaml> --
 
 The `--wait-for-jobs` flag makes Helm wait for the `create-mongodb-database` job as well; `--wait` alone only waits for the workloads.
 
-The install takes longer than the Bitnami one because the operator starts first, then builds the replica set, and only then can the database initialization job finish. As a reference point from validation runs: the operator was up within a minute, the replica set reached `ready` about 3 minutes in, the initialization job completed about 2 minutes after that, and the NVSentinel services settled shortly after. The whole install typically finishes well within 10 minutes; the 20-minute timeout leaves room for slow image pulls.
+Either way, the deploy takes longer than a Bitnami one because the operator starts first, then builds the replica set, and only then can the database initialization job finish. As a reference point from validation runs: the operator was up within a minute, the replica set reached `ready` about 3 minutes in, the initialization job completed about 2 minutes after that, and the NVSentinel services settled shortly after; the whole deploy typically finishes well within 10 minutes. The redeploy creates fresh consumer deployments at their normal replica counts, so the step 3a scale-downs do not carry over.
 
-## Step 6: Verify
-
-Check that the operator has reconciled the replica set:
+## Step 7: Verify
 
 ```bash
-kubectl get perconaservermongodb -n nvsentinel
+scripts/mongodb-migration/verify.sh
 ```
 
-The status must be `ready`. Then check the initialization job and the pods:
+Five gates, all of which must pass: the `perconaservermongodb` resource reaches `ready`, the `create-mongodb-database` job completes, the mongod pods are ready, `MONGODB_URI` points at the Percona service, and a datastore consumer (health-events-analyzer or fault-quarantine) logs a successful ping. It is normal for consumers to restart a few times while the replica set comes up.
+
+One connection note: the chart-generated `MONGODB_URI` follows the backend automatically (`mongodb-headless` for Bitnami, `mongodb-rs0` for Percona). Only installations that set `global.datastore.connection.host` explicitly need to update it to `mongodb-rs0.<namespace>.svc.cluster.local`.
+
+## Step 8: Restore and restart (path 3a only)
 
 ```bash
-kubectl get jobs,pods -n nvsentinel
+scripts/mongodb-migration/migrate-data.sh restore /path/to/pre-migration.archive
 ```
 
-Expected state: the `create-mongodb-database` job shows `Complete`, the `mongodb-rs0-0/1/2` pods are `Running`, and the NVSentinel services are `Running`. It is normal for the services to restart a few times while the replica set comes up; they crash until the database answers and then stay up. Confirm connectivity from the logs:
+Then restart each datastore consumer that exists in your installation, so their cold-start logic processes the restored events (the restart also matters because they read their connection configuration at startup):
 
 ```bash
-kubectl logs -n nvsentinel deploy/health-events-analyzer | grep "Successfully pinged"
+for D in health-events-analyzer fault-quarantine node-drainer fault-remediation; do kubectl get deploy "$D" -n nvsentinel >/dev/null 2>&1 && kubectl rollout restart deploy "$D" -n nvsentinel; done
 ```
+
+On GitOps-managed clusters these restarts are rollout restarts, not spec changes, so they do not create drift. Continuity checks worth running: quarantined nodes are still cordoned and their annotations reference documents that exist (no repeating `unexpected number of events` lines in the node-drainer logs), and `ResumeTokens` contains only freshly written tokens.
 
 ## After the migration
 
-- **CSP maintenance events replay (plain path only).** The CSP health monitor tracks its progress through the provider's maintenance feed using the database itself. With the database wiped, it re-ingests every maintenance event still visible in the provider API, which can re-quarantine nodes for maintenance you already handled. Expect this for one polling cycle after the migration. On the restore path this does not happen, because the restored maintenance events preserve the watermark.
-- **Event exporter backfill.** With no resume token in the new database, the event exporter starts from scratch. Against an empty database this is a no-op. If you restore or seed any data, it exports all of it again, so warn the owners of the downstream sink about duplicates.
-- **Quarantine history is gone.** Nodes you cleared in step 3 are back in service. Faults that are still observable (persistent hardware conditions, failing health checks) are re-detected and re-quarantined on the next monitoring cycle. One-time events such as GPU XID errors are not raised again, so work through the list of quarantined nodes you recorded in step 3 and handle those nodes manually.
+- **Path 3a: the event exporter re-exports everything**, including resolved events. With no resume token in the new datastore, its backfill treats every restored event as new; in testing this was an exact one-to-one re-export of the whole collection. Warn the owners of the downstream sink to expect duplicates.
+- **Path 3a: restored quarantine state is latent.** Fault handling is event driven, so a restored quarantine is re-evaluated when the next event or a component cold start touches that node, not spontaneously. This is normal; the state is correct, it just does not generate activity on its own.
+- **Path 3a: no CSP maintenance replay.** The restored maintenance events carry the CSP health monitor's progress watermark, so it resumes where it left off.
+- **Path 3b: CSP maintenance events replay.** The CSP health monitor tracks its progress through the provider's maintenance feed using the database itself. With the database wiped, it re-ingests every maintenance event still visible in the provider API, which can re-quarantine nodes for maintenance you already handled. Expect this for one polling cycle.
+- **Path 3b: quarantine history is gone.** Work through the quarantined-node list you recorded in step 1 and handle those nodes manually; only still-observable faults are re-detected. Nodes stay cordoned (and NVSentinel-applied taints stay in place) until you return each one to service yourself.
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 | ------- | ----- | --- |
 | `mongodb-0` stuck in `Init:ImagePullBackOff`, events show `no match for platform in manifest` | Bitnami MongoDB images have no ARM64 build | Use the Percona backend on ARM64 nodes |
-| Operator logs show `requested storage (8Gi) is less than actual storage (...)`, the `perconaservermongodb` resource stays in `error`, services report `ReplicaSetNoPrimary` | Cloud provider minimum volume size is larger than the requested size, so reconciliation stops before the replica set is initialized | Set `volumeSpec` to at least the provider minimum (step 4), delete the `mongod-data-*` PVCs, reinstall |
-| All datastore consumers crash-loop with connection errors right after the reinstall, TLS handshakes fail or connections close immediately | Leftover TLS secrets from the previous backend were not deleted, so client certificates belong to the old certificate authority | Redo step 2 completely, then reinstall |
-| `helm upgrade` fails with `cannot patch "create-mongodb-database" ... field is immutable` | Backend flags were changed on an existing release instead of following this runbook | Run `helm rollback <release> <last-good-revision>` (retry once if it errors), then manually delete everything the failed upgrade created: the `perconaservermongodb` resource, the `nvsentinel-psmdb-operator` deployment and its ServiceAccount, Role and RoleBinding, the `mongod-data-*` PVCs, and the `internal-mongodb-users`, `percona-server-mongodb-users` and `mongodb-encryption-key` secrets. Helm no longer tracks these objects after the rollback, so `helm uninstall` will not remove them either. Then follow this runbook from step 1 |
-| node-drainer logs repeat `unexpected number of events for node ... and event ID ...` every minute | A node still carries a `quarantineHealthEvent` annotation that references an event from the old database | Run the annotation cleanup from step 3 |
+| Scaled-down components come back on their own during steps 3 and 4 | A GitOps controller with automated sync (or self-heal) is still reconciling | Stop reconciliation (step 2) and start the affected step over |
+| Operator logs show `requested storage (...) is less than actual storage (...)`, the `perconaservermongodb` resource stays in `error`, services report `ReplicaSetNoPrimary` | Cloud provider minimum volume size is larger than the requested size, so reconciliation stops before the replica set is initialized | Set `volumeSpec` to at least the provider minimum (step 6), delete the `mongod-data-*` PVCs, redeploy |
+| All datastore consumers crash-loop with connection errors right after the redeploy, TLS handshakes fail or connections close immediately | Leftover TLS secrets from the previous backend were not deleted, so client certificates belong to the old certificate authority | Redo step 5 completely, then redeploy |
+| `create-mongodb-database` job `Failed` with `DeadlineExceeded` after a prolonged wedge | The job never retries after exceeding its deadline | `kubectl delete job create-mongodb-database -n nvsentinel`, then re-apply the deployment (re-run the `helm upgrade`, or re-sync the application); the job is recreated and completes against the healthy replica set |
+| `helm upgrade` fails with `cannot patch "create-mongodb-database" ... field is immutable` | Backend flags were changed on a live installation instead of following this runbook | Run `helm rollback <release> <last-good-revision>` (retry once if it errors), then manually delete everything the failed upgrade created: the `perconaservermongodb` resource, the `nvsentinel-psmdb-operator` deployment and its ServiceAccount, Role and RoleBinding, the `mongod-data-*` PVCs, and the `internal-mongodb-users`, `percona-server-mongodb-users` and `mongodb-encryption-key` secrets. Helm no longer tracks these objects after the rollback, so `helm uninstall` will not remove them either. Then follow this runbook from step 1 |
+| node-drainer logs repeat `unexpected number of events for node ...` every minute | A node annotation references an event that does not exist in the datastore (path 3b with fault state kept, or a partial restore) | Clear that node's quarantine annotations per step 5 |
 
 ## Rolling back
 
-Going back to Bitnami is the same procedure in the other direction: uninstall, delete the Percona leftovers, and reinstall with `useBitnami: true` and `usePerconaOperator: false`. Data is not preserved in this direction either.
-
-The Percona leftovers to delete after the uninstall:
+Going back to Bitnami is the same procedure in the other direction: stop reconciliation if GitOps-managed, remove the installation, delete the Percona leftovers, and redeploy with `useBitnami: true` and `usePerconaOperator: false`. The dump and restore work the same way (the dump auto-detects the Percona source). The Percona leftovers to delete after removal:
 
 ```bash
 kubectl delete pvc mongod-data-mongodb-rs0-0 mongod-data-mongodb-rs0-1 mongod-data-mongodb-rs0-2 -n nvsentinel --ignore-not-found=true
@@ -321,6 +252,6 @@ kubectl delete secret internal-mongodb-users percona-server-mongodb-users mongod
 kubectl delete configmap resume-control circuit-breaker -n nvsentinel --ignore-not-found=true
 ```
 
-The Percona CRDs (`perconaservermongodbs.psmdb.percona.com` and related) are cluster-scoped and survive the uninstall. That is harmless: they are reused if you install Percona again, and they can stay in place while you run Bitnami. Delete them only if you want a complete teardown and nothing else on the cluster uses them.
+The Percona CRDs (`perconaservermongodbs.psmdb.percona.com` and related) are cluster-scoped and survive removal. That is harmless: they are reused if you install Percona again, and they can stay in place while you run Bitnami. Delete them only if you want a complete teardown and nothing else on the cluster uses them.
 
 Note that a rollback is not possible on ARM64-only clusters, because the Bitnami images do not run there.

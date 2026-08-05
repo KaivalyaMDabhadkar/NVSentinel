@@ -19,7 +19,7 @@
 #   0 = READY (review items may still need human attention)
 #   2 = BLOCKED (at least one FAIL row)
 #   1 = script/environment error
-set -uo pipefail
+set -euo pipefail
 
 NS="${NVSENTINEL_NAMESPACE:-nvsentinel}"
 RELEASE="${NVSENTINEL_RELEASE:-nvsentinel}"
@@ -46,7 +46,7 @@ fi
 row PASS "Cluster access" "namespace $NS reachable"
 
 # --- 2. helm release ----------------------------------------------------------
-REL_STATUS="$(helm status "$RELEASE" -n "$NS" -o json 2>/dev/null | grep -o '"status":"[a-z-]*"' | head -1 | cut -d'"' -f4)"
+REL_STATUS="$(helm status "$RELEASE" -n "$NS" -o json 2>/dev/null | grep -o '"status":"[a-z-]*"' | head -1 | cut -d'"' -f4 || true)"
 if [ -z "$REL_STATUS" ]; then
   row REVIEW "Helm release" "release '$RELEASE' not found in $NS (already uninstalled? cleanup can still run)"
 elif [ "$REL_STATUS" = "deployed" ]; then
@@ -57,8 +57,8 @@ fi
 
 # --- 3. current backend -------------------------------------------------------
 HAS_BITNAMI="no"; HAS_PERCONA="no"
-kubectl get statefulset mongodb -n "$NS" >/dev/null 2>&1 && HAS_BITNAMI="yes"
-kubectl get psmdb mongodb -n "$NS" >/dev/null 2>&1 && HAS_PERCONA="yes"
+if kubectl get statefulset mongodb -n "$NS" >/dev/null 2>&1; then HAS_BITNAMI="yes"; fi
+if kubectl get psmdb mongodb -n "$NS" >/dev/null 2>&1; then HAS_PERCONA="yes"; fi
 if [ "$HAS_BITNAMI" = "yes" ] && [ "$HAS_PERCONA" = "yes" ]; then
   row FAIL "Current backend" "BOTH backends present (mixed state, likely a failed in-place switch; see runbook troubleshooting)"
 elif [ "$HAS_BITNAMI" = "yes" ]; then
@@ -70,7 +70,7 @@ else
 fi
 
 # --- 4. cert-manager ----------------------------------------------------------
-CM_READY="$(kubectl get deploy -A -l app.kubernetes.io/name=cert-manager --no-headers 2>/dev/null | awk '{print $3}' | head -1)"
+CM_READY="$(kubectl get deploy -A -l app.kubernetes.io/name=cert-manager --no-headers 2>/dev/null | awk '{print $3}' | head -1 || true)"
 if [ -n "$CM_READY" ] && [ "${CM_READY%%/*}" != "0" ]; then
   row PASS "cert-manager" "deployment ready ($CM_READY)"
 else
@@ -80,7 +80,7 @@ fi
 # --- 5. storage class vs requested volume size ---------------------------------
 # NOTE: kubectl renders the default marker inside the NAME column ("standard (default)"),
 # so on the default class the provisioner is field 3, not field 2.
-DEFAULT_SC_LINE="$(kubectl get sc --no-headers 2>/dev/null | grep '(default)' | head -1)"
+DEFAULT_SC_LINE="$(kubectl get sc --no-headers 2>/dev/null | grep '(default)' | head -1 || true)"
 DEFAULT_SC="$(echo "$DEFAULT_SC_LINE" | awk '{print $1}')"
 PROVISIONER="$(echo "$DEFAULT_SC_LINE" | awk '{print $3}')"
 if [ -z "$DEFAULT_SC" ]; then
@@ -98,9 +98,9 @@ else
 fi
 
 # --- 6. quarantined nodes -----------------------------------------------------
-QUARANTINED="$(kubectl get nodes -o custom-columns=NAME:.metadata.name,Q:.metadata.annotations.quarantineHealthEvent --no-headers 2>/dev/null | awk '$2 != "<none>" {print $1}')"
+QUARANTINED="$(kubectl get nodes -o custom-columns=NAME:.metadata.name,Q:.metadata.annotations.quarantineHealthEvent --no-headers 2>/dev/null | awk '$2 != "<none>" {print $1}' || true)"
 if [ -n "$QUARANTINED" ]; then
-  row REVIEW "Quarantined nodes" "$(echo "$QUARANTINED" | tr '\n' ' ')(record this list; one-time events like XIDs will NOT be re-detected after the wipe)"
+  row REVIEW "Quarantined nodes" "$(echo "$QUARANTINED" | tr '\n' ' ')(the default preserve path carries these over; on the clean path record this list, because one-time events like XIDs are never re-detected)"
 else
   row PASS "Quarantined nodes" "none"
 fi
@@ -111,16 +111,16 @@ fi
 CR_COUNT=0
 UNLABELED_COUNT=0
 for KIND in rebootnodes terminatenodes gpuresets externalremediationrequests; do
-  N="$(kubectl get "$KIND" -l app.kubernetes.io/managed-by=nvsentinel --no-headers 2>/dev/null | wc -l)"
+  N="$(kubectl get "$KIND" -l app.kubernetes.io/managed-by=nvsentinel --no-headers 2>/dev/null | wc -l || true)"
   CR_COUNT=$((CR_COUNT + N))
   U="$(kubectl get "$KIND" --no-headers 2>/dev/null | awk '{print $1}' | grep -cE '^(maintenance|drain)-' || true)"
   UNLABELED_COUNT=$((UNLABELED_COUNT + U - N))
 done
-[ "$UNLABELED_COUNT" -lt 0 ] && UNLABELED_COUNT=0
-JOB_COUNT="$(kubectl get jobs -n "$NS" -l dgxc.nvidia.com/event-id --no-headers 2>/dev/null | wc -l)"
+if [ "$UNLABELED_COUNT" -lt 0 ]; then UNLABELED_COUNT=0; fi
+JOB_COUNT="$(kubectl get jobs -n "$NS" -l dgxc.nvidia.com/event-id --no-headers 2>/dev/null | wc -l || true)"
 if [ "$CR_COUNT" -gt 0 ] || [ "$JOB_COUNT" -gt 0 ] || [ "$UNLABELED_COUNT" -gt 0 ]; then
   DETAIL="$CR_COUNT managed remediation CR(s), $JOB_COUNT log-collector job(s) reference old event IDs; cleanup.sh --clear-fault-state removes them"
-  [ "$UNLABELED_COUNT" -gt 0 ] && DETAIL="$DETAIL. $UNLABELED_COUNT maintenance-style CR(s) lack the nvsentinel managed-by label and need manual review"
+  if [ "$UNLABELED_COUNT" -gt 0 ]; then DETAIL="$DETAIL. $UNLABELED_COUNT maintenance-style CR(s) lack the nvsentinel managed-by label and need manual review"; fi
   row REVIEW "In-flight remediation" "$DETAIL"
 else
   row PASS "In-flight remediation" "none"
@@ -129,7 +129,7 @@ fi
 # --- 8. leftovers from a previous migration attempt ----------------------------
 STALE=""
 for S in internal-mongodb-users percona-server-mongodb-users mongodb-encryption-key mongodb-keyfile; do
-  kubectl get secret "$S" -n "$NS" >/dev/null 2>&1 && STALE="$STALE $S"
+  if kubectl get secret "$S" -n "$NS" >/dev/null 2>&1; then STALE="$STALE $S"; fi
 done
 if [ -n "$STALE" ]; then
   row REVIEW "Stale Percona objects" "found:$STALE (from an earlier attempt; delete before installing Percona)"
@@ -140,7 +140,7 @@ fi
 # --- 9. runtime state configmaps (informational) --------------------------------
 STATE_CMS=""
 for C in resume-control circuit-breaker; do
-  kubectl get configmap "$C" -n "$NS" >/dev/null 2>&1 && STATE_CMS="$STATE_CMS $C"
+  if kubectl get configmap "$C" -n "$NS" >/dev/null 2>&1; then STATE_CMS="$STATE_CMS $C"; fi
 done
 if [ -n "$STATE_CMS" ]; then
   row PASS "Runtime state" "present:$STATE_CMS (cleanup.sh deletes these)"
