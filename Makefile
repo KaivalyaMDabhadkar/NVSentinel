@@ -508,6 +508,13 @@ helm-lint:
 	@echo ""
 	@# Individual component charts
 	@echo "Validating component charts..."
+	@# NOTE: this loop is currently a no-op. Recipes run under /bin/sh, where
+	@# [[ is not a builtin, so every chart is skipped and the target still
+	@# reports success. Fixing the test alone is not enough: the subcharts
+	@# reference umbrella helpers (nvsentinel.mongodb.certVolume) and umbrella
+	@# globals, so 17 of them cannot be linted standalone at all. Left as-is
+	@# deliberately rather than half-fixed; see helm-test below, which had the
+	@# same bug and is fixed because the chart unit tests must actually run.
 	@for chart_dir in distros/kubernetes/nvsentinel/charts/*/; do \
 		if [[ -f "$$chart_dir/Chart.yaml" ]]; then \
 			chart_name=$$(basename "$$chart_dir"); \
@@ -528,8 +535,17 @@ helm-test:
 		echo "❌ Error: helm-unittest plugin not found. Install with: helm plugin install https://github.com/helm-unittest/helm-unittest"; \
 		exit 1; \
 	fi
+	@# The umbrella's own suite covers the cross-chart consistency checks, which
+	@# no subchart can see. --with-subchart=false because the subchart suites
+	@# address their templates by chart-relative path and are run separately
+	@# below.
+	@if [ -d "distros/kubernetes/nvsentinel/tests" ]; then \
+		echo "Running unit tests for chart: nvsentinel (umbrella)"; \
+		helm unittest --with-subchart=false distros/kubernetes/nvsentinel || exit 1; \
+		echo ""; \
+	fi
 	@for chart_dir in distros/kubernetes/nvsentinel/charts/*/; do \
-		if [[ -d "$$chart_dir/tests" ]]; then \
+		if [ -d "$$chart_dir/tests" ]; then \
 			chart_name=$$(basename "$$chart_dir"); \
 			echo "Running unit tests for chart: $$chart_name"; \
 			helm unittest "$$chart_dir" || exit 1; \
