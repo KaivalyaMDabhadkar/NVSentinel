@@ -231,7 +231,7 @@ func (v *Validator) authenticateUncached(ctx context.Context, token string) (*Id
 		{extraNodeNameKey, &identity.NodeName},
 		{extraNodeUIDKey, &identity.NodeUID},
 	} {
-		value, err := soleExtra(result.Status.User.Extra, field.key)
+		value, err := exactlyOneExtraValue(result.Status.User.Extra, field.key)
 		if err != nil {
 			slog.ErrorContext(ctx, "Rejecting ambiguous TokenReview result",
 				"user", result.Status.User.Username, "key", field.key, "error", err)
@@ -313,14 +313,14 @@ func CreateTokenReview(
 	return result, nil
 }
 
-// soleExtra returns the single value recorded for key in a TokenReview's extra
+// exactlyOneExtraValue returns the single value recorded for key in a TokenReview's extra
 // map, or "" if the key is absent entirely. It is safe on a nil map.
 //
 // These fields identify who the caller is, so an ambiguous answer is refused
 // rather than resolved: Kubernetes records exactly one value for each of them,
 // and picking one of several would let whatever produced the extra list decide
 // which identity this connector enforces against.
-func soleExtra(extra map[string]authv1.ExtraValue, key string) (string, error) {
+func exactlyOneExtraValue(extra map[string]authv1.ExtraValue, key string) (string, error) {
 	values, present := extra[key]
 	if !present {
 		return "", nil
