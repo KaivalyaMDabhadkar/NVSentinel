@@ -288,8 +288,12 @@ class TestTokenAuth:
         with patch("dcgm_diag.health.grpc.insecure_channel"), patch(
             "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
         ):
-            with pytest.raises(OSError):
+            # RuntimeError, not OSError: that is the failure mode send_event
+            # documents and the only one the entrypoint catches.
+            with pytest.raises(RuntimeError) as raised:
                 reporter._send_with_retries(pb.HealthEvents(version=1))
+
+        assert "does-not-exist" in str(raised.value)
 
         stub.HealthEventOccurredV1.assert_not_called()
 
@@ -303,7 +307,7 @@ class TestTokenAuth:
         with patch("dcgm_diag.health.grpc.insecure_channel"), patch(
             "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
         ):
-            with pytest.raises(ValueError) as raised:
+            with pytest.raises(RuntimeError) as raised:
                 reporter._send_with_retries(pb.HealthEvents(version=1))
 
         # The message must name the file, since "Bearer " would come back as a

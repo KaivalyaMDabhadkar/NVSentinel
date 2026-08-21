@@ -492,6 +492,12 @@ kubernetes-distro-lint:
 	$(MAKE) -C distros/kubernetes lint
 
 # Helm chart validation
+# Subcharts that cannot render standalone: they reference umbrella helpers or
+# globals that only exist when rendered as part of the parent chart.
+UMBRELLA_ONLY_CHARTS := csp-health-monitor event-exporter fault-quarantine \
+                       fault-remediation health-events-analyzer mongodb-store \
+                       node-drainer
+
 .PHONY: helm-lint
 helm-lint:
 	@echo "🎯 Validating Helm charts..."
@@ -508,16 +514,20 @@ helm-lint:
 	@echo ""
 	@# Individual component charts
 	@echo "Validating component charts..."
-	@# NOTE: this loop is currently a no-op. Recipes run under /bin/sh, where
-	@# [[ is not a builtin, so every chart is skipped and the target still
-	@# reports success. Fixing the test alone is not enough: the subcharts
-	@# reference umbrella helpers (nvsentinel.mongodb.certVolume) and umbrella
-	@# globals, so 17 of them cannot be linted standalone at all. Left as-is
-	@# deliberately rather than half-fixed; see helm-test below, which had the
-	@# same bug and is fixed because the chart unit tests must actually run.
+	@# Recipes run under /bin/sh, so this uses [ rather than [[.
+	@# UMBRELLA_ONLY_CHARTS reference umbrella helpers (for example
+	@# nvsentinel.mongodb.certVolume) or umbrella globals, so they cannot render
+	@# standalone. They are skipped by name and reported, rather than being
+	@# silently included in a success message they did not earn. They are still
+	@# covered by the umbrella lint above and by helm-test.
 	@for chart_dir in distros/kubernetes/nvsentinel/charts/*/; do \
-		if [[ -f "$$chart_dir/Chart.yaml" ]]; then \
+		if [ -f "$$chart_dir/Chart.yaml" ]; then \
 			chart_name=$$(basename "$$chart_dir"); \
+			case " $(UMBRELLA_ONLY_CHARTS) " in \
+				*" $$chart_name "*) \
+					echo "Skipping $$chart_name (needs umbrella context)"; \
+					continue;; \
+			esac; \
 			echo "Validating chart: $$chart_name"; \
 			helm lint "$$chart_dir" -f distros/kubernetes/nvsentinel/values.yaml || exit 1; \
 			echo "Testing template rendering for: $$chart_name"; \
@@ -525,7 +535,7 @@ helm-lint:
 			echo ""; \
 		fi; \
 	done
-	@echo "✅ All Helm charts validated successfully"
+	@echo "✅ Umbrella chart and all standalone-renderable component charts validated"
 
 # Helm chart unit tests
 .PHONY: helm-test

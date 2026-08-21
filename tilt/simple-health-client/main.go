@@ -26,9 +26,9 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/nvidia/nvsentinel/commons/pkg/grpcclient"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 )
 
@@ -37,36 +37,15 @@ import (
 // so platform-connector's node-binding interceptor requires it to authenticate
 // as an allowlisted cross-node identity. Kept inline rather than importing
 // commons/pkg/grpcclient to keep this dev-only image's dependency set small.
-func tokenInterceptor(tokenPath string) grpc.UnaryClientInterceptor {
-	return func(
-		ctx context.Context,
-		method string,
-		req, reply any,
-		cc *grpc.ClientConn,
-		invoker grpc.UnaryInvoker,
-		opts ...grpc.CallOption,
-	) error {
-		tokenBytes, err := os.ReadFile(tokenPath)
-		if err != nil {
-			return fmt.Errorf("reading SA token from %q: %w", tokenPath, err)
-		}
-
-		ctx = metadata.AppendToOutgoingContext(ctx, "authorization",
-			"Bearer "+string(tokenBytes))
-
-		return invoker(ctx, method, req, reply, cc, opts...)
-	}
-}
-
 func main() {
 	socketPath := "/var/run/nvsentinel.sock"
 	port := "8080"
 	tokenPath := os.Getenv("PLATFORM_CONNECTOR_TOKEN_PATH")
 
+	// The shared client helper, not a local copy: it also refuses an empty
+	// token file rather than sending a bare "Bearer ".
 	dialOpts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
-	if tokenPath != "" {
-		dialOpts = append(dialOpts, grpc.WithUnaryInterceptor(tokenInterceptor(tokenPath)))
-	}
+	dialOpts = append(dialOpts, grpcclient.DialOptions(tokenPath)...)
 
 	log.Printf("Starting health event API server on port %s", port)
 	log.Printf("Using socket path: %s (token auth: %v)", socketPath, tokenPath != "")

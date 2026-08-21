@@ -262,7 +262,9 @@ class TestTokenAuth:
         with patch("nccl_allreduce.health.grpc.insecure_channel"), patch(
             "nccl_allreduce.health.pb_grpc.PlatformConnectorStub", return_value=stub
         ):
-            with pytest.raises(OSError):
+            # RuntimeError, not OSError: send_success/send_failure document
+            # RuntimeError and their callers catch only that.
+            with pytest.raises(RuntimeError):
                 reporter._send_with_retries(pb.HealthEvents(version=1))
 
         stub.HealthEventOccurredV1.assert_not_called()
@@ -277,7 +279,7 @@ class TestTokenAuth:
         with patch("nccl_allreduce.health.grpc.insecure_channel"), patch(
             "nccl_allreduce.health.pb_grpc.PlatformConnectorStub", return_value=stub
         ):
-            with pytest.raises(ValueError) as raised:
+            with pytest.raises(RuntimeError) as raised:
                 reporter._send_with_retries(pb.HealthEvents(version=1))
 
         # The message must name the file, since "Bearer " would come back as a

@@ -421,10 +421,10 @@ helm upgrade nvsentinel <chart> --reuse-values --set global.platformConnectorAut
 That drops the flag, the token volume and the connector's enforcement in one
 step, leaving the pre-feature behavior. Re-enable it once the images are current.
 
-The other direction — old chart, new images — is safe. The flag defaults to
-empty, which disables the client-side token interceptor, and an old chart also
-leaves connector-side enforcement off, so both ends agree that no token is in
-play.
+The other direction, old chart with new images, does not start at all. The
+connector requires `enableNodeBindingAuth` to be present in its ConfigMap and
+refuses to start when it is absent, and an old chart does not write that key.
+Roll the chart and the images together.
 
 
 

@@ -158,6 +158,13 @@ func TestSendEventRereadsTokenOnEveryCall(t *testing.T) {
 		t.Fatalf("got %d calls, want 2", len(captured))
 	}
 
+	// Length-checked before indexing: md.Get returns an empty slice when the
+	// header is absent, and indexing it would panic instead of reporting the
+	// assertion failure.
+	if len(captured[0]) == 0 || len(captured[1]) == 0 {
+		t.Fatalf("got authorization %v, want one value per call", captured)
+	}
+
 	if captured[0][0] != "Bearer token-one" || captured[1][0] != "Bearer token-two" {
 		t.Errorf("got authorization %v, want [Bearer token-one] then [Bearer token-two]", captured)
 	}
@@ -167,8 +174,9 @@ func TestSendEventRejectsPaddedTokenInsteadOfRepairingIt(t *testing.T) {
 	// A configured credential is forwarded verbatim. A token file containing
 	// whitespace is a broken mount, not something to silently repair: trimming
 	// it here would mean this client, rather than whatever wrote the file,
-	// decides what the credential is. gRPC refuses the malformed metadata, so
-	// the call fails locally and nothing is sent.
+	// decides what the credential is. grpc-go forwards the value unchanged and
+	// the receiving HTTP/2 transport refuses the newline, so SendEvent fails and
+	// the request never reaches the RPC handler.
 	socketPath, connector := startTestConnector(t)
 	tokenPath := writeToken(t, "  padded-token\n")
 
@@ -178,7 +186,7 @@ func TestSendEventRejectsPaddedTokenInsteadOfRepairingIt(t *testing.T) {
 	}
 
 	if captured := connector.calls(t); len(captured) != 0 {
-		t.Errorf("a request reached the connector (%v); want none sent", captured)
+		t.Errorf("a request reached the handler (%v); want none delivered", captured)
 	}
 }
 

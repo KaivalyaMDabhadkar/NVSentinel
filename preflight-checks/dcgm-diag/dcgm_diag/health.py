@@ -167,8 +167,9 @@ class HealthReporter:
 
         The kubelet rewrites the projected token file periodically, so the file
         is re-read on every call rather than cached. When a token path is
-        configured but unreadable, the error propagates: a reporter configured
-        to present a token must not fall back to sending without one.
+        configured but unreadable, this raises RuntimeError rather than sending
+        without one: a reporter configured to present a token must not silently
+        fall back to publishing anonymously.
         """
         if not self._token_path:
             return None
@@ -177,14 +178,20 @@ class HealthReporter:
                 token = token_file.read()
         except OSError as e:
             log.error("Failed to read platform-connector token from %s: %s", self._token_path, e)
-            raise
+            # Raised as RuntimeError because that is the failure mode the public
+            # send methods document and the only one callers catch. Letting OSError
+            # escape would bypass their handling and end the check with a traceback
+            # instead of the mapped exit code.
+            raise RuntimeError(
+                f"cannot read platform-connector token from {self._token_path}: {e}"
+            ) from e
         # An empty file is a broken mount, not a credential. Sending "Bearer "
         # gets a generic authentication error back from the server and sends
         # whoever debugs it looking at RBAC and audiences; failing here names
         # the actual problem.
         if not token:
             log.error("Platform-connector token file %s is empty", self._token_path)
-            raise ValueError(f"platform-connector token file {self._token_path} is empty")
+            raise RuntimeError(f"platform-connector token file {self._token_path} is empty")
         return [("authorization", "Bearer " + token)]
 
     def _send_with_retries(self, health_events: pb.HealthEvents) -> bool:

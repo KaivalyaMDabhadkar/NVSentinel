@@ -204,5 +204,5 @@ the workload never starts and the reason is a long way from the values file.
 {{- if gt (float64 $v) 4294967296.0 -}}
 {{- fail (printf "global.platformConnectorAuth.tokenExpirationSeconds is %v, but Kubernetes rejects a projected token lifetime over 2^32 seconds." $v) -}}
 {{- end -}}
-{{- $v -}}
+{{- int64 $v -}}
 {{- end -}}

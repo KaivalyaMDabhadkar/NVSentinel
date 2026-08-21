@@ -1166,8 +1166,6 @@ func TestConnectorTokenSettingsFollowTheChart(t *testing.T) {
 	// so preflight must use the configured values rather than its own copy.
 	cfg := testConfig()
 	cfg.ConnectorTokenAudience = "custom-audience"
-	cfg.ConnectorTokenMountPath = "/var/run/secrets/nvsentinel/platform-connector"
-	cfg.ConnectorTokenExpirationSeconds = 3600
 	cfg.ConnectorTokenMountPath = "/custom/creds"
 	cfg.ConnectorTokenExpirationSeconds = 900
 	injector := &Injector{cfg: cfg}
