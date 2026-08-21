@@ -304,7 +304,7 @@ const (
 func newK8sClientset(kubeconfigPath string) (kubernetes.Interface, error) {
 	restConfig, err := kubeconfig.Load(kubeconfigPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("loading kubernetes auth configuration: %w", err)
 	}
 
 	restConfig.QPS = tokenReviewQPS

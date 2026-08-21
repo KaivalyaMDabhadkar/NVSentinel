@@ -1972,7 +1972,7 @@ class TestPlatformConnectorTokenAuth(unittest.TestCase):
             result = processor.send_health_event_with_retries(self._sample_events())
         return result, stub
 
-    def test_metadata_carries_bearer_token_from_file(self):
+    def test_metadata_carries_bearer_token_from_file(self) -> None:
         processor = self._make_processor(token_path=self._write_token("projected-token"))
 
         result, stub = self._send_with_mock_stub(processor)
@@ -1981,7 +1981,7 @@ class TestPlatformConnectorTokenAuth(unittest.TestCase):
         stub.HealthEventOccurredV1.assert_called_once()
         assert stub.HealthEventOccurredV1.call_args.kwargs["metadata"] == [("authorization", "Bearer projected-token")]
 
-    def test_token_file_is_reread_on_every_call(self):
+    def test_token_file_is_reread_on_every_call(self) -> None:
         """The kubelet rewrites the projected token file, so every send must read it fresh."""
         token_path = self._write_token("token-one")
         processor = self._make_processor(token_path=token_path)
@@ -1993,7 +1993,7 @@ class TestPlatformConnectorTokenAuth(unittest.TestCase):
         assert first_stub.HealthEventOccurredV1.call_args.kwargs["metadata"] == [("authorization", "Bearer token-one")]
         assert second_stub.HealthEventOccurredV1.call_args.kwargs["metadata"] == [("authorization", "Bearer token-two")]
 
-    def test_token_file_is_sent_verbatim(self):
+    def test_token_file_is_sent_verbatim(self) -> None:
         """Kubelet writes the token with no surrounding whitespace, so none is removed.
 
         Verified on-cluster: a projected token file's byte count is identical
@@ -2007,7 +2007,7 @@ class TestPlatformConnectorTokenAuth(unittest.TestCase):
 
         assert stub.HealthEventOccurredV1.call_args.kwargs["metadata"] == [("authorization", "Bearer plain-token")]
 
-    def test_no_metadata_when_token_path_unconfigured(self):
+    def test_no_metadata_when_token_path_unconfigured(self) -> None:
         processor = self._make_processor(token_path=None)
 
         result, stub = self._send_with_mock_stub(processor)
@@ -2016,7 +2016,7 @@ class TestPlatformConnectorTokenAuth(unittest.TestCase):
         stub.HealthEventOccurredV1.assert_called_once()
         assert stub.HealthEventOccurredV1.call_args.kwargs["metadata"] is None
 
-    def test_ambient_env_var_does_not_override_an_explicit_empty_token_path(self):
+    def test_ambient_env_var_does_not_override_an_explicit_empty_token_path(self) -> None:
         """The CLI layer owns PLATFORM_CONNECTOR_TOKEN_PATH; the processor uses what it is given.
 
         Resolving the environment a second time here would let ambient process
@@ -2029,7 +2029,7 @@ class TestPlatformConnectorTokenAuth(unittest.TestCase):
 
         assert stub.HealthEventOccurredV1.call_args.kwargs["metadata"] is None
 
-    def test_missing_token_file_raises_instead_of_sending_without_token(self):
+    def test_missing_token_file_raises_instead_of_sending_without_token(self) -> None:
         """A publisher configured with a token path must not publish when the read fails."""
         processor = self._make_processor(token_path=os.path.join(self._tmpdir, "does-not-exist"))
 
@@ -2058,7 +2058,7 @@ class TestPlatformConnectorTokenAuth(unittest.TestCase):
         assert token_path in str(raised.exception)
         stub.HealthEventOccurredV1.assert_not_called()
 
-    def test_empty_token_file_raises_instead_of_publishing_a_blank_credential(self):
+    def test_empty_token_file_raises_instead_of_publishing_a_blank_credential(self) -> None:
         """An empty file is a broken mount, not a credential."""
         self._assert_blank_token_is_not_published("")
 
@@ -2080,7 +2080,7 @@ class TestPlatformConnectorTokenAuth(unittest.TestCase):
             result = processor.send_health_event_with_retries(self._sample_events())
         return result, stub
 
-    def test_non_retryable_status_is_not_retried(self):
+    def test_non_retryable_status_is_not_retried(self) -> None:
         """A deterministic rejection answers the same way every time, so retrying only stalls."""
         for code in (
             grpc.StatusCode.PERMISSION_DENIED,
@@ -2098,7 +2098,7 @@ class TestPlatformConnectorTokenAuth(unittest.TestCase):
                 # is re-emitted on the next poll rather than being swallowed.
                 assert processor.entity_cache == {}
 
-    def test_transient_status_is_retried(self):
+    def test_transient_status_is_retried(self) -> None:
         for code in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED):
             with self.subTest(code=code):
                 processor = self._make_processor(token_path=self._write_token("projected-token"))
