@@ -182,9 +182,7 @@ class HealthReporter:
             # send methods document and the only one callers catch. Letting OSError
             # escape would bypass their handling and end the check with a traceback
             # instead of the mapped exit code.
-            raise RuntimeError(
-                f"cannot read platform-connector token from {self._token_path}: {e}"
-            ) from e
+            raise RuntimeError(f"cannot read platform-connector token from {self._token_path}: {e}") from e
         # An empty file is a broken mount, not a credential. Sending "Bearer "
         # gets a generic authentication error back from the server and sends
         # whoever debugs it looking at RBAC and audiences; failing here names

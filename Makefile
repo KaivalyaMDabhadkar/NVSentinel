@@ -535,7 +535,17 @@ helm-lint:
 			echo ""; \
 		fi; \
 	done
-	@echo "✅ Umbrella chart and all standalone-renderable component charts validated"
+	@# The charts in UMBRELLA_ONLY_CHARTS ship disabled, so neither the parent
+	@# lint above (which renders defaults) nor the loop above exercises them.
+	@# Render once with every dependency condition turned on so they are
+	@# validated with the parent chart context they need. The conditions are
+	@# read from Chart.yaml so a newly added chart is picked up automatically.
+	@echo "Validating disabled-by-default charts with full context..."
+	helm template nvsentinel distros/kubernetes/nvsentinel \
+		$$(grep -oE 'condition: *[a-zA-Z0-9_.]+' distros/kubernetes/nvsentinel/Chart.yaml \
+			| awk '{print "--set "$$2"=true"}' | tr '\n' ' ') >/dev/null
+	@echo ""
+	@echo "✅ Parent chart, standalone-renderable component charts, and all charts with every dependency enabled validated"
 
 # Helm chart unit tests
 .PHONY: helm-test
