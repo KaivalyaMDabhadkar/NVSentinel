@@ -238,6 +238,13 @@ batch, a unique index enforces it, and inserts run unordered with duplicate
 keys counted as success. A retry then fills in exactly the missing events
 and never stores anything twice, on any replica.
 
+Three contract details. The key is stored with the batch in the ring
+buffer, so every retry of that batch reuses it. The key follows the usual
+Idempotency-Key semantics: the client must resend the same payload under
+the same key, because the server detects duplicates by key alone and does
+not compare payloads. And the unique index must exist before this mode is
+enabled, which the rollout plan sequences.
+
 **Normal write:**
 
 ```mermaid
@@ -291,10 +298,15 @@ then calls `store-client` `InsertMany`, exactly as the store connector does
 today. Event transformation and deduplication stay in the platform-connector
 pipeline, unchanged; the nvs-api-server is a thin persistence endpoint. The
 nvs-api-server configures an explicit `maxPoolSize` on its database client.
-(Today no component sets pool limits for MongoDB; the driver default of 100
-applies. For PostgreSQL the pool limits are currently hardcoded in
-`store-client`, so honoring this setting there requires making them
-configurable, a small change.)
+Two small `store-client` changes are prerequisites for this design. First,
+pool limits must become configurable so that `maxPoolSize` truly applies:
+today MongoDB gets the driver default of 100 and PostgreSQL is hardcoded to
+25, and the connection numbers in this document assume the configured pool
+is what actually runs. Second, `InsertMany` must support unordered inserts
+and report per-document duplicate-key errors: MongoDB's default is ordered,
+which stops at the first duplicate and would break the retry mechanism
+above, and the current interface exposes neither the option nor the error
+detail.
 
 Two practical notes for scale:
 
@@ -357,11 +369,18 @@ The worst case is bounded: 100,000 pods all writing in every window is
 per replica at 3 replicas. That assumes every node produces fresh events
 every 2 minutes, which deduplication makes rare: with 5% of nodes writing
 per window the rate is about 40 per second, and a quiet fleet is near zero.
-If the ceiling ever matters, widen the cache window: tokens live an hour,
-so 10 minutes is safe and divides the ceiling by five (the window is a
-fixed constant in grpcauth today, a one-line change). Cross-node batches
-also validate their attached publisher token, but those come from four
-single-replica publishers and the same cache covers them.
+Caches are per replica, but each pod holds one connection and talks to one
+replica at a time, so this ceiling holds in steady state; a reconnect wave
+(connection age or idle closures) can briefly multiply misses toward pods
+times replicas, about 2,500 per second at 3 replicas, until the caches
+rewarm, which the reconnect jitter spreads out. If the ceiling ever
+matters, the cache window can be widened (a fixed constant in grpcauth
+today, a one-line change), but that is a trade, not a free win: a cached
+verdict also skips the check that notices a deleted pod, so the cache
+window is the revocation blind spot. Ten minutes divides the ceiling by
+five and accepts a deleted pod's token for up to ten minutes. Cross-node
+batches also validate their attached publisher token, but those come from
+four single-replica publishers and the same cache covers them.
 
 For scale context, this is not a new kind of load. With publisher
 authentication enabled, platform-connector already does about one
@@ -452,9 +471,10 @@ to start.
 
 One boundary worth stating plainly: token validation caches are per replica,
 so a mass reconnect wave briefly multiplies TokenReview calls to the
-Kubernetes API server. The `commons/pkg/grpcauth` cache bounds this, and the
-existing auth metrics already distinguish an unavailable validator from real
-auth failures.
+Kubernetes API server (the arithmetic, including the pods times replicas
+ceiling, is in the authentication section). The `commons/pkg/grpcauth`
+cache bounds this, and the existing auth metrics already distinguish an
+unavailable validator from real auth failures.
 
 ### Helm and configuration
 
@@ -481,27 +501,35 @@ writes (today's behavior, the default) or writes via the nvs-api-server.
 ### Rollout plan
 
 1. Ship the nvs-api-server disabled. Nothing changes.
-2. Enable it and switch the platform-connectors store path to the gRPC write
-   API. This is the step where database connections collapse.
-3. Rollback is flipping the values back; direct database access keeps working
-   throughout the migration.
+2. Enable the nvs-api-server on its own. It comes up, creates or verifies
+   the idempotency unique index, connects to the database and reports
+   healthy, while every client still writes directly. Nothing depends on it
+   yet.
+3. Switch the platform-connectors store path to the gRPC write API. This is
+   the step where database connections collapse. The DaemonSet keeps its
+   database credentials mounted through this phase, so rollback stays a
+   pure value flip with nothing to re-provision.
+4. Rollback at any point is flipping the values back; direct database
+   access keeps working throughout the migration.
+5. After the new path has been stable for a release, remove the database
+   credentials from the DaemonSet. Only this step realizes the credential
+   cleanup benefit, and from here a rollback first needs the credentials
+   restored.
 
 ```mermaid
 flowchart LR
-    P1["1 · Ship<br/>disabled by default<br/>no traffic changes"]
-    FLIP{{"Helm values<br/>flip"}}
-    P2["2 · Enable + switch<br/>platform-connectors<br/>write through gRPC"]
-    RESULT["Steady state<br/>fleet connections collapse<br/>central services stay direct"]
+    P1["1 · Ship<br/>disabled by default"]
+    P2["2 · Enable server only<br/>index + health verified<br/>no clients yet"]
+    P3["3 · Switch write path<br/>connections collapse<br/>creds kept for rollback"]
+    P5["5 · Stable for a release<br/>remove DaemonSet creds"]
 
-    P1 --> FLIP --> P2 --> RESULT
-    P2 -. "rollback<br/>flip values back" .-> P1
+    P1 --> P2 --> P3 --> P5
+    P3 -. "4 · rollback<br/>flip values back" .-> P2
 
     classDef phase fill:#DBEAFE,stroke:#2563EB,color:#172554,stroke-width:1.5px
-    classDef action fill:#FEF3C7,stroke:#D97706,color:#451A03,stroke-width:1.5px
     classDef result fill:#DCFCE7,stroke:#16A34A,color:#052E16,stroke-width:2px
-    class P1,P2 phase
-    class FLIP action
-    class RESULT result
+    class P1,P2,P3 phase
+    class P5 result
 ```
 
 ### Future scope: a pass-through tunnel for the central services
@@ -594,8 +622,10 @@ section is documented as interim.
   `commons/pkg/grpcclient`), and `store-client` for the actual writes.
 - Database credentials leave the fleet. Today, in deployments with X.509
   auth, every node's platform-connector pod carries a database client
-  certificate; after this change no DaemonSet pod does, and rotation on the
-  write path touches 3 pods instead of the whole fleet.
+  certificate. After the rollout's final step no DaemonSet pod does (the
+  credentials stay mounted during the transition so rollback stays a value
+  flip), and rotation on the write path then touches 3 pods instead of the
+  whole fleet.
 - The write path becomes datastore-agnostic on the wire: platform-connectors
   no longer knows or cares whether the backend is MongoDB or PostgreSQL. The
   PostgreSQL provider benefits equally (its per-client pool is hardcoded to
@@ -720,9 +750,10 @@ not work.
 
 ## Notes
 
-- Non-goal: changing the datastore schema, the `store-client` interface, or
-  the event pipeline (transformation and deduplication stay in
-  platform-connectors).
+- Non-goal: changing the event pipeline (transformation and deduplication
+  stay in platform-connectors) or the shape of stored events, beyond the
+  added idempotency key and its unique index. The `store-client` changes
+  are limited to the two prerequisites named in the write API section.
 - Non-goal: a general query API. The central services keep their direct
   database connections in this iteration.
 - Non-goal: a pooled MongoDB-protocol endpoint. If one is ever needed,
