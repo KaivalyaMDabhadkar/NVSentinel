@@ -220,26 +220,23 @@ the path being replaced:
   change and is out of scope here.
 
 Because the client retries, a batch could be stored twice if a write
-succeeded but the acknowledgement was lost. Each batch therefore carries a
-client-generated idempotency key, sent as gRPC metadata under an
-`idempotency-key` header, mirroring the standard HTTP Idempotency-Key
-convention; `HealthEvents` itself stays unchanged and existing callers stay
-compatible. The nvs-api-server refuses to apply the same batch twice, and the
-duplicate check must live in the datastore itself: a retried batch may arrive
-at a different nvs-api-server replica, so an in-memory record of applied keys
-on one replica cannot catch it.
+succeeded but the OK reply got lost. To prevent that, each batch carries a
+client-generated idempotency key, sent as an `idempotency-key` gRPC header
+(the same convention as the HTTP Idempotency-Key header; `HealthEvents`
+itself does not change). The nvs-api-server refuses to store the same batch
+twice. This check has to live in the database itself, because a retry may
+land on a different replica, and one replica's memory knows nothing about
+what another replica stored.
 
-Partial application is also possible, which is why the mechanism below is
-per event rather than per batch. A MongoDB multi-document insert is not
-atomic across documents: only each individual document insert is atomic, so
-an error or a dropped connection mid-call leaves the documents written so
-far in place. (The PostgreSQL provider can wrap a batch in a transaction,
-but the design does not depend on that.) Concretely, each event in a batch
-gets a unique key derived from the batch's idempotency key and its position
-in the batch, a unique index enforces it, and inserts run unordered with
-duplicate-key results treated as success. That way a retry, on any replica,
-even after a batch was only partially applied, stores exactly the missing
-events and nothing twice.
+The check is per event, not per batch, because a batch can be stored
+partially. MongoDB does not insert a batch atomically: each document insert
+is atomic on its own, so if the call fails or the connection drops halfway,
+the documents written so far stay written. (PostgreSQL can wrap a batch in
+a transaction, but the design does not rely on that.) So each event gets a
+unique key made from the batch's idempotency key plus its position in the
+batch, a unique index enforces it, and inserts run unordered with duplicate
+keys counted as success. A retry then fills in exactly the missing events
+and never stores anything twice, on any replica.
 
 **Normal write:**
 
@@ -332,21 +329,19 @@ janitor-provider (ADR-030):
 - Tokens must be pod-bound, so a token extracted from a manifest or minted
   without a pod reference is refused.
 
-This means a health event is authenticated twice on its way to the database,
-once at each hop, and that is deliberate: platform-connector validates the
-publisher (it must, because the same events also update node conditions
-through the k8s connector, in parallel with the store path), and the
-nvs-api-server validates that batches really come from platform-connector's
-pipeline rather than from anything that can reach its port. This is the same
-hop-by-hop pattern as the janitor to janitor-provider connection. It is also
-an accepted interim state: the long-term direction (see "Future scope:
-absorbing platform-connector into the nvs-api-server") ends with publishers
-authenticating directly to the central service, at which point the event
-path is back to a single TokenReview.
+A health event is therefore authenticated twice on its way to the database,
+once at each hop, and that is deliberate. Platform-connector must validate
+the publisher, because the same events also update node conditions through
+the k8s connector. The nvs-api-server must validate its own caller, so that
+only platform-connector's pipeline can write, not anything that happens to
+reach its port. This is the same hop-by-hop pattern as the janitor to
+janitor-provider connection. It is also an interim state: in the long-term
+plan ("Future scope: absorbing platform-connector into the nvs-api-server"),
+publishers authenticate directly to the central service, and the event path
+is back to a single TokenReview.
 
-The second review is cheap, and the numbers are worth writing down. The
-shared validator caches a positive verdict for 2 minutes (`cacheTTL` in
-`commons/pkg/grpcauth`), so:
+The second review is cheap. The shared validator caches a positive verdict
+for 2 minutes (`cacheTTL` in `commons/pkg/grpcauth`), so:
 
 - A cache hit is an in-memory lookup on the nvs-api-server: no network call,
   effectively free. Every request a pod makes after its first in a window is
@@ -357,47 +352,72 @@ shared validator caches a positive verdict for 2 minutes (`cacheTTL` in
   actually sends a batch. Only the request that triggers the miss waits
   those few milliseconds; every other request in the window is unaffected.
 
-The worst case is therefore bounded: 100,000 pods all writing in every
-window is 100,000 / 120 s, about 830 TokenReviews per second fleet-wide
-(about 280 per nvs-api-server replica at 3 replicas). That ceiling assumes every
-single node produces fresh events every 2 minutes, which deduplication in
-platform-connector makes rare in a healthy fleet: if 5% of nodes write in a
-given window the rate is about 40 reviews per second, and a quiet fleet
-approaches zero. If the ceiling ever matters, the cache window is the lever:
-tokens live for an hour, so remembering verdicts for 10 minutes instead of 2
-is safe and divides the ceiling by five (the window is currently a fixed
-constant in grpcauth, so widening it is a one-line change).
+The worst case is bounded: 100,000 pods all writing in every window is
+100,000 / 120 s, about 830 TokenReviews per second fleet-wide, or about 280
+per replica at 3 replicas. That assumes every node produces fresh events
+every 2 minutes, which deduplication makes rare: with 5% of nodes writing
+per window the rate is about 40 per second, and a quiet fleet is near zero.
+If the ceiling ever matters, widen the cache window: tokens live an hour,
+so 10 minutes is safe and divides the ceiling by five (the window is a
+fixed constant in grpcauth today, a one-line change). Cross-node batches
+also validate their attached publisher token, but those come from four
+single-replica publishers and the same cache covers them.
 
-For context, this is not a new kind of load. In deployments with publisher
-authentication enabled, platform-connector already performs about one
+For scale context, this is not a new kind of load. With publisher
+authentication enabled, platform-connector already does about one
 TokenReview per monitor pod per window (monitors re-send results
-continuously, which is why deduplication exists), and with roughly 3
-node-local monitors per node that is about three times the review volume the
-nvs-api-server adds at the same fleet size. The second review is an increment on
-an existing, already-cached pattern, not a new pattern.
+continuously, which is why deduplication exists). At roughly 3 node-local
+monitors per node, that is about three times what the nvs-api-server adds.
 
-Per-event node binding (a caller may only report events about its own node)
-is enforced at the platform-connector layer, which knows which node each
-publisher runs on. The nvs-api-server does not repeat the check, because a
-platform-connector pod legitimately forwards cross-node events accepted
-upstream from allowlisted publishers, and the nvs-api-server cannot tell
-those apart from the rest without the original publisher's token.
+Per-event node binding is enforced twice, so that a stolen
+platform-connector token is not enough to forge events about other nodes:
 
-That leaves a real but bounded gap: an attacker with root on a GPU node can
-steal that node's platform-connector token and call the write API directly
-with events naming other nodes. Three things bound it: the token expires
-within the hour and dies with its pod, the caller allowlist means only
-platform-connector identities can write at all, and the same attacker today
-steals a database certificate instead, which grants unbounded reads and
-writes with no expiry, so the gap is strictly narrower than the status quo.
-Closing it fully requires exactly what the second absorption stage delivers:
-publishers presenting their own tokens directly to the central service,
-where the node claim inside the token is checked against the node named in
-the event. Re-checking earlier than that, by forwarding publisher tokens
-alongside batches, does not survive the buffered path (see the rejected
-alternative below): a forwarded token can expire while its batch waits and
-retries, and any fallback for expired tokens is the same door an attacker
-would walk through.
+- At the platform-connector layer, as today: a publisher may only report
+  events about its own node unless its identity is on the cross-node
+  allowlist (`docs/configuration/authentication.md`). Nothing changes here.
+- At the nvs-api-server, again: the caller's pod-bound token names the node
+  it was minted on, and every event in the batch must name that same node.
+  A token stolen from node X therefore cannot submit an event about node Y,
+  regardless of what the batch claims.
+
+Legitimate cross-node events need an exception, and it must be one a stolen
+platform-connector token cannot use. These events come from the four
+allowlisted cluster-wide publishers (csp-health-monitor,
+kubernetes-object-monitor, slurm-drain-monitor, health-events-analyzer).
+Each batch is one publisher's submission, so platform-connector knows which
+batches are cross-node. For those batches only, it attaches the publisher's
+own token as gRPC metadata, and the nvs-api-server allows foreign node names
+only when that attached token checks out: valid, pod-bound, and on the
+cross-node allowlist. The attached token is never accepted as a caller
+credential; callers must always present a platform-connector token minted
+for the nvs-api-server audience. On its own, an attached token is inert at
+the nvs-api-server.
+
+One precondition makes the whole argument work: the cross-node publishers
+must run on system or control-plane nodes, away from tenant GPU nodes. The
+publisher auth guide already directs this, but as guidance; the charts
+should pin it with a nodeSelector so the guarantee does not depend on
+scheduling luck. If a cross-node publisher runs on a GPU node, the
+protection degrades to exactly that node.
+
+Why this closes the gap: with that placement, the cross-node publishers'
+tokens never exist on GPU nodes and cannot be stolen from one. An
+attacker with root on a GPU node holds only that node's platform-connector
+token, and can therefore only submit events about the node they already
+control. An attacker who compromises a system node could steal a cross-node
+publisher's token, but that attacker already controls the publisher itself,
+so the attached token gives them nothing new.
+
+Two details. Expiry: an attached token could expire while its batch waits
+out an outage in the ring buffer, so the cross-node publishers use a longer
+token lifetime (the existing `tokenExpirationSeconds` knob; hours is fine
+on system nodes), which makes that practically unreachable. If it happens
+anyway, the batch is rejected and retried like any other failure.
+Observability: the nvs-api-server counts every batch rejected for naming a
+foreign node under a dedicated violation reason, the same label pattern the
+publisher auth metrics already use, and logs the caller identity. An
+attempted forgery shows up immediately, without a per-pod metric label that
+would explode cardinality at fleet scale.
 
 The token crosses the pod network in gRPC metadata, so the nvs-api-server
 serves TLS by default: cert-manager issues its server certificate and
@@ -508,14 +528,16 @@ is network control:
   migration.
 - Every database connection becomes attributable to a Kubernetes identity.
 
-Two implementation findings are recorded now so they are not rediscovered
-later. First, a naive tunnel would be silently bypassed for replica sets:
-drivers discover the member addresses from the replica set itself and dial
-each member directly, so the client side must be a custom dialer in
-`store-client` that routes every connection through the tunnel with its true
-destination named in the preamble. Second, the nvs-api-server must check
-requested destinations against its configured database backends, otherwise
-the tunnel becomes an authenticated relay to anywhere on the network.
+Two findings, written down now so they are not rediscovered later:
+
+- A naive tunnel gets silently bypassed for replica sets: drivers discover
+  the member addresses from the replica set itself and dial each member
+  directly. The client side must therefore be a custom dialer in
+  `store-client` that routes every connection through the tunnel, naming
+  the true destination in the preamble.
+- The nvs-api-server must check requested destinations against its
+  configured database backends. Otherwise the tunnel is an authenticated
+  relay to anywhere on the network.
 
 Triggers that would revive this work: a deployment with an external managed
 database, a target environment without NetworkPolicy enforcement, a planned
@@ -534,23 +556,28 @@ so it keeps its name as the role grows. The staging:
    other duty.
 2. Publisher authentication moves: monitors publish directly to the central
    service over the network, with tokens minted for its audience. This is
-   the point where the event path drops from two TokenReviews back to one.
+   the point where the event path drops from two TokenReviews back to one,
+   and the cross-node token attachment in the authentication section becomes
+   unnecessary.
 3. Node condition updates (the k8s connector) move to the central service.
 4. The remaining pipeline work (transformation, deduplication) and whatever
    else is left moves, after which the DaemonSet is deprecated.
 
-Each of those stages needs its own design. Known challenges are recorded now
-so they are not rediscovered later: monitors currently gate their sends on
-the local Unix socket existing, which is how they detect that
-platform-connector is up, so the liveness signal needs a network equivalent;
-publishers without tokens are currently accepted on the socket and pinned to
-the reporting node, which has no network equivalent, so tokens become
-mandatory before authentication can move; node binding changes meaning from
-"the token was minted on my node" to "the token was minted on the node the
-event names"; node-name stamping for local callers needs a replacement; and
-connection count grows from one platform-connector per node to several
-monitor pods per node dialing the central service (cheap HTTP/2 connections,
-but worth sizing deliberately).
+Each stage needs its own design. Known challenges, written down now so they
+are not rediscovered later:
+
+- Monitors only send when the local Unix socket exists; that is how they
+  detect that platform-connector is up. A networked receiver needs a new
+  liveness signal.
+- Publishers without tokens are accepted on the socket and pinned to the
+  node. There is no network equivalent, so tokens become mandatory before
+  authentication can move.
+- Node binding changes meaning: from "the token was minted on my node" to
+  "the token was minted on the node the event names".
+- Node-name stamping for local callers needs a replacement.
+- Connections grow from one platform-connector per node to several monitor
+  pods per node dialing the central service. HTTP/2 connections are cheap,
+  but this needs deliberate sizing.
 
 None of this changes anything in the current iteration. It is direction, not
 commitment, and it is why the two-TokenReview state in the authentication
@@ -583,6 +610,9 @@ section is documented as interim.
 - Connection count and database connection memory stop growing with the fleet.
 - Per-request authentication on the write path, using the standard NVSentinel
   token mechanism, where today a stolen database credential is enough.
+- Node binding survives token theft: a platform-connector token stolen from a
+  node can only submit events about that node, and cross-node batches require
+  the original publisher's attached token, which never exists on GPU nodes.
 - The read path is untouched: an nvs-api-server outage cannot affect change
   streams or any central service, only delay writes.
 - A foundation for later iterations (the pass-through tunnel, or purpose-built
@@ -596,6 +626,8 @@ section is documented as interim.
 - The write path gains one network hop of latency.
 - The nvs-api-server must handle very many concurrent gRPC connections at large
   fleet sizes and becomes a component to size, monitor and page on.
+- The cross-node token attachment is interim machinery by design: absorption
+  stage 2 makes it unnecessary, so it is built knowing it will be removed.
 
 ### Mitigations
 
@@ -677,6 +709,14 @@ window, not one per request (the arithmetic is in the authentication
 section). The eventual single-review state comes from the absorption plan
 under "Future scope", where publishers authenticate directly to the central
 service, not from forwarding tokens.
+
+This is different from what the design does adopt for node binding:
+cross-node batches carry the publisher's attached token as extra proof, but
+it never acts as a caller credential and never replaces either hop's own
+authentication. The expiry problem is manageable there because only four
+system-node publishers are involved and their tokens can live longer.
+Applying the same trick to every publisher, as this alternative would, does
+not work.
 
 ## Notes
 
