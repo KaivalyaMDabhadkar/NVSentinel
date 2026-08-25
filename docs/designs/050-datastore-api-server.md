@@ -398,6 +398,38 @@ from: the fake-router handshake and the small cursor-to-server and
 session-to-server pinning caches are the hard-won pieces, and the license
 allows lifting them. That is future work, not this design.
 
+### Scaling and availability
+
+The api-server scales horizontally, and two design choices above exist to
+keep that true:
+
+- It is stateless. All durable state, including the idempotency check, lives
+  in the database, so any replica can serve any request and a retried batch
+  can land on any replica.
+- `MaxConnectionAge` keeps redistributing the long-lived client connections,
+  so a newly added replica picks up its share of load within minutes instead
+  of sitting idle behind connections pinned to older replicas.
+
+Adding a replica costs the database a small, fixed amount: its bounded pool
+(~10 connections) plus a few heartbeat connections, call it ~13. Capacity
+therefore grows with replica count while database connections stay a small
+multiple of it, and replica count grows with load, never with fleet size. A
+horizontal pod autoscaler is possible later; a fixed replica count is enough
+to start.
+
+Two boundaries worth stating plainly:
+
+- Tunnel connections are pinned to the replica that carries them; a live
+  byte splice cannot be moved. Scaling out helps new connections only, and
+  scaling in (or restarting a replica) snaps the tunnels it carries. The
+  clients' drivers redial through a surviving replica and change streams
+  resume from their tokens, so the effect is a brief reconnect, bounded by
+  the PodDisruptionBudget and graceful drain during rollouts.
+- Token validation caches are per replica, so a mass reconnect wave briefly
+  multiplies TokenReview calls to the Kubernetes API server. The
+  `commons/pkg/grpcauth` cache bounds this, and the existing auth metrics
+  already distinguish an unavailable validator from real auth failures.
+
 ### Helm and configuration
 
 A new deployment in the NVSentinel chart, disabled by default:
