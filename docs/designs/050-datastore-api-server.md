@@ -190,9 +190,14 @@ flowchart LR
 ```
 
 Database connections from the fleet become constant: at 100k nodes, the write
-path goes from roughly 300,000 connections down to roughly 40 (3 replicas
-with a pool of ~10 each, plus their own heartbeats). The central services'
-~20 direct connections stay exactly as they are today.
+path goes from roughly 300,000 connections down to a few dozen. One detail
+matters for the arithmetic: MongoDB applies `maxPoolSize` per server, not
+per client. With a write-only workload the pool fills on the primary, so
+each nvs-api-server replica holds about 10 pooled connections plus a few
+monitoring connections to each replica set member: call it ~16 per replica,
+about 50 total at 3 replicas. Even the theoretical ceiling, with pools
+filled on every member of a 3-member set, is about 110. The central
+services' ~20 direct connections stay exactly as they are today.
 
 ### The write API
 
@@ -231,8 +236,13 @@ what another replica stored.
 The check is per event, not per batch, because a batch can be stored
 partially. MongoDB does not insert a batch atomically: each document insert
 is atomic on its own, so if the call fails or the connection drops halfway,
-the documents written so far stay written. (PostgreSQL can wrap a batch in
-a transaction, but the design does not rely on that.) So each event gets a
+the documents written so far stay written. (A database transaction would
+make the batch all-or-nothing on both providers and is an acceptable
+implementation alternative; the idempotency key is needed either way,
+because a lost OK can follow a fully committed batch, and a retried
+committed batch then simply hits duplicates and counts as stored. A MongoDB
+bulk write is not a transaction; it has the same per-document semantics as
+insertMany.) So each event gets a
 unique key made from the batch's idempotency key plus its position in the
 batch, a unique index enforces it, and inserts run unordered with duplicate
 keys counted as success. A retry then fills in exactly the missing events
@@ -243,7 +253,10 @@ buffer, so every retry of that batch reuses it. The key follows the usual
 Idempotency-Key semantics: the client must resend the same payload under
 the same key, because the server detects duplicates by key alone and does
 not compare payloads. And the unique index must exist before this mode is
-enabled, which the rollout plan sequences.
+enabled, which the rollout plan sequences. The index is partial, covering
+only documents that carry the key, so records written before this design
+are exempt and need no backfill; both MongoDB and PostgreSQL support
+partial unique indexes.
 
 **Normal write:**
 
@@ -378,9 +391,19 @@ matters, the cache window can be widened (a fixed constant in grpcauth
 today, a one-line change), but that is a trade, not a free win: a cached
 verdict also skips the check that notices a deleted pod, so the cache
 window is the revocation blind spot. Ten minutes divides the ceiling by
-five and accepts a deleted pod's token for up to ten minutes. Cross-node
-batches also validate their attached publisher token, but those come from
-four single-replica publishers and the same cache covers them.
+five and accepts a deleted pod's token for up to ten minutes.
+
+Two more constants belong in this arithmetic. The verdict cache holds 4,096
+entries per replica (`cacheMaxEntries`), while a 100k fleet puts roughly
+33,000 active tokens on each of 3 replicas, so the capacity must be raised
+to fleet scale (like the TTL, it is a constant today), or evictions will
+create misses well beyond the once-per-window estimate. And a failed
+TokenReview retries with backoff inside an 8 second window, so during a
+control-plane incident the API request budget can briefly exceed the steady
+miss rate; the existing validator metrics already separate that state from
+real auth failures. Cross-node batches also validate their attached
+publisher token, but those come from four single-replica publishers and the
+same cache covers them.
 
 For scale context, this is not a new kind of load. With publisher
 authentication enabled, platform-connector already does about one
@@ -410,7 +433,11 @@ only when that attached token checks out: valid, pod-bound, and on the
 cross-node allowlist. The attached token is never accepted as a caller
 credential; callers must always present a platform-connector token minted
 for the nvs-api-server audience. On its own, an attached token is inert at
-the nvs-api-server.
+the nvs-api-server. Attached tokens also never sit on GPU nodes: the
+existing node-claim check means a publisher can only publish to the
+platform-connector on its own node, so cross-node batches, and the tokens
+attached to them, are queued only in ring buffers on those same system
+nodes.
 
 One precondition makes the whole argument work: the cross-node publishers
 must run on system or control-plane nodes, away from tenant GPU nodes. The
@@ -463,7 +490,8 @@ keep that true:
   of sitting idle behind connections pinned to older replicas.
 
 Adding a replica costs the database a small, fixed amount: its bounded pool
-(~10 connections) plus a few heartbeat connections, call it ~13. Capacity
+(~10 connections, filled on the primary) plus monitoring connections to
+each replica set member, call it ~16. Capacity
 therefore grows with replica count while database connections stay a small
 multiple of it, and replica count grows with load, never with fleet size. A
 horizontal pod autoscaler is possible later; a fixed replica count is enough
@@ -502,9 +530,10 @@ writes (today's behavior, the default) or writes via the nvs-api-server.
 
 1. Ship the nvs-api-server disabled. Nothing changes.
 2. Enable the nvs-api-server on its own. It comes up, creates or verifies
-   the idempotency unique index, connects to the database and reports
-   healthy, while every client still writes directly. Nothing depends on it
-   yet.
+   the partial idempotency unique index (existing records lack the key and
+   are exempt, so there is no backfill), connects to the database and
+   reports healthy, while every client still writes directly. Nothing
+   depends on it yet.
 3. Switch the platform-connectors store path to the gRPC write API. This is
    the step where database connections collapse. The DaemonSet keeps its
    database credentials mounted through this phase, so rollback stays a
@@ -614,7 +643,7 @@ section is documented as interim.
 ## Rationale
 
 - Database connections stop growing with the fleet: at 100k nodes the write
-  path drops from roughly 300,000 connections to roughly 40, freeing about
+  path drops from roughly 300,000 connections to about 50, freeing about
   60 GiB of database memory, while the central services stay unchanged.
 - The pieces already exist and are proven: the `PlatformConnector` gRPC
   service and its client (ADR-033), the ServiceAccount token auth stack from
