@@ -306,10 +306,16 @@ flowchart LR
     class DONE success
 ```
 
-On the nvs-api-server side, the handler validates the caller (next section) and
-then calls `store-client` `InsertMany`, exactly as the store connector does
-today. Event transformation and deduplication stay in the platform-connector
-pipeline, unchanged; the nvs-api-server is a thin persistence endpoint. The
+On the nvs-api-server side, the handler validates the caller (next section)
+and then writes the same documents the store connector writes today,
+including the same per-event wrapping: status, creation timestamp and trace
+metadata are added before `InsertMany`, with the conversion code lifted from
+the store connector so a document looks identical whichever path wrote it.
+Two small semantic shifts come with that move: the creation timestamp is now
+assigned at the nvs-api-server rather than on the node, and the trace
+context arrives via normal gRPC propagation. Event transformation and
+deduplication stay in the platform-connector pipeline, unchanged; beyond the
+wrapping, the nvs-api-server is a thin persistence endpoint. The
 nvs-api-server configures an explicit `maxPoolSize` on its database client.
 Two small `store-client` changes are prerequisites for this design. First,
 pool limits must become configurable so that `maxPoolSize` truly applies:
@@ -438,6 +444,16 @@ existing node-claim check means a publisher can only publish to the
 platform-connector on its own node, so cross-node batches, and the tokens
 attached to them, are queued only in ring buffers on those same system
 nodes.
+
+Mechanically, the attachment check is a second validator, not a mode on the
+first. The grpcauth validator is built for one audience, so the
+nvs-api-server runs two instances of it: one for callers (the nvs-api-server
+audience, allowlisting the platform-connector identity) and one for
+attachments (the platform-connector audience, allowlisting the cross-node
+identities, with its own cache). The attached token travels under its own
+metadata key and is only ever handed to the attachment validator, which
+makes "never a caller credential" true by construction rather than by
+policy.
 
 One precondition makes the whole argument work: the cross-node publishers
 must run on system or control-plane nodes, away from tenant GPU nodes. The
