@@ -409,8 +409,11 @@ count grows with load, never with fleet size. A horizontal pod autoscaler
 is possible later; a fixed replica count is enough to start.
 
 The other scale concern is TokenReview, and the second review is cheap. The
-shared validator caches a positive verdict for 2 minutes (`cacheTTL` in
-`commons/pkg/grpcauth`), so:
+token's lifetime (1 hour; longer for the four cross-node publishers) only
+governs when kubelet rotates the token file. The review rate is set by the
+verdict cache instead: 2 minutes (`cacheTTL` in `commons/pkg/grpcauth`),
+identical for every token. "Window" below means that 2 minute period. The
+cache is keyed per token, one token per pod, so:
 
 - A cache hit is an in-memory lookup on the nvs-api-server: no network call,
   effectively free. Every request a pod makes after its first in a window is
@@ -420,6 +423,9 @@ shared validator caches a positive verdict for 2 minutes (`cacheTTL` in
   can cause at most one miss per 2 minutes, and only in windows where it
   actually sends a batch. Only the request that triggers the miss waits
   those few milliseconds; every other request in the window is unaffected.
+
+Rates assume the 100k node target; the formula is pods writing per window
+divided by 120 s, so 10k nodes tops out around 83 per second.
 
 | Fleet activity                                 | TokenReviews per second |
 |------------------------------------------------|-------------------------|
