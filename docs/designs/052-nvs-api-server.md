@@ -1,6 +1,9 @@
-# ADR-050: NVS API Server
+# ADR-052: NVS API Server
 
 ## Context
+
+This ADR adds a cluster-wide mode to the platform connector so that database
+connections stop growing with the fleet.
 
 Every NVSentinel component that needs the datastore connects to MongoDB (or
 PostgreSQL) through the shared `store-client` library. Most of these components
@@ -29,13 +32,11 @@ The platform connector store connector
 (`platform-connectors/pkg/connectors/store/store_connector.go`) performs
 exactly one operation: batched inserts of health events. It never reads.
 
-The other datastore clients are few in number but use a broader set of
-database features. Six single-replica Deployments (fault-quarantine, node-drainer,
+The six central services (fault-quarantine, node-drainer,
 health-events-analyzer, fault-remediation, event-exporter, csp-health-monitor)
-use change streams, resume tokens, queries, updates, and aggregations. Together,
-they hold a small, constant number of connections (~20) no matter how large
-the fleet is. They are not part of the scaling problem, and this design
-leaves them untouched.
+use change streams, queries, updates and aggregations, and together hold
+about 20 connections regardless of fleet size. They are not the problem,
+and this design leaves them untouched.
 
 ```mermaid
 flowchart LR
@@ -63,96 +64,43 @@ flowchart LR
     style fleet fill:#F8FAFC,stroke:#94A3B8,color:#0F172A,stroke-width:1px
 ```
 
-Issue #1595 originally proposed deploying
-[mongobetween](https://github.com/coinbase/mongobetween), a third-party
-MongoDB connection pooler by Coinbase. This ADR proposes building our own
-component instead. The review of mongobetween, including the reasons for not
-using it, appears under "Alternatives Considered".
-
 Options considered:
 
-1. Deploy `mongobetween` as-is.
-2. Build an NVSentinel nvs-api-server that exposes a gRPC write API for
-   platform connectors, while the central services keep connecting to the
-   database directly as they do today. This is the proposal, and the server
-   is the platform connector binary itself running in a central mode, not a
-   separate implementation (see "How the server is built").
+1. Deploy [mongobetween](https://github.com/coinbase/mongobetween), the
+   third-party MongoDB connection pooler issue #1595 originally proposed.
+   Rejected; the review is under
+   ["Alternatives Considered"](#alternatives-considered).
+2. Add a cluster-wide mode to the platform connector, deployed as a small
+   central service (the nvs-api-server) that exposes a gRPC write API for
+   the DaemonSet, while the central services keep connecting to the
+   database directly as they do today. This is the proposal.
 3. Extend the nvs-api-server with a pass-through tunnel for the central
    services' traffic. This is deferred because it adds network control but
    does not solve the connection-scaling problem. It is described under
-   "Future scope: a pass-through tunnel for the central services" instead.
+   ["Future scope: a pass-through tunnel for the central services"](#future-scope-a-pass-through-tunnel-for-the-central-services) instead.
 
 Background on why a write API collapses connections while a pass-through
-tunnel cannot is in "Appendix: a middleman can do one of two jobs".
+tunnel cannot is in ["Appendix: a middleman can do one of two jobs"](#appendix-a-middleman-can-do-one-of-two-jobs).
 
 ## Decision
 
-Build the **nvs-api-server**, a central service that exposes a gRPC write
-API. It is the platform connector binary itself running in a second mode:
-one image serves both roles, and a flag selects the central one, with only
-the changes that role requires (see "How the server is built"). Platform
-connectors send health events to this service, authenticating every request
-with projected ServiceAccount tokens. The nvs-api-server writes the events
-through `store-client` using a small, fixed connection pool. The six
-central services continue to connect directly to the database.
+Add a cluster-wide mode to the platform connector. In this mode the same binary
+runs as a small central Deployment, named the **nvs-api-server**, and
+exposes a gRPC write API; a flag selects the mode, and
+["How the server is built"](#how-the-server-is-built) lists the changes
+the central role requires. Platform connector pods send their health event
+batches to it, authenticating every request with projected ServiceAccount
+tokens, and it writes them through `store-client` using a small, fixed
+connection pool. The six central services continue to connect directly to
+the database.
 
 Two further moves are designed here as well, each behind its own flag:
-node condition updates can run centrally ("Moving node condition updates
-centrally"), and monitors can publish directly to the central service,
-adopted one monitor at a time ("Direct publishing").
+node condition updates can run centrally
+(["Moving node condition updates centrally"](#moving-node-condition-updates-centrally)),
+and monitors can publish directly to the central service,
+adopted one monitor at a time (["Direct publishing"](#direct-publishing-monitors-send-straight-to-the-central-service)).
 
 ## Implementation
-
-### The design at a glance
-
-Each point is one decision; the named section carries its details.
-
-**This iteration, the write path:**
-
-1. One binary, two roles: the platform connector image also runs as the
-   central server, selected by a mode flag ("How the server is built").
-2. The write API is the existing `PlatformConnector` gRPC service; the
-   DaemonSet's store path forwards its batches to it ("The write API").
-3. OK means accepted and queued, not stored. Delivery is bounded retry then
-   drop, with a minutes-scale elapsed-time window in this mode ("The write
-   API").
-4. Delivery is bounded best-effort. The datastore suppresses duplicates per
-   event through client idempotency keys and a partial unique index;
-   Kubernetes side effects run zero or more times and must stay
-   duplicate-tolerant ("The write API").
-5. The central queue is bounded by admission control, in items and bytes,
-   with per-node quotas; a full server rejects, the rejected client
-   reconnects, and the node-side buffers absorb the backpressure ("How the
-   server is built").
-6. Every caller authenticates per request with a pod-bound projected token
-   via TokenReview. A batch's node scope is its caller token's own node
-   claim; only cross-node batches carry attached evidence ("Authentication
-   on the write API").
-7. Replicas need no durable local state; TokenReview cost is bounded by
-   verdict caches, with capacities, rates and control-plane requirements
-   sized per phase ("Scaling and availability").
-8. Planned disruptions never lose acknowledged batches silently: drains
-   are measured by an outstanding-admissions gauge, rollouts are
-   serialized, and forced drops are metered. A crash can still lose the
-   in-memory queue, bounded by the admission limits ("How the server is
-   built").
-9. Rollout is a single Helm flag on the convenience path; the staged
-   procedures are multi-step and recommended, and rollback is a defined
-   two-step drain ("Rollout plan").
-
-**Later stages, designed in this document, each behind its own controls:**
-
-10. Node condition updates can move centrally, made safe by a
-    strictly-newer per-event ordering guard and server-enforced clock-skew
-    bounds ("Moving node condition updates centrally").
-11. Monitors can publish directly to the server, one monitor at a time; the
-    event pipeline then runs centrally for exactly those batches ("Direct
-    publishing").
-
-**Future scope:**
-
-12. The six central services are untouched. The pass-through tunnel and the
-    DaemonSet's deprecation stay out of scope ("Future scope").
 
 ### Architecture
 
@@ -194,42 +142,30 @@ this estimate: MongoDB applies `maxPoolSize` per server, not per client. For a
 write-only workload, the pool fills on the primary. Each nvs-api-server replica
 therefore holds about 10 pooled connections, plus a few monitoring connections
 to each replica set member. This is about 16 connections per replica, or 50
-across 3 replicas. Even if the pools filled on every member of a 3-member set,
-the theoretical ceiling would be about 110. The central services retain their
-~20 direct connections.
+across 3 replicas. The central services retain their ~20 direct connections.
 
 ### How the server is built
 
-The nvs-api-server is not a separate program. It is the platform connector
-binary running in a central mode, selected by one flag: the same gRPC
-service implementation, ring buffer, k8s connector and store connector, in
-the same image both workloads run. One image means:
-
-- no second build, publish, scan or allowlist path;
-- shared code reduces behavioral drift between the roles (central-only
-  flags, configuration and tests can still diverge, so drift is reduced,
-  not impossible);
-- every capability a later stage needs already ships in the binary,
-  switched off until its stage arrives.
-
-A proof of concept ran exactly this shape end to end on a kind cluster,
-covering authentication, idempotency, connection collapse, change-stream
-delivery, central node condition updates, direct publishing and rollback.
-The central role requires the following changes, all of which the proof of
-concept implemented or identified:
+The cluster-wide mode reuses the DaemonSet's gRPC service implementation, ring
+buffer, k8s connector and store connector unchanged, in the same image both
+workloads run. A proof of concept ran this shape end to end on a kind
+cluster, covering authentication, idempotency, connection collapse,
+change-stream delivery, central node condition updates, direct publishing
+and rollback. The central role requires the following changes, all of which
+the proof of concept implemented or identified:
 
 | Change for the central role | Why |
 |-----------------------------|-----|
 | A mode flag selecting the central role | The central Deployment runs the platform connector image with one extra argument; the config surface and metric names stay separate per role |
 | A bound on the ingest queue | The reused queue is unbounded, acceptable for one node's events but not the fleet's during an outage; a full server rejects with UNAVAILABLE and node-side buffers absorb the backpressure |
 | TCP listener with TLS, serving the same `PlatformConnector` gRPC service | Replaces the node-local Unix socket |
-| Interceptor that validates the caller token, plus the attached token on cross-node batches (see "Authentication on the write API") | Replaces the existing node-binding check. In the DaemonSet, that check uses the pod's node because callers and connectors share a node. Centrally, the caller token's own node claim provides the scope, and cross-node batches carry attached evidence. |
-| Per-event idempotency keys stamped from the `idempotency-key` header before enqueueing | See "The write API" |
-| Event pipeline and k8s connector off by default | Batches from the daemonset are already transformed and deduplicated on the node. The k8s connector turns on centrally when condition updates move ("Moving node condition updates centrally"); the pipeline runs centrally only for direct publishers ("Direct publishing") |
+| Interceptor that validates the caller token, plus the attached token on cross-node batches (see ["Authentication on the write API"](#authentication-on-the-write-api)) | Replaces the node-binding check, which compares against the pod's own node and means nothing centrally; the caller token's node claim provides the scope instead |
+| Per-event idempotency keys stamped from the `idempotency-key` header before enqueueing | See ["The write API"](#the-write-api) |
+| Event pipeline and k8s connector off by default | Batches from the daemonset are already transformed and deduplicated on the node. The k8s connector turns on centrally when condition updates move (["Moving node condition updates centrally"](#moving-node-condition-updates-centrally)); the pipeline runs centrally only for direct publishers (["Direct publishing"](#direct-publishing-monitors-send-straight-to-the-central-service)) |
 | Remove the store connector's node-name requirement | The connector currently refuses to start without a node name, but a central pod is not tied to one node |
-| gRPC `MaxConnectionAge`/`MaxConnectionIdle` and bounded graceful shutdown | Manages connections at fleet scale (see "Scaling and availability") and prevents one unresponsive client from blocking shutdown indefinitely |
-| Rename or relabel metrics, and adopt a fleet observability contract | The reused packages export `platform_connector_*` metrics that would collide with the DaemonSet's, log full event payloads at info level, log every successful authentication, and label metrics by node and error code. Per node that is fine; at fleet scale it is a log-volume, data-exposure and label-cardinality problem. Centrally: no payloads at info, successful authentication sampled or debug-only, rejections still audited, and node or pod identifiers dropped from in-process metric labels or exported through bounded aggregates |
-| Configurable worker pools for the store and k8s connectors | The reused consume loops are single-worker, sized for one node's trickle, not ~280 batches per second per replica. The store pool writes concurrently (safe: per-event idempotency), the k8s pool partitions by node name so one node's updates stay ordered, and pool sizes come from latency assumptions validated by a load-test gate |
+| gRPC `MaxConnectionAge`/`MaxConnectionIdle` and bounded graceful shutdown | Manages connections at fleet scale (see ["Scaling and availability"](#scaling-and-availability)) and prevents one unresponsive client from blocking shutdown indefinitely |
+| Rename or relabel metrics, and adopt a fleet observability contract | The reused packages log full payloads and every successful authentication at info, and label metrics by node: fine per node, a log-volume and cardinality problem at fleet scale. Centrally: no payloads at info, auth success sampled or debug, rejections audited, node and pod labels dropped or bounded |
+| Configurable worker pools for the store and k8s connectors | The reused consume loops are single-worker. The store pool writes concurrently (safe under per-event idempotency), the k8s pool partitions by node name to keep each node's updates ordered, and sizes come from a load test |
 | OpenTelemetry context extracted from the incoming call | Stored trace fields are stamped from the caller's span context; without extraction they store as zeroes and downstream trace links break ("Document shape and traces") |
 | Add an ingress NetworkPolicy for the gRPC port | Namespaces with default isolation would otherwise block the new port |
 
@@ -239,7 +175,7 @@ Reusing the ring buffer preserves the current reply semantics: OK means that
 the batch was accepted and queued, not that it was stored. This is the same
 meaning that OK has on the node-local socket today. The server then writes
 the batch from its own ring buffer under its own elapsed-time budget
-(`nvsApiServer.datastore.retryWindow`; see "Delivery guarantees"). The
+(`platformConnector.clusterWideMode.datastore.retryWindow`; see ["Delivery guarantees"](#delivery-guarantees)). The
 new path therefore contains two in-memory queues, both of which retry
 and then drop a batch after reaching the configured limit. A crash can lose
 the data still held in either queue. This is the same type of risk that exists
@@ -298,8 +234,7 @@ derived.
 #### Replica lifecycle: planned disruptions drain, a crash cannot
 
 Acknowledged batches live in pod memory. Every planned way a replica stops
-has a defined drain behavior; a crash does not, and that limit is stated
-below rather than papered over. The planned behaviors:
+has a defined drain behavior; a crash does not. The planned behaviors:
 
 - Draining is measured by an outstanding-admissions gauge, not queue
   length. The workqueue's length drops when a worker picks an item up, so
@@ -325,22 +260,15 @@ but is not metered per batch; it shows up only as the gap between client
 send counts and stored documents. This is the price of acknowledging
 before persistence, and it is listed under negative consequences.
 
-This reuse also supports the incremental absorption plan described under
-"Future scope: absorbing the platform connector into the nvs-api-server."
-Each later stage can enable code already included in the binary instead of
-porting features to a separate implementation.
-
 ### The write API
 
-The nvs-api-server implements the existing `PlatformConnector` gRPC service
-(`data-models/protobufs/health_event.proto`, `HealthEventOccurredV1`). No new
-service definition is needed. The platform connector already serves this API, and
-the gRPC sink connector (ADR-033) already implements its client side.
-
-On the platform connector side, the store path gains a new mode. Instead of
-writing directly to the database through `store-client`, the store connector
-sends the same batches to the nvs-api-server over gRPC. The existing gRPC sink
-connector provides the starting point for this client.
+The cluster-wide mode serves the existing `PlatformConnector` gRPC service
+(`data-models/protobufs/health_event.proto`, `HealthEventOccurredV1`), which
+the DaemonSet already serves on the socket and the gRPC sink connector
+(ADR-033) already calls; no new service definition is needed. The DaemonSet's
+store path gains a mode that sends the same batches to the nvs-api-server
+over gRPC instead of writing to the database, with the sink connector as
+the client's starting point.
 
 #### Delivery guarantees
 
@@ -358,15 +286,14 @@ The new path preserves the existing delivery guarantees:
   first-time bring-up is retried through instead of dropped. This window
   covers only the path up to the server's OK. After OK the client's copy
   is gone, and a separate server-side budget
-  (`nvsApiServer.datastore.retryWindow`, also elapsed minutes) governs the
+  (`platformConnector.clusterWideMode.datastore.retryWindow`, also elapsed minutes) governs the
   datastore write. The two protect different failures and neither implies
   the other: the client window does not shield an acknowledged batch from
   a database outage; the server window does. Making the store path
   stronger than today (retrying until success) would be an independent
   change and is out of scope here.
-- An OK response from the nvs-api-server means accepted and queued, not stored,
-  matching what OK means on the node-local socket today ("How the server is
-  built" explains why).
+- An OK response means accepted and queued, not stored
+  (["Reply semantics: what OK means"](#reply-semantics-what-ok-means)).
 
 #### Idempotency
 
@@ -386,11 +313,9 @@ document insert is atomic, but documents written before a failure remain
 stored, and a bulk write behaves the same way because it is not a
 transaction.
 
-A database transaction could make a batch atomic on either provider and
-remains an acceptable implementation option. It would not remove the need
-for the idempotency key, though: a full batch can commit even when the
-client never receives the OK response, and the server must recognize the
-retry.
+A transaction could make a batch atomic on either provider, but would not
+remove the need for the key: a committed batch whose OK was lost still
+gets retried.
 
 Each event therefore receives a unique key derived from the batch's
 idempotency key and the event's position in that batch. A unique index
@@ -410,7 +335,7 @@ Four contract details are important:
 3. The unique index must exist before the server stores any batch: it is
    created once by a migration step, every replica verifies it before
    reporting ready, and a batch sent before then is retried according to the
-   ring buffer's backoff policy (see "Rollout plan"). Verification checks
+   ring buffer's backoff policy (see ["Rollout plan"](#rollout-plan)). Verification checks
    the full definition, not existence: key path, uniqueness, the partial
    predicate, and build completion; a wrong non-unique or non-partial index
    must not satisfy readiness. The partial index covers only documents that
@@ -484,8 +409,7 @@ Kubernetes side effects follow the same shape: they run zero or more
 times. A drop or crash skips them; a replay that lands on another replica
 re-runs condition processing (which the ordering guard keeps idempotent)
 and can duplicate node Events, whose deduplication is per replica. An
-occasional duplicate informational Event is accepted. So that retries stay
-identifiable, the idempotency key is mandatory for direct publishers.
+occasional duplicate informational Event is accepted.
 
 The datastore write and the Kubernetes side effects also complete
 independently after OK. One can succeed while the other exhausts its
@@ -511,16 +435,12 @@ stage, the nvs-api-server is only a persistence endpoint.
 
 The move introduces two small semantic changes. First, the nvs-api-server
 assigns the creation timestamp instead of the node. Second, trace continuity
-must cross the gRPC hop explicitly. The store-mode client sends the batch's
-span context through OpenTelemetry gRPC instrumentation. The shared
-`grpcclient` currently attaches only authentication metadata, so the new client
-must add this instrumentation. The nvs-api-server extracts the context and
-stores the same trace fields as the current store connector: the batch trace ID
-in `MetadataKeyTraceID`, and each event's span ID in
-`HealthEventStatus.SpanIds` under the platform connector service key.
-Downstream consumers read these fields, so both write paths must populate
-them identically; without the extraction the stored IDs are zeroes, which
-the proof of concept observed directly.
+must cross the gRPC hop explicitly: the store-mode client sends the batch's
+span context through OpenTelemetry gRPC instrumentation (an addition to the
+shared `grpcclient`), and the nvs-api-server extracts it and stores the same
+trace fields the store connector writes today. Downstream consumers read
+those fields, so both paths must populate them identically; without the
+extraction the stored IDs are zeroes, which the proof of concept observed.
 
 #### Changes required in store-client
 
@@ -549,15 +469,11 @@ design requires three small changes to `store-client`:
      deadlocks under `helm --wait` (the hook runs only after resources are
      ready, while server readiness requires the index the hook would
      create), and GitOps engines map hooks to sync phases without reliably
-     distinguishing install from upgrade; the chart's own database setup
-     experience points the same way.
+     distinguishing install from upgrade.
    - The build never runs independently in every replica: a unique index
      build over an existing collection is expensive, and PostgreSQL's
      `CREATE INDEX CONCURRENTLY` cannot run in a transaction and needs its
      own failure handling.
-
-"Scaling and availability" describes how connection handling and TokenReview
-behave at fleet scale.
 
 ### Authentication on the write API
 
@@ -593,7 +509,7 @@ publishing"), each moved publisher authenticates straight to the central
 service, and the event path returns to one TokenReview once the last one
 moves.
 
-Cached verdicts limit the cost of the second review. "Scaling and availability"
+Cached verdicts limit the cost of the second review. ["Scaling and availability"](#scaling-and-availability)
 provides the full calculation, including rate ceilings, cache capacity, and
 retry limits.
 
@@ -620,7 +536,7 @@ check, at the nvs-api-server, is one rule with one exception:
   attached token alone grants no access.
 
 The rule is identical for both caller classes: the platform connector
-identity and allowlisted direct publishers ("Direct publishing") are each
+identity and allowlisted direct publishers (["Direct publishing"](#direct-publishing-monitors-send-straight-to-the-central-service)) are each
 pinned to their own caller token's node claim, with cross-node batches
 authorized by the attachment allowlist for the former and the cross-node
 direct allowlist for the latter.
@@ -657,14 +573,11 @@ interim.)
 Retention has one sharp edge: a pod-bound token dies with its pod, so if a
 cross-node publisher restarts while its batch is still queued, the
 attachment fails TokenReview permanently and the batch is dropped at the
-end of the retry window, counted under its own metric. This is an accepted
-loss mode, not a mitigated one: it is confined to the four cross-node
-publishers, listed under negative consequences, and operators who cannot
-accept it drain or pause those publishers before planned restarts. It
-disappears when they move to direct publishing, and signed attestation
-remains the alternative if the acceptance ever stops holding. Node-local
-batches carry no attachment at all, so routine monitor restarts strand
-nothing.
+end of the retry window, counted under its own metric. This accepted loss
+mode is confined to the four cross-node publishers and listed under
+negative consequences; operators who cannot accept it drain those
+publishers before planned restarts. Node-local batches carry no
+attachment, so routine monitor restarts strand nothing.
 
 An attached token can also expire while its cross-node batch waits in the
 ring buffer during an outage. The cross-node publishers use a longer
@@ -691,24 +604,17 @@ Only four cluster-wide publishers have tokens that allow them to name other
 nodes: csp-health-monitor, kubernetes-object-monitor, slurm-drain-monitor, and
 health-events-analyzer. These publishers must run on system or control-plane
 nodes, away from tenant GPU nodes. The publisher authentication guide
-already recommends this placement, but a recommendation is not a security
-invariant: enabling any cross-node identity (attached or direct) requires
-an administrator-controlled system-node selector that matches only trusted
-system nodes, and the chart treats a cross-node allowlist with an empty
-selector as a configuration error, so these identities cannot be enabled
-without a placement constraint. The selector must also not be settable by
-the nodes themselves: an ordinary node label can be applied by a node's
-own kubelet, so the selector must use a label under the
-`node-restriction.kubernetes.io/` prefix, which kubelets cannot set, and
-the cluster prerequisites (the Node authorizer with the NodeRestriction
-admission plugin) are stated requirements of this design. As a runtime
-backstop, the server grants cross-node scope only when the caller token's
-node claim matches a node the trusted selector currently selects. With
-that enforcement, every credential present on a GPU node is scoped to that
-node and authorizes events about that node only, while cross-node tokens
-exist solely on system nodes, where the publisher already runs with that
-authority, so the attachment never extends what a node's own credentials
-already grant.
+recommends this placement; this design makes it an invariant. Enabling any
+cross-node identity (attached or direct) requires an
+administrator-controlled system-node selector (the chart rejects a
+cross-node allowlist with an empty one), and the selector must use a label
+under the `node-restriction.kubernetes.io/` prefix, which a node's own
+kubelet cannot set; the Node authorizer with the NodeRestriction admission
+plugin is a stated prerequisite. As a runtime backstop, the server grants
+cross-node scope only when the caller's node claim matches a node the
+selector currently selects. The result: every credential on a GPU node
+authorizes events about that node only, and cross-node tokens exist solely
+on system nodes, where the publisher already runs with that authority.
 
 #### Observability
 
@@ -733,7 +639,7 @@ NetworkPolicies bound what any single token can do.
 
 The chart includes a NetworkPolicy that allows only platform connector pods
 to reach the nvs-api-server port (widened per publisher as monitors migrate;
-see "Direct publishing"). As defense in depth, deployments should also
+see ["Direct publishing"](#direct-publishing-monitors-send-straight-to-the-central-service)). As defense in depth, deployments should also
 restrict database access to the existing clients and the nvs-api-server,
 consistent with ADR-033.
 
@@ -746,7 +652,7 @@ already receives every batch, so the move is configuration alone, in a
 fixed order:
 
 1. Enable the k8s connector in the central role
-   (`nvsApiServer.nodeConditions.enabled`).
+   (`platformConnector.clusterWideMode.nodeConditions.enabled`).
 2. Verify it is ready and writing.
 3. Only then disable the DaemonSet's connector
    (`platformConnector.k8sConnector.enabled`, the chart's exposure of the
@@ -763,8 +669,9 @@ read load.
 #### The guard
 
 Correctness with several replicas needs one guard, not routing. The update
-loop already re-reads the node and retries on conflict, so the API server's
-optimistic concurrency prevents two replicas from corrupting each other's
+loop already re-reads the node and retries on conflict, so the Kubernetes
+API server's optimistic concurrency prevents two replicas from corrupting
+each other's
 writes. The remaining gap is a replica re-applying an older batch after a
 conflict re-read, which would put stale state back. The guard closes it,
 and its granularity is the fault identity, not the batch and not the whole
@@ -777,20 +684,16 @@ watermark to the newest event applied for it. The condition's
 `LastHeartbeatTime` remains the newest applied time overall but is not the
 filter.
 
-Both coarser granularities fail. A batch-level check keyed on the newest
-event lets a mixed delayed batch resurrect a stale fault that a newer
-recovery had already cleared. A single condition-wide watermark fails the
-other way: one condition aggregates independent faults, so a delayed GPU-0
-fault is not stale merely because a GPU-1 event arrived later, and a
-condition-wide filter would silently discard it.
+Coarser granularities fail both ways: a batch-level check lets a mixed
+delayed batch resurrect a cleared fault, and a condition-wide watermark
+silently discards a delayed GPU-0 fault merely because a GPU-1 event
+arrived later.
 
-Equal values are skipped as well, and this is an accepted trade rather than
-a proven-safe one: equality cannot distinguish a replay from a distinct
-event that collided on the same timestamp, so one of two distinct
-equal-timestamp updates to the same fault identity can be lost. Within one
-check the producing monitor's nanosecond timestamps are monotonic, so a
-real collision needs two writers hitting the same identity in the same
-nanosecond; the skip is metered so it cannot happen silently.
+Equal values are skipped too, an accepted trade: equality cannot
+distinguish a replay from a distinct same-nanosecond event, so one of two
+colliding updates to a fault identity can be lost. A monitor's own
+timestamps are monotonic, making that vanishingly rare, and the skip is
+metered.
 
 #### The ordering time
 
@@ -848,15 +751,12 @@ and a retry may land on any replica.
 
 #### Verified in the proof of concept
 
-The guard also makes the migration overlap safe: while both the DaemonSet
-and the central service write conditions during the flip, stale writes lose
-and the newest state stands. The proof of concept verified the mechanism
-live: a direct-published fault set a condition through the central service,
-a batch replayed with an older timestamp was accepted but did not regress
-it, a fresh event cleared it, and monitor restarts with both writers active
-converged every condition with no write errors. (The proof of concept used
-the event-timestamp comparison but guarded per batch, let equal values
-through, and enforced no skew bounds; the design tightens all three.)
+The guard also makes the migration overlap safe: with both writers active
+during the flip, stale writes lose. The proof of concept verified this live
+(a replayed older batch did not regress a condition, a fresh event cleared
+it, and dual-writer restarts converged every condition without errors),
+though it guarded per batch, allowed equal values, and had no skew bounds;
+the design tightens all three.
 
 Several node-scale constants become central-role configuration: the
 Kubernetes client rate limits, the k8s connector's worker pool ("How the
@@ -872,13 +772,10 @@ default off, intended to be flipped after the write path has been stable.
 
 The end state removes the extra hop: a monitor publishes to the central
 service directly, authenticated by its own token minted for the
-nvs-api-server audience, with its events pinned to that token's node claim.
-This is the same caller-claim rule that authorizes the platform
-connector's node-local batches, applied to a different caller: both caller
-classes are scoped by their own token's node claim. Attachments exist only
-on the platform connector's cross-node batches; a cross-node direct
-publisher carries no second token, since its allowlist entry alone grants
-the wider scope.
+nvs-api-server audience, with its events pinned to that token's node claim,
+the same rule stated under ["Node scope: one rule"](#node-scope-one-rule).
+A cross-node direct publisher carries no second token, since its allowlist
+entry alone grants the wider scope.
 
 The four cross-node publishers migrate with one addition: a cross-node
 allowlist for direct callers, the same list the attachment validator
@@ -896,13 +793,11 @@ pods today and must admit each direct publisher when its support turns on.
   never see them.
 - The `idempotency-key` header is mandatory for direct publishers, exactly
   as the store mode sends it; the key is what keeps their retries
-  duplicate-suppressed in the datastore (see "The write API").
-- TokenReview volume does not grow with the migration: a node-local
-  monitor's validation moves from the platform connector's publisher check
-  to the server's caller check, and a cross-node publisher's token shifts
-  from the attachment validator to the caller validator. Either way it is
-  one cached validation path, a TokenReview per unseen or expired token
-  rather than per batch.
+  duplicate-suppressed in the datastore (see ["The write API"](#the-write-api)).
+- System-wide TokenReview volume does not grow: a migrated monitor's
+  validation relocates from the platform connector's publisher check to
+  the server's caller check, still one cached validation path, sized per
+  phase under ["Scaling and availability"](#scaling-and-availability).
 
 #### The pipeline runs centrally for direct batches
 
@@ -930,19 +825,16 @@ Two pipeline components change shape before running centrally:
   informer with a field-stripping transform; conflict recovery keeps its
   live reads for conflict recovery.
 - The dedup window gets maximum key and byte settings with oldest-first
-  eviction, so suppression stays best-effort and never blocks admission.
-  The honest bound is on remediation eligibility: the same key can stay
-  eligible up to once per replica per window, plus once per restart or
-  early eviction, with evictions metered. A strict bound would need shared
-  dedup state, which this design deliberately avoids.
+  eviction (metered), so suppression stays best-effort and never blocks
+  admission. A strict bound would need shared dedup state, which this
+  design deliberately avoids.
 
 #### What a monitor needs to publish directly
 
 A monitor becomes direct-capable with five changes, and the last two are
 what make it outage-safe: today it leans on the platform connector's ring
-buffer for outage tolerance, its own publisher gives up after five short
-attempts, and publishing directly removes that node-side buffer, so the
-monitor takes over its role.
+buffer for outage tolerance, its own publisher gives up after a bounded
+burst of retries, and publishing directly removes that node-side buffer.
 
 1. A projected token for the nvs-api-server audience.
 2. The service address in place of the socket path.
@@ -952,22 +844,30 @@ monitor takes over its role.
    sized like the store mode's, with drop and queue-pressure metrics.
 5. A stable idempotency key held for the whole retry window.
 
-The local queue brings the same lifecycle contract the server has: on
-planned shutdown the monitor stops intake, turns unready, drains within
-its termination grace period keeping its keys, and meters anything it
-abandons. Crash loss of this non-durable queue is accepted separately,
-exactly as it is for the platform connector's buffer today.
+Items 4 and 5, and the server's lifecycle contract (stop intake, turn
+unready, drain within the grace period keeping keys, meter abandonment),
+live in the publishing client rather than in each monitor: once in the
+shared Go publishing library five of the six monitors publish through,
+and once in the GPU health monitor's small Python publisher. A monitor
+adopts them by upgrading its client, and its own work is the first three
+items, all configuration. Crash loss of the
+non-durable queue is accepted, as it is for the platform connector's
+buffer today. The disk-backed queue under future scope shrinks the
+library's job to covering unreachability windows only, and if even that
+proves too much, the fallback is keeping the DaemonSet as a thin
+node-local spooler, recorded here so that trade is made deliberately.
 
 #### Adoption and rollback
 
 Adoption is one monitor at a time. The global default is
-`nvsApiServer.directPublishing.enabled`, and each monitor chart's
+`platformConnector.clusterWideMode.directPublishing.enabled`, and each monitor chart's
 `publishTo` value (socket or direct) takes precedence over it, which is
 what migrates or rolls back a single monitor once several support direct
 mode. Turning the global flag off returns every non-pinned monitor to the
-local socket, which keeps working throughout. Custom and token-less
-publishers stay on the socket until they implement the requirements, and
-the DaemonSet is removed only when nothing publishes to it. The follow-ups
+local socket, which keeps working throughout. The preflight checks and
+any custom or token-less publishers stay on the socket until they
+implement the requirements, and the DaemonSet is removed only when
+nothing publishes to it. The follow-ups
 are per-monitor implementation changes, not further designs.
 
 ### Scaling and availability
@@ -993,12 +893,10 @@ The nvs-api-server can scale horizontally for three reasons:
   it sends the next batch. Both settings use jitter to avoid synchronized
   reconnection bursts after fleet-wide events.
 
-Each additional replica adds a small, fixed database cost: a bounded pool of
-about 10 connections on the primary, plus monitoring connections to each
-replica set member, bringing that replica's total to about 16. Service
-capacity therefore grows with the replica count while the number of database
-connections remains a small
-multiple of that count. Replicas scale with workload rather than directly with
+Each additional replica adds only the small fixed database cost from
+["Architecture"](#architecture) (~16 connections), so service capacity
+grows with the replica count while database connections stay a small
+multiple of it. Replicas scale with workload rather than directly with
 fleet size. A fixed replica count is sufficient initially; a horizontal pod
 autoscaler can be added later if needed.
 
@@ -1011,15 +909,9 @@ rotates the token file. It does not determine the review rate. The verdict cache
 calculations below, a "window" means this 2-minute period. The cache is keyed
 by token, with one caller token per pod:
 
-- A cache hit is an in-memory lookup on the nvs-api-server and requires no
-  network call. After the first request in a window, subsequent requests from
-  that pod are cache hits.
-- A cache miss costs one TokenReview round trip to the Kubernetes API
-  server, typically a few milliseconds within the cluster. Each
-  platform connector pod can cause at most one miss per 2 minutes, and only
-  during windows in which it sends a batch. Only the request that triggers the
-  miss waits those few milliseconds; every other request in the window is
-  unaffected.
+A hit is a local lookup; a miss costs one TokenReview round trip of a few
+milliseconds, paid only by the request that triggers it. Each pod causes at
+most one miss per window, and only in windows where it sends.
 
 The rates below assume the 100,000-node target. The formula is the number of
 distinct tokens validated per window divided by 120 seconds. Because
@@ -1035,19 +927,20 @@ worst case is about 83 reviews per second.
 | Quiet fleet                                    | near zero               |
 | Reconnect wave, transient until caches rewarm  | up to ~2,500            |
 
-The worst case assumes that every node produces a new event every 2 minutes,
-which should be rare after deduplication. Each replica has its own cache, but a
+The worst case assumes that every pod sends a batch in every window, and
+deduplication does not make that rare: duplicates are still stored (they
+are only downgraded from remediation eligibility), so a pod sends whenever
+its monitors publish, and the worst case is best treated as the steady
+state. Each replica has its own cache, but a
 pod maintains one connection to one replica at a time, so the steady-state
 ceiling still applies. A reconnection wave caused by connection-age or idle
 timeouts can briefly multiply misses toward the number of pods times the
 number of replicas. Jitter spreads these reconnections over time.
 
-If this ceiling becomes a problem, the cache window can be increased. It is a
-fixed constant in `grpcauth` today and requires a small code change. However,
-a longer window also delays detecting a deleted pod because a cached verdict
-skips TokenReview. For example, increasing the window to 10 minutes reduces
-the review ceiling by a factor of five but may accept a deleted pod's token for
-up to 10 minutes.
+The window can be widened if the ceiling ever matters (a constant in
+`grpcauth` today), but a cached verdict also skips the check that notices a
+deleted pod: 10 minutes cuts the ceiling fivefold and accepts a deleted
+pod's token for up to 10 minutes.
 
 #### Sizing that was a constant and becomes configuration
 
@@ -1066,9 +959,6 @@ This arithmetic turns three of today's constants into sized configuration:
 
 The population changes as monitors migrate, so the sizing is per phase; the
 Helm values are set for the current phase and raised as monitors move.
-Nothing else in the arithmetic changes, because these are the same
-validations that publisher authentication performs at the platform
-connector today, relocated.
 
 | Per phase, at 100,000 nodes | DaemonSet forwards (this iteration) | All monitors direct (final) |
 |------------------------------|-------------------------------------|------------------------------|
@@ -1085,15 +975,12 @@ distinguish this condition from actual authentication failures.
 For context, publisher authentication at the platform connector already
 performs about one TokenReview per monitor pod per window, roughly 2,500
 per second at the same target, so the worst case here adds about a third of
-the review load the system already generates. The direct-publishing
-migration keeps it flat: each moved monitor's token shifts from that
-publisher check to this caller check, the same cached validation path
-either way.
+the review load the system already generates.
 
 ### Helm and configuration
 
 The NVSentinel chart gains a Deployment behind one feature flag,
-`nvsApiServer.enabled`: enabling it deploys the server and switches the
+`platformConnector.clusterWideMode.enabled`: enabling it deploys the server and switches the
 platform connector store path in the same upgrade, and disabling it reverts
 both. That single flag is the convenience path. The staged procedures in
 the rollout plan and the later migrations deliberately use the additional
@@ -1101,36 +988,36 @@ controls shown below, so the example names every knob an operator actually
 changes.
 
 ```yaml
-nvsApiServer:
-  enabled: false    # the feature flag: deploys the server (with its index
-                    # migration Job) and switches the platform connector
-                    # store path to it
-  replicas: 3
-  grpcPort: 50051
-  tls:
-    mode: required  # cert-manager issued server certificate (ADR-030 pattern);
-                    # the only alternative is the explicitly named
-                    # insecureDevelopmentMode, refused outside dev contexts
-  auth:
-    audience: "nvs-api-server.nvsentinel.nvidia.com"
-    tokenExpirationSeconds: 3600
-    # attachment validation reuses global.platformConnectorAuth.audience
-    crossNodeDirectPublishers: []   # direct callers allowed to name any node;
-                                    # requires a non-empty system-node selector
-  datastore:
-    maxPoolSize: 10   # database connections per replica
-    retryWindow: 5m   # server-side budget for acknowledged batches; also
-                      # sizes terminationGracePeriodSeconds
-  nodeConditions:
-    enabled: false    # the central condition writer; pairs with
-                      # platformConnector.k8sConnector.enabled in the
-                      # ordered handoff
-  directPublishing:
-    enabled: false    # global default for monitors that support direct
-                      # mode; each monitor's own chart can pin that monitor
-                      # to the socket, for per-monitor migration and rollback
-
 platformConnector:
+  clusterWideMode:
+    enabled: false    # the feature flag: deploys the nvs-api-server (with
+                      # its index migration Job) and switches the DaemonSet
+                      # store path to it
+    replicas: 3
+    grpcPort: 50051
+    tls:
+      mode: required  # cert-manager issued server certificate (ADR-030
+                      # pattern); the only alternative is the explicitly
+                      # named insecureDevelopmentMode, refused outside dev
+    auth:
+      audience: "nvs-api-server.nvsentinel.nvidia.com"
+      tokenExpirationSeconds: 3600
+      # attachment validation reuses global.platformConnectorAuth.audience
+      crossNodeDirectPublishers: []   # direct callers allowed to name any
+                                      # node; requires a non-empty
+                                      # system-node selector
+    datastore:
+      maxPoolSize: 10   # database connections per replica
+      retryWindow: 5m   # server-side budget for acknowledged batches;
+                        # also sizes terminationGracePeriodSeconds
+    nodeConditions:
+      enabled: false    # the central condition writer; pairs with
+                        # platformConnector.k8sConnector.enabled in the
+                        # ordered handoff
+    directPublishing:
+      enabled: false    # global default for monitors that support direct
+                        # mode; each monitor's own chart can pin that
+                        # monitor to the socket
   k8sConnector:
     enabled: true     # the DaemonSet condition writer; disable only after
                       # the central writer is verified
@@ -1140,12 +1027,12 @@ platformConnector:
 
 gpuHealthMonitor:     # every monitor chart exposes the same knob
   publishTo: socket   # socket | direct; takes precedence over
-                      # nvsApiServer.directPublishing.enabled
+                      # platformConnector.clusterWideMode.directPublishing.enabled
 ```
 
 The store connector gains three modes. `direct` preserves the current database
 write path. `nvs-api-server` sends batches to the write API. The default,
-`auto`, follows `nvsApiServer.enabled`. This default provides the single-flag
+`auto`, follows `platformConnector.clusterWideMode.enabled`. This default provides the single-flag
 behavior and keeps the client and server configuration consistent. The
 explicit modes support the staged rollout described below, in which the server
 can run while clients remain pinned to `direct`.
@@ -1156,41 +1043,30 @@ configuration, not decisions, and are set alongside the implementation.
 
 ### Rollout plan
 
-The single-flag path is the convenience default; the staged procedures are
-deliberate multi-step operations. The flag's two states:
+The single-flag path:
 
-1. Ship with `nvsApiServer.enabled: false`. Nothing changes.
+1. Ship with `platformConnector.clusterWideMode.enabled: false`. Nothing
+   changes.
 2. Enable the flag. Three things govern this step:
-   - A plain release Job (no Helm hooks; see the prerequisites for why)
-     creates the partial idempotency index, and every server replica
-     verifies the expected index definition before reporting ready.
-     Existing records do
-     not contain the key, so they are excluded from the partial index and
-     require no backfill.
-   - Helm does not order the server and the DaemonSet switch, so the store
-     mode's retry budget rides out normal bring-up. That budget is an
-     elapsed-time window (minutes by default), not an attempt count: with
-     varying backoff and ten-second RPC deadlines, the same count can mean
-     very different durations.
+   - The release Job creates the partial idempotency index and every
+     replica verifies it before reporting ready
+     (["Changes required in store-client"](#changes-required-in-store-client));
+     existing records need no backfill.
+   - Helm does not order the server and the DaemonSet switch; the store
+     mode's elapsed-time retry window rides out normal bring-up.
    - Bring-up failures (a stuck certificate, a failed migration) can
      outlast any bounded window, so fleets that cannot tolerate that loss
      enable in two steps using the staged path below, which is the
      recommended order.
 
-   A fleet can safely run both paths during the rollout because they
-   produce a backward-compatible document shape; the central path adds the
-   idempotency key and stamps the creation time centrally (see "The write
-   API").
-3. To roll back, reverse the order: set the store mode to `direct` first
-   and wait for the DaemonSet rollout to complete (old pods may still be
-   submitting until it does), then wait for the outstanding-admissions
-   gauge to reach zero on every replica so already-acknowledged batches
-   finish draining to the database, then disable the flag to remove the
-   server. Disabling in one
-   step is possible but can delete batches that were acknowledged into the
-   server's queue and exist nowhere else. The
-   DaemonSet retains its database credentials during this phase, so rollback
-   requires no reprovisioning.
+   A fleet can safely run both paths during the rollout; the document
+   shape stays backward compatible (["The write API"](#the-write-api)).
+3. To roll back, reverse the order: set the store mode to `direct`, wait
+   for the DaemonSet rollout to complete, wait for the
+   outstanding-admissions gauge to reach zero on every replica, then
+   disable the flag. One-step disabling can delete acknowledged batches
+   that exist nowhere else. The DaemonSet still holds its database
+   credentials, so rollback needs no reprovisioning.
 4. After the new path has been stable for a release, remove the database
    credentials from the DaemonSet. Only this step realizes the credential
    cleanup benefit, and from here a rollback first needs the credentials
@@ -1204,17 +1080,10 @@ configuration change and removes the bring-up loss window entirely.
 The `direct` mode remains available until the nvs-api-server path has been
 the default for long enough that no deployment depends on it.
 
-Two further migrations follow once the write path has been stable, and
-neither is a single flag; each names its real controls. Condition updates
-use two writer controls in a fixed order (enable
-`nvsApiServer.nodeConditions.enabled`, verify, then disable
-`platformConnector.k8sConnector.enabled`; the overlap is safe because of
-the guard). Direct publishing uses `directPublishing.enabled` as the
-global default, and each monitor chart's `publishTo` value takes
-precedence, which is what makes migrating or rolling back one monitor
-possible once several support direct mode. Deprecating the DaemonSet comes
-last ("Future scope: absorbing the platform connector into the
-nvs-api-server").
+The condition-writer handoff and per-monitor direct publishing follow once
+the write path has been stable (neither is a single flag), and DaemonSet
+removal comes last, in the order given under
+["Future scope: absorbing the platform connector into the nvs-api-server"](#future-scope-absorbing-the-platform-connector-into-the-nvs-api-server).
 
 ```mermaid
 flowchart LR
@@ -1246,10 +1115,9 @@ connection requires one outgoing connection. It is therefore outside this
 iteration, which focuses on connection scaling. Its benefit would be network
 control:
 
-- Only the nvs-api-server needs reachability, DNS and firewall access to the
-  database; every other service reaches only the nvs-api-server. This matters
-  most with an external managed MongoDB (Atlas and similar), where a single
-  controlled egress point to the external database is usually required.
+- Only the nvs-api-server needs reachability, DNS and firewall access to
+  the database, which matters most with an external managed MongoDB (Atlas
+  and similar) where a single controlled egress point is usually required.
 - It provides a workload-identity gate in front of the database port for
   clusters that do not enforce NetworkPolicies (ADR-030 notes OCI as an
   example).
@@ -1272,6 +1140,19 @@ This work should be reconsidered for deployments that use an external managed
 database, run without NetworkPolicy enforcement, plan a datastore migration,
 or must attribute database connections to workloads for auditing.
 
+### Future scope: a disk-backed queue for the cluster-wide mode
+
+The cluster-wide mode's queue is in memory by design, which is why
+admission pushes back into the node-side buffers and why a crash can lose
+acknowledged batches within the admission bounds. Backing the queue with
+disk would remove the crash-loss window, absorb datastore outages without
+leaning on backpressure, and shrink the local queue direct publishers
+otherwise need. The costs are a stateful Deployment (volumes, scheduling,
+capacity management) and a disk write per batch. This is deliberately
+future scope: the in-memory design should prove itself first, and the
+queue sits behind one interface, which is the natural seam to add
+durability later without changing anything else.
+
 ### Future scope: absorbing the platform connector into the nvs-api-server
 
 The nvs-api-server is the first step in a longer migration: move the
@@ -1281,7 +1162,7 @@ datastore-specific and remains appropriate as the service's role expands.
 Because the central role is the same binary, every later move enables code
 that already ships, and the moves themselves are designed in this document:
 the database write (this iteration), node condition updates ("Moving node
-condition updates centrally"), and direct publishing ("Direct publishing").
+condition updates centrally"), and direct publishing (["Direct publishing"](#direct-publishing-monitors-send-straight-to-the-central-service)).
 
 What remains is execution, in dependency order:
 
@@ -1308,12 +1189,10 @@ flowchart LR
     class S4 result
 ```
 
-Two constraints bound the pace, recorded so they are not rediscovered:
-tokens are mandatory for direct publishers, so token-less and custom
-publishers keep the socket until they implement the requirements, and
-connections grow from one platform connector per node to a few monitor pods
-per node, which needs sizing (HTTP/2 connections are cheap and idle ones
-are reaped, so this is arithmetic, not design).
+One constraint bounds the pace: connections grow from one platform
+connector per node to a few monitor pods per node, which needs sizing
+(HTTP/2 connections are cheap and idle ones are reaped, so this is
+arithmetic, not design).
 
 ## Rationale
 
@@ -1321,13 +1200,12 @@ are reaped, so this is arithmetic, not design).
   path drops from roughly 300,000 connections to about 50, freeing about
   61 GiB of database memory, while the central services stay unchanged.
 - The required pieces already exist and have been tested: the
-  `PlatformConnector` gRPC service and its client (ADR-033), the ServiceAccount
-  token authentication stack from
-  the publisher auth work and ADR-030 (`commons/pkg/grpcauth`,
-  `commons/pkg/grpcclient`), and `store-client` for the actual writes. The
-  server is the platform connector binary in a central mode, so it inherits
-  the existing write behavior instead of reimplementing it. A proof of
-  concept using this design ran end to end on a kind cluster.
+  `PlatformConnector` gRPC service and its client (ADR-033), the
+  ServiceAccount token authentication stack from the publisher auth work
+  and ADR-030 (`commons/pkg/grpcauth`, `commons/pkg/grpcclient`), and
+  `store-client` for the actual writes. The cluster-wide mode inherits the
+  existing write behavior instead of reimplementing it, verified end to end
+  by a proof of concept on a kind cluster.
 - Database credentials leave the fleet. Today, in deployments with X.509
   auth, every node's platform connector pod carries a database client
   certificate. After the rollout's final step no DaemonSet pod does (the
@@ -1350,9 +1228,8 @@ are reaped, so this is arithmetic, not design).
   every request. Today, write access is governed by possession of the
   database credential alone; this design adds per-request workload
   identity on top of it.
-- Node binding holds wherever a token travels: every token on a GPU node is
-  scoped to that node and authorizes events about that node only,
-  regardless of where it is presented from. Naming other nodes requires an
+- Node binding holds wherever a token travels: a GPU node's tokens
+  authorize events about that node only; naming other nodes requires an
   allowlisted publisher token, which exists only on system nodes.
 - The read path remains unchanged. An nvs-api-server outage can delay writes
   but cannot affect change streams or the central services.
@@ -1384,26 +1261,25 @@ are reaped, so this is arithmetic, not design).
   batch; only planned disruptions drain and meter. This is the price of
   acknowledging before persistence.
 - Several behaviors are accepted with stated bounds rather than
-  eliminated: equal-timestamp condition updates can collide ("The guard"),
+  eliminated: equal-timestamp condition updates can collide (["The guard"](#the-guard)),
   a fast clock can disturb condition ordering within the retry window
-  ("Clock-skew bounds"), duplicate remediation-eligible observations can
+  (["Clock-skew bounds"](#clock-skew-bounds)), duplicate remediation-eligible observations can
   reach downstream because dedup suppresses side effects per replica, not
-  writes ("Direct publishing"), and Kubernetes side effects run zero or
-  more times ("What the idempotency key does and does not give").
+  writes (["Direct publishing"](#direct-publishing-monitors-send-straight-to-the-central-service)), and Kubernetes side effects run zero or
+  more times (["What the idempotency key does and does not give"](#what-the-idempotency-key-does-and-does-not-give)).
 
 ### Mitigations
 
-- The platform connector ring buffer already absorbs store outages. Batches
-  use the same backoff and retry policy for an nvs-api-server restart as for a
-  database restart, with a minutes-scale default retry window in this mode.
-  The nvs-api-server runs multiple replicas with anti-affinity and a
-  PodDisruptionBudget, and the window is configurable beyond the default.
+- The platform connector ring buffer absorbs an nvs-api-server outage
+  exactly as it absorbs a database outage
+  (["Delivery guarantees"](#delivery-guarantees)), and the nvs-api-server
+  runs multiple replicas with anti-affinity and a PodDisruptionBudget.
 - The added hop gets a latency budget rather than an assumed cost: a
   cache-hit request adds sub-millisecond server work, a cache miss adds one
   TokenReview round trip of a few milliseconds, and overload adds backoff.
   Against a write path whose RPC timeout is 10 seconds the budget is
-  generous, and a load test at the modeled rates is the acceptance gate,
-  not an assumption.
+  generous, and it is confirmed by a load test at the modeled rates, not
+  assumed.
 - HTTP/2 connections require relatively few resources, and the
   nvs-api-server needs no durable replica-local state because every durable
   fact lives in the database. It can therefore scale horizontally. Standard
@@ -1420,8 +1296,8 @@ existing gRPC interface. It would copy the store connector's document-wrapping
 logic, perform the write within the request, and return OK only after the insert
 succeeded.
 
-**Rejected in favor of running the platform connector binary itself in a
-central mode.** The migration requires both write paths to produce the same
+**Rejected in favor of adding the cluster-wide mode to the platform
+connector itself.** The migration requires both write paths to produce the same
 document shape and use the same retry and drop behavior. Sharing the code
 guarantees this behavior, while a separate implementation could drift. One
 binary also means one image (no second build, publish, scan or allowlist
@@ -1486,20 +1362,13 @@ token model.
   this failure, but only for cross-node attachments from four publishers;
   this alternative would extend it to every batch from every publisher.
 
-Hop-by-hop authentication requires each service to validate its immediate
-caller and matches the existing janitor-to-janitor-provider pattern. Cached
-results limit the second review to roughly one TokenReview per
-platform connector pod per cache window, rather than one per request. "Scaling
-and availability" provides the calculation. The future absorption plan reaches
-a single-review state by having publishers authenticate directly to the central
-service, not by forwarding tokens.
-
-This differs from the attachment used by the selected design. The selected
-design attaches a token only as evidence of node scope, in addition to the
-authentication performed at both hops. The attached token never replaces
-authentication or acts as a caller credential. This rejected alternative
-would instead replace authentication at the platform connector hop by
-forwarding the token.
+The pattern and cost of keeping both reviews are covered under
+["Why both hops authenticate"](#why-both-hops-authenticate); the absorption
+plan reaches a single-review state by having publishers authenticate
+directly, not by forwarding tokens. This alternative also differs from the
+selected design's attachment, which is evidence of node scope on top of
+authentication at both hops, never a caller credential; forwarding would
+replace authentication at the platform connector hop.
 
 ## Notes
 
