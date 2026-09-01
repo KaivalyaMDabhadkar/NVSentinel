@@ -2,18 +2,24 @@
 
 ## Summary
 
+- **This mode will not be the default.** It is meant for large fleets; small clusters lose nothing by staying on the default DaemonSet setup.
+- The cost that motivates it: every platform connector pod opens about 3 database connections, all landing on the MongoDB primary; at 100,000 nodes that is about 300,000 connections, pushing the primary's memory limit to 91 GiB ([issue #1595](https://github.com/NVIDIA/NVSentinel/issues/1595)).
 - The platform connector gets a new mode: a small central Deployment (the **deployment platform connector**) that health monitors publish their health events to directly over gRPC.
 - Each monitor authenticates every request with its own projected ServiceAccount token, and its events stay pinned to the node the token was minted on.
 - The central service runs the same pipeline, node condition updates and datastore writes as today, through a small fixed pool of database connections.
+- It is the same platform connector binary and image, selected by a mode flag; there is no second build or release path.
+- Monitors keep their events through outages: each client holds a bounded retry queue, every batch carries an idempotency key, and the datastore enforces that key with a unique index, so a retried batch is never stored twice.
+- Events from one node are applied in the order they were sent, and a per-fault-identity watermark lets several replicas update node conditions concurrently without an older, delayed event overwriting a newer one.
+- The server protects itself with per-node and per-identity quotas and tells a rejected client why and when to retry, so one noisy node or component cannot crowd out the rest.
+- Only the few components that legitimately report about other nodes may name them, through an allowlist backed by a runtime node-label check; every other caller is pinned to the node its token was minted on.
 - Database connections stop growing with the fleet: about 300,000 connections at 100,000 nodes become a handful.
 - One global flag enables the mode and a per-monitor flag picks where each monitor publishes; rollout ordering and rollback are deliberately a separate design.
-- **This mode will not be the default.** It is meant for large fleets, where the per-node connections alone cost MongoDB about 61 GiB of memory at 100,000 nodes ([issue #1595](https://github.com/NVIDIA/NVSentinel/issues/1595)). Small clusters lose nothing by staying on the default DaemonSet setup.
 
 ## Context
 
 This ADR adds a deployment mode to the platform connector so that database connections stop growing with the fleet.
 
-Every NVSentinel component that needs the datastore connects to MongoDB (or PostgreSQL) through the shared `store-client` library. Most of these components are small, single-replica Deployments. The platform connector is the exception: it runs as a DaemonSet with one pod on every node, and each pod opens its own database connections (about 3, mostly driver heartbeats to each replica set member). Each open connection costs roughly 0.2 MB of database memory even when idle, so the count grows with the fleet:
+Every NVSentinel component that needs the datastore connects to MongoDB (or PostgreSQL) through the shared `store-client` library. Most of these components are small, single-replica Deployments. The platform connector is the exception: it runs as a DaemonSet with one pod on every node, and each pod opens its own database connections (about 3, and they land on the MongoDB primary). Each open connection costs roughly 0.27 MB of database memory even when idle, so the count grows with the fleet:
 
 | Fleet size    | Connections from platform connectors |
 |---------------|---------------------------------------|
@@ -21,7 +27,7 @@ Every NVSentinel component that needs the datastore connects to MongoDB (or Post
 | 10,000 nodes  | ~30,000                               |
 | 100,000 nodes | ~300,000                              |
 
-At 100,000 nodes, MongoDB spends about 61 GiB of memory just keeping those connections open ([issue #1595](https://github.com/NVIDIA/NVSentinel/issues/1595)).
+At 100,000 nodes, just keeping those connections open pushes the primary's memory limit to 91 GiB ([issue #1595](https://github.com/NVIDIA/NVSentinel/issues/1595)).
 
 Each pod uses those connections for one task: the store connector (`platform-connectors/pkg/connectors/store/store_connector.go`) performs batched inserts of health events and never reads. The six central services (fault-quarantine, node-drainer, health-events-analyzer, fault-remediation, event-exporter, csp-health-monitor) use change streams, queries and updates, hold about 20 connections regardless of fleet size, and their database connections are untouched by this design (two of them also publish health events, so their publish path changes like any monitor's).
 
