@@ -11,7 +11,7 @@
 - Monitors ride out short outages: each client retries from a bounded queue, and every batch carries an idempotency key the datastore enforces with a unique index, so a retried batch is never stored twice. A batch that outlives the retry window or overflows the queue is dropped and counted.
 - Events from one node are applied in the order they were sent, and a per-fault-identity watermark lets several replicas update node conditions concurrently without an older, delayed event overwriting a newer one.
 - The server protects itself with per-node and per-identity quotas and tells a rejected client why and when to retry, so one noisy node or component cannot crowd out the rest.
-- Only the few components that legitimately report about other nodes may name them, through an allowlist backed by a runtime node-label check; every other caller is pinned to the node its token was minted on.
+- Only the few components that legitimately report about other nodes may name them: their identity must be on a configured allowlist, and on every request the server also checks that they are running on a system node (by that node's labels). Every other caller can only publish events about the node its own token was minted on.
 - Database connections stop growing with the fleet: about 300,000 connections at 100,000 nodes become a handful.
 - One global flag enables the mode and a per-monitor flag picks where each monitor publishes; rollout ordering and rollback are deliberately a separate design.
 
