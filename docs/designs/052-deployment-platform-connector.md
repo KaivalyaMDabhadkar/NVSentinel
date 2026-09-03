@@ -103,7 +103,7 @@ The central role reuses the gRPC service, event pipeline, k8s connector and stor
 | Per-event idempotency keys | Monitors retry over the network, so a batch whose acknowledgement was lost is sent again and must be detectable (["Idempotency"](#idempotency)) |
 | The store connector no longer requires a node name | A central pod is not tied to one node |
 | Connections are closed after a set age or a set idle time, and shutdown waits a bounded time for open connections | Closing connections after a while lets monitors spread back across replicas (["Connections"](#connections)); the bounded wait stops one unresponsive client from blocking shutdown |
-| Node conditions are updated only when the batch would change them | Most events repeat what the node already shows. Skipping repeats saves the update call and its latency for most requests (["Node condition updates"](#node-condition-updates)) |
+| Node conditions are updated only when the batch would change them | A batch that repeats what the node already shows, including a resend, gets no update call, which saves the call and its latency (["Node condition updates"](#node-condition-updates)) |
 | An ingress NetworkPolicy for the gRPC port | Namespaces with default isolation would otherwise block it |
 
 ### Write API
@@ -177,9 +177,9 @@ A replica is ready when the idempotency index is verified. Replicas stay ready d
 The k8s connector code is unchanged. What changes is when it runs and what the reply waits for:
 
 - The condition update runs inside the request, in parallel with the datastore write, and the acknowledgement waits for both. A monitor sends its next batch only after the acknowledgement, so its condition updates land in the order it sent them, on any replica.
-- A replica updates the node only when the batch would change what the node already shows: a check going from healthy to unhealthy or back, a new fault joining an existing one, or one of several faults clearing. It decides that by reading the node's current condition, as the k8s connector does today before every update, and comparing the batch with it. Everything else is a repeat of what the node already shows, and a repeat gets no update call. Most events are repeats, so for most requests the reply waits for the datastore write and a quick node read, not for an update.
-- Condition updates are best effort. The replica waits a short, bounded time for the update. If it fails or runs out of time after the write succeeded, the batch is still acknowledged and the failure is counted. The node then still shows the old state, so the monitor's next event, a repeat from the monitor's point of view, is a change from the node's point of view and is applied. Conditions heal within one monitor cycle without the server remembering anything.
-- One narrow case can leave a condition briefly wrong: a monitor's request times out on a slow replica, the monitor resends to another replica, and the slow replica's older update lands last. The monitor's next event corrects it in the same way. Fault-quarantine and node-drainer work from the datastore, not from conditions, so they are not affected.
+- A replica updates the node only when the batch would change what the node already shows: a check going from healthy to unhealthy or back, a new fault joining an existing one, or one of several faults clearing. It decides that by reading the node's current condition, as the k8s connector does today before every update, and comparing the batch with it. Everything else is a repeat of what the node already shows, and a repeat gets no update call. Monitors differ here: some report on every cycle, so most of their events are repeats; the GPU and NIC monitors report only changes, so nearly every event of theirs is a transition. Either way a resend of the same batch never updates the node twice.
+- Condition updates are best effort, as they are today. The replica keeps the k8s connector's existing retries for conflicts and passing errors, inside a short, bounded wait. If the update still fails after the write succeeded, the batch is acknowledged and the failure is counted. The node then shows the old state until the monitor next reports that entity: on the next cycle for a monitor that repeats, or at the next change or restart for one that reports only changes. Fault-quarantine and node-drainer work from the datastore, so a stale condition never causes a wrong cordon or drain.
+- One narrow case can leave a condition wrong the same way: a monitor's request times out on a slow replica, the monitor resends to another replica, and the slow replica's older update lands last. The node shows the older state until the monitor next reports that entity, as above.
 - Kubernetes Event objects follow the same rule: written on changes only, best effort.
 
 ```mermaid
@@ -296,14 +296,14 @@ If a datastore outage longer than the monitors' retry window ever has to be surv
 - The write path now depends on one central service. If it is down, every monitor's writes stop at once and the whole fleet buffers in its clients for the retry window, where today a platform connector pod failure affects only its own node.
 - Custom or token-less socket publishers, and the injected preflight checks that run under tenant ServiceAccounts, cannot publish to the central service as they are, because they cannot be put on the allowlist. Each must be deprecated together with the socket, keep a thin node-local shim, or get its own identity and a network rule that lets it in. That decision is outside this ADR but has to be made before the DaemonSet is removed.
 - The server keeps no buffer. A datastore outage is felt by every monitor at once, a MongoDB primary election shows up as a burst of retries, and an outage longer than the monitors' retry window loses events at the edge, as it does today.
-- Node condition updates are best effort, and when a batch changes the node they add Kubernetes API latency to the acknowledgement. A condition can be briefly wrong after a client time-out until the monitor's next event.
+- Node condition updates are best effort, and when a batch changes the node they add Kubernetes API latency to the acknowledgement. After a failed update or a client time-out a condition can be wrong until the monitor next reports that entity, which for a monitor that reports only changes can be a long time.
 
 ### Mitigations
 
 - The load test at the modeled rates is the gate before any switchover, and the mode is off by default.
 - The shared Go and Python clients carry the one-at-a-time sending, retry and key logic once, and the per-monitor flag lets monitors switch one at a time.
 - Every drop and failure is counted where it happens (client drops, failed writes, condition updates that failed or ran out of time). A persistent queue is recorded as future scope in case client-side retries turn out to be too tight.
-- Repeats need no update call and the condition update has a bounded wait, so for most requests the acknowledgement waits for the datastore write and a quick node read only.
+- Repeats need no update call, the condition update keeps its existing retries inside a bounded wait, and fault-quarantine and node-drainer never depend on conditions, so a stale condition is a display problem, not a remediation problem.
 
 ## Alternatives Considered
 
