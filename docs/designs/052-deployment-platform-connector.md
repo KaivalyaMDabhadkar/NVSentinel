@@ -6,7 +6,7 @@
 - Every platform connector pod opens about 3 database connections, and all of them land on the MongoDB primary. At 100,000 nodes that is about 300,000 connections, and the primary needs a 91 GiB memory limit to carry them and still do its normal work ([issue #1595](https://github.com/NVIDIA/NVSentinel/issues/1595)).
 - With this mode, health monitors send their events straight to a small central Deployment, the **deployment platform connector**, over gRPC, each with its own ServiceAccount token, instead of to the platform connector pod on their own node.
 - The central service does the same work as today (pipeline, node condition updates, datastore writes), but through a small fixed pool of database connections, so connections stop growing with the fleet. It answers a monitor only after the batch is stored and, when the batch changes the node's condition, after that update too. It keeps no queue of its own, so a crash loses nothing and each monitor's events stay in order.
-- Monitors now send over the network and several replicas share the work, so two protections are added. Every batch carries an idempotency key, so a batch that is sent twice is never stored twice. And a replica caps the size of a request and the number of requests it works on at once, so it cannot run out of memory.
+- Monitors now send over the network and several replicas share the work, so one protection is added: every batch carries an idempotency key, so a batch that is sent twice is never stored twice.
 - This is an experimental feature that Helm flags turn on and off.
 
 ## Contents
@@ -98,7 +98,6 @@ The central role reuses the gRPC service, event pipeline, k8s connector and stor
 | Change for the central role | Why |
 |-----------------------------|-----|
 | No queue: the request handler calls the store connector and the k8s connector directly, in parallel, and acknowledges when both have finished | Today a consume loop feeds each of them from an unbounded in-memory queue, and the pod acknowledges before writing. That is fine for one node but not for the fleet: a datastore outage would fill the pod, a crash would lose everything queued, and with several replicas a monitor's batches could be stored out of order (["Delivery guarantees"](#delivery-guarantees)). The connectors' own code is unchanged, and the optional external gRPC sink (ADR-033) is called the same way, with a bounded wait and best effort |
-| Two request limits: a maximum request size and a maximum number of requests in flight per replica, checked before anything else happens with a batch | A replica holds a batch in memory only while it works on it, so these two caps bound its memory. Monitors send one batch at a time, so the in-flight cap only bites when the datastore is slow; the excess get a "busy, retry later" reply and back off. A batch over the size cap can never succeed, so the client drops it and counts the drop |
 | TCP listener with TLS, serving the same `PlatformConnector` gRPC service | Replaces the node-local Unix socket |
 | Node scope comes from the caller's token | Today the pod checks that a caller's token belongs to the node the pod itself runs on. A central replica runs on no particular node, so it reads the node from the token and accepts only events that name that node (["Authentication"](#authentication)) |
 | Per-event idempotency keys | Monitors retry over the network, so a batch whose acknowledgement was lost is sent again and must be detectable (["Idempotency"](#idempotency)) |
@@ -171,7 +170,7 @@ Monitors authenticate exactly as they do on the socket today (ADR-030): a projec
 
 Tokens now cross the pod network, so TLS is required. Both the chart and the server refuse a plaintext listener unless an explicitly named insecure development mode is set. Cert-manager issues the certificate, and the server picks up rotated certificates without a restart. A NetworkPolicy lets only publisher pods reach the gRPC port; every publishing component labels its pods for this, including health-events-analyzer and csp-health-monitor.
 
-A replica is ready when the idempotency index is verified. Replicas stay ready while busy or during a datastore outage, so the Service never empties. The signals to alert on are request latency, failed writes, busy rejections, and condition updates that failed or ran out of time.
+A replica is ready when the idempotency index is verified. Replicas stay ready during a datastore outage, so the Service never empties. The signals to alert on are request latency, failed writes, and condition updates that failed or ran out of time.
 
 ### Node condition updates
 
@@ -216,7 +215,7 @@ The pipeline (transformation, dedup, metadata enrichment) runs unchanged in the 
 
 Any replica can serve any request, because every durable fact lives in the database. So the service scales horizontally, and each added replica costs about 16 database connections. The pool has to cover the writes in flight at once, since writes now happen inside requests; that is still a small fixed number per replica, set by the load test. The plain ClusterIP Service balances connections, one replica per connection, with no extra load balancer. Each monitor pod holds one HTTP/2 connection, so at 100,000 nodes each of 3 replicas holds about 100,000 connections. A gRPC connection costs tens of kilobytes of server memory (its read and write buffers, both tunable), so this comes to several GiB per replica at default buffer sizes. It is part of the pod sizing, and the load test measures it.
 
-A monitor stays on the same replica for as long as its connection lives, and two server settings bound that lifetime. `MaxConnectionAge` makes the server close a connection once it has been open for a set time (minutes, with some randomness so that connections do not all expire together). The client reconnects at once, and the Service picks a replica afresh, which may be a different one. This is what spreads monitors back across replicas after a rollout, or after a replica was busy, without any coordination. `MaxConnectionIdle` makes the server close a connection that has carried no requests for a set time, freeing its memory; a monitor that publishes every minute never reaches it. The expected ingest is one small batch per monitor pod per check interval, a few thousand batches per second across the fleet; the load test runs at these rates.
+A monitor stays on the same replica for as long as its connection lives, and two server settings bound that lifetime. `MaxConnectionAge` makes the server close a connection once it has been open for a set time (minutes, with some randomness so that connections do not all expire together). The client reconnects at once, and the Service picks a replica afresh, which may be a different one. This is what spreads monitors back across replicas after a rollout, without any coordination. `MaxConnectionIdle` makes the server close a connection that has carried no requests for a set time, freeing its memory; a monitor that publishes every minute never reaches it. The expected ingest is one small batch per monitor pod per check interval, a few thousand batches per second across the fleet; the load test runs at these rates.
 
 #### TokenReview load
 
@@ -261,7 +260,7 @@ gpuHealthMonitor:      # every monitor chart exposes the same knob
   publishTo: socket    # socket | deployment
 ```
 
-Tuning values (request limits, the wait for a condition update, cache capacities, Kubernetes and TokenReview client rates) are configuration, chosen during implementation and the load test. The only ordering rule this ADR sets is that the index migration Job and server readiness come before monitor traffic, and the readiness gate enforces that. Everything else about the transition, including when the DaemonSet's flag is turned off, belongs to the separate rollout design.
+Tuning values (the standard gRPC request limits, the wait for a condition update, cache capacities, Kubernetes and TokenReview client rates) are configuration, chosen during implementation and the load test. The only ordering rule this ADR sets is that the index migration Job and server readiness come before monitor traffic, and the readiness gate enforces that. Everything else about the transition, including when the DaemonSet's flag is turned off, belongs to the separate rollout design.
 
 ### Future scope: pass-through tunnel
 
@@ -303,7 +302,7 @@ If a datastore outage longer than the monitors' retry window ever has to be surv
 
 - The load test at the modeled rates is the gate before any switchover, and the mode is off by default.
 - The shared Go and Python clients carry the one-at-a-time sending, retry and key logic once, and the per-monitor flag lets monitors switch one at a time.
-- Every drop and failure is counted where it happens (client drops, busy rejections, failed writes, condition updates that failed or ran out of time). A persistent queue is recorded as future scope in case client-side retries turn out to be too tight.
+- Every drop and failure is counted where it happens (client drops, failed writes, condition updates that failed or ran out of time). A persistent queue is recorded as future scope in case client-side retries turn out to be too tight.
 - Repeats need no update call and the condition update has a bounded wait, so for most requests the acknowledgement waits for the datastore write and a quick node read only.
 
 ## Alternatives Considered
