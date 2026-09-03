@@ -2,12 +2,12 @@
 
 ## Summary
 
-- **This mode is not the default.** You need it above roughly 20,000 nodes. At that size the platform connectors' database connections alone take about 16 GiB of memory on the MongoDB primary (20,000 nodes × 3 connections × 0.27 MiB), and the number keeps growing with every node you add. Smaller clusters should stay on the DaemonSet setup.
-- Why: every platform connector pod opens about 3 database connections, and they all land on the MongoDB primary. At 100,000 nodes that is about 300,000 connections, which pushes the primary's memory limit to 91 GiB ([issue #1595](https://github.com/NVIDIA/NVSentinel/issues/1595)).
-- The change: health monitors send their events straight to a small central Deployment, the **deployment platform connector**, over gRPC, each using its own ServiceAccount token. Today they send to the platform connector pod on their own node.
-- The central service does the same work as today (pipeline, node condition updates, datastore writes), but through a small fixed pool of database connections, so connections stop growing with the fleet.
-- Monitors now send over the network and several replicas share the work, so three protections are added. Every batch carries an idempotency key, so a retried batch is never stored twice. Each node and each component gets a quota, so one noisy sender cannot crowd out the rest. And a guard lets several replicas update node conditions safely.
-- Two Helm settings control it: one global flag deploys the central service, and each monitor has its own `publishTo` setting that says whether it keeps sending to the platform connector on its node (`socket`) or to the central service (`deployment`).
+- **This mode is not the default.** It is for clusters above roughly 20,000 nodes, where the platform connectors' database connections start to use too much memory on the MongoDB primary and keep growing with every node added. Smaller clusters should stay on the DaemonSet setup.
+- Every platform connector pod opens about 3 database connections, and all of them land on the MongoDB primary. At 100,000 nodes that is about 300,000 connections, and the primary needs a 91 GiB memory limit to carry them and still do its normal work ([issue #1595](https://github.com/NVIDIA/NVSentinel/issues/1595)).
+- With this mode, health monitors send their events straight to a small central Deployment, the **deployment platform connector**, over gRPC, each with its own ServiceAccount token, instead of to the platform connector pod on their own node.
+- The central service does the same work as today (pipeline, node condition updates, datastore writes), but through a small fixed pool of database connections, so connections stop growing with the fleet. It answers a monitor only after the batch is stored and, when the batch changes the node's condition, after that update too. It keeps no queue of its own, so a crash loses nothing and each monitor's events stay in order.
+- Monitors now send over the network and several replicas share the work, so two protections are added. Every batch carries an idempotency key, so a batch that is sent twice is never stored twice. And a replica takes on only as many requests at once as it can hold and tells monitors to retry when it is busy, so it cannot run out of memory.
+- This is an experimental feature that Helm flags turn on and off.
 
 ## Contents
 
@@ -15,19 +15,17 @@
 - [Decision](#decision)
 - [Implementation](#implementation)
   - [Architecture](#architecture)
-  - [Changes from the DaemonSet role](#changes-from-the-daemonset-role): [Admission control](#admission-control), [Replica lifecycle](#replica-lifecycle)
+  - [Changes from the DaemonSet role](#changes-from-the-daemonset-role): [Admission control](#admission-control)
   - [Write API](#write-api): [Delivery guarantees](#delivery-guarantees), [Idempotency](#idempotency), [store-client changes](#store-client-changes)
   - [Authentication](#authentication): [Transport security and observability](#transport-security-and-observability)
   - [Node condition updates](#node-condition-updates)
   - [Event pipeline](#event-pipeline)
-  - [Publisher requirements](#publisher-requirements)
   - [Scaling and availability](#scaling-and-availability): [Connections](#connections), [TokenReview load](#tokenreview-load)
   - [Configuration](#configuration)
-  - [Future scope: pass-through tunnel](#future-scope-pass-through-tunnel), [Future scope: disk-backed queue](#future-scope-disk-backed-queue)
+  - [Future scope: pass-through tunnel](#future-scope-pass-through-tunnel), [Future scope: persistent queue](#future-scope-persistent-queue)
 - [Rationale](#rationale)
 - [Consequences](#consequences)
 - [Alternatives Considered](#alternatives-considered)
-- [Notes](#notes)
 - [References](#references)
 - [Appendix: tunnel versus write API](#appendix-tunnel-versus-write-api)
 
@@ -35,28 +33,22 @@
 
 This ADR adds a deployment mode to the platform connector so that database connections stop growing with the fleet.
 
-Every NVSentinel component that needs the datastore connects to MongoDB (or PostgreSQL) through the shared `store-client` library. Most of them are small, single-replica Deployments. The platform connector is different: it runs as a DaemonSet, one pod on every node, and each pod opens its own database connections (about 3, all to the MongoDB primary). Each open connection costs roughly 0.27 MB of database memory even when idle, so the count grows with the fleet:
+Every NVSentinel component that needs the datastore connects to MongoDB (or PostgreSQL) through the shared `store-client` library. Most of them are small, single-replica Deployments. The platform connector is different: it runs as a DaemonSet, one pod on every node, and each pod opens its own database connections (about 3, all to the MongoDB primary). Each open connection costs roughly 0.27 MiB of database memory even when idle, so the count grows with the fleet:
 
-| Fleet size    | Connections from platform connectors |
-|---------------|---------------------------------------|
-| 1,000 nodes   | ~3,000                                |
-| 10,000 nodes  | ~30,000                               |
-| 100,000 nodes | ~300,000                              |
-
-At 100,000 nodes, just keeping those connections open pushes the primary's memory limit to 91 GiB ([issue #1595](https://github.com/NVIDIA/NVSentinel/issues/1595)).
+| Fleet size    | Connections from platform connectors | Memory those connections take on the primary |
+|---------------|--------------------------------------|----------------------------------------------|
+| 1,000 nodes   | ~3,000                               | ~0.8 GiB                                     |
+| 10,000 nodes  | ~30,000                              | ~8 GiB                                       |
+| 20,000 nodes  | ~60,000                              | ~16 GiB                                      |
+| 100,000 nodes | ~300,000                             | ~79 GiB                                      |
 
 The platform connector only inserts health events; it never reads. The six central services (fault-quarantine, node-drainer, health-events-analyzer, fault-remediation, event-exporter, csp-health-monitor) use change streams and queries, hold about 20 connections no matter how big the fleet is, and are not touched by this design. (Two of them also publish health events, so their publish path changes like any monitor's.)
 
-We looked at two options:
-
-1. Deploy [mongobetween](https://github.com/coinbase/mongobetween), the third-party MongoDB connection pooler that issue #1595 originally proposed. Rejected; see ["Alternatives Considered"](#alternatives-considered).
-2. Run the platform connector as a central Deployment that health monitors publish to directly, so the per-node DaemonSet and its database connections can go away. This is the proposal.
-
-["Appendix: tunnel versus write API"](#appendix-tunnel-versus-write-api) explains why a write API collapses connections while a pass-through tunnel cannot.
-
 ## Decision
 
-Run the platform connector as a small central Deployment, the **deployment platform connector**. Health monitors send their health events directly to it over gRPC and authenticate every request with a projected ServiceAccount token. It runs the event pipeline, updates node conditions and writes to the datastore through `store-client` with a small fixed connection pool. The per-node DaemonSet is no longer needed. The six central services keep connecting to the database directly.
+Run the platform connector as a small central Deployment, the **deployment platform connector**. Health monitors send their health events directly to it over gRPC and authenticate every request with a projected ServiceAccount token. For each batch it runs the event pipeline, writes the events to the datastore through `store-client` with a small fixed connection pool, updates the node condition when the batch changes it, and only then acknowledges. It keeps no queue of its own. A monitor that gets no acknowledgement retries with backoff, as it does today. The per-node DaemonSet is no longer needed. The six central services keep connecting to the database directly.
+
+Acknowledging only after the write is what keeps events in order. A monitor sends its next batch only after the previous one is acknowledged, so a batch is in the datastore before the next one leaves the monitor, whichever replica handles it. It also means a replica never holds anything a monitor considers delivered, so a crash or restart loses nothing.
 
 One global flag turns the mode on, and a per-monitor flag chooses where each monitor publishes. How to roll this out across a fleet (ordering, staging, rollback) is out of scope here and will be designed separately once the end state is agreed.
 
@@ -101,61 +93,47 @@ The write path's connection count no longer depends on fleet size: at 100,000 no
 
 ### Changes from the DaemonSet role
 
-The deployment platform connector and the DaemonSet are one binary and one image, selected by a mode flag. The central role reuses the gRPC service, ring buffer, event pipeline, k8s connector and store connector as they are, and adds the changes below. Anything not listed here works as it does today.
+The central role reuses the gRPC service, event pipeline, k8s connector and store connector as they are, and adds the changes below. Anything not listed here works as it does today.
 
 | Change for the central role | Why |
 |-----------------------------|-----|
-| A mode flag selecting the central role | One image, one extra argument; config and metric names stay separate per role |
-| A bound on the ingest queue | Today's queue is unbounded, which is fine for one node's events but not for the whole fleet's during a datastore outage; see ["Admission control"](#admission-control) |
+| No queue: the request handler calls the store connector and the k8s connector directly, in parallel, and acknowledges once the write is done | Today a consume loop feeds each of them from an unbounded in-memory queue, and the pod acknowledges before writing. That is fine for one node but not for the fleet: a datastore outage would fill the pod, a crash would lose everything queued, and with several replicas a monitor's batches could be stored out of order (["Delivery guarantees"](#delivery-guarantees)). The connectors' own code is unchanged, and the optional external gRPC sink (ADR-033) is called the same way, with a bounded wait and best effort |
 | TCP listener with TLS, serving the same `PlatformConnector` gRPC service | Replaces the node-local Unix socket |
 | Node metadata comes from a shared informer instead of per-node GET calls | Per-node reads would multiply Kubernetes API calls at fleet scale (["Event pipeline"](#event-pipeline)) |
-| Caller authentication pinned to the token's node claim | Replaces the node-binding check, which compares against the pod's own node and means nothing centrally (["Authentication"](#authentication)) |
-| Per-event idempotency keys | Monitors retry over the network, so replays must be detectable (["Idempotency"](#idempotency)) |
+| Node scope comes from the caller's token | Today the pod checks that a caller's token belongs to the node the pod itself runs on. A central replica runs on no particular node, so it reads the node from the token and accepts only events that name that node (["Authentication"](#authentication)) |
+| Per-event idempotency keys | Monitors retry over the network, so a batch whose acknowledgement was lost is sent again and must be detectable (["Idempotency"](#idempotency)) |
 | The store connector no longer requires a node name | A central pod is not tied to one node |
-| Connections are closed after a set age (`MaxConnectionAge`) or after a set time without requests (`MaxConnectionIdle`), and shutdown waits a bounded time for open connections | A monitor stays on one replica for the life of its connection; closing connections after a while lets monitors spread back across replicas, and a bounded shutdown wait stops one unresponsive client from blocking it |
-| Quieter logging and metrics | Today's code logs every payload and every successful auth at info level and labels metrics by node. That is fine on one node but far too much for a whole fleet, so centrally payloads and successful auths log at debug, rejections are logged, and metrics drop or cap node and pod labels |
-| Configurable worker pools | The reused consume loops have one worker each. The store pool writes concurrently (safe because of per-event idempotency), and each node's batches go to one worker so their order is kept |
-| OpenTelemetry context read from the incoming call | Without it the stored trace fields are zeroes and downstream trace links break |
+| Connections are closed after a set age or a set idle time, and shutdown waits a bounded time for open connections | Closing connections after a while lets monitors spread back across replicas (["Connections"](#connections)); the bounded wait stops one unresponsive client from blocking shutdown |
+| Node conditions are updated only when the batch would change them | Most events repeat what the node already shows. Skipping repeats keeps the Kubernetes API calls from three pods small and keeps repeats off the acknowledgement path (["Node condition updates"](#node-condition-updates)) |
 | An ingress NetworkPolicy for the gRPC port | Namespaces with default isolation would otherwise block it |
 
 #### Admission control
 
-A replica acknowledges a batch as soon as it is queued, telling the monitor the batch has been accepted and queued (not yet written), and keeps the batch in memory until it has been written. Today that queue has no limit. That is fine for one node's events, but not for the whole fleet's during a datastore outage: the pile would grow until the pod is killed and everything in it is lost. So the central role adds admission control:
+A replica holds a batch in memory only while it is working on it: from the moment the request arrives until the write is done and the acknowledgement is sent. There is no queue behind that. So the memory a replica can use is set by how many requests it works on at once and how big each one may be:
 
-- A replica may hold only so many batches and so many bytes at once. "Holding" a batch means the replica has acknowledged it but has not finished with it: the batch is waiting in a queue, being written to the database right now, or waiting to be retried after a failed write. All three count, because all three are still in memory. On top of that, a single request may not be too big: there is a cap on its size in bytes, on the number of events in one batch, and on the number of different nodes one batch may name. The size cap is checked before the request is decoded, so an oversized request cannot eat memory just by being read.
-- The checks run before the server does anything with the batch. If the batch passes, the replica sets aside room for it once, covering every place the batch will go: the database write queue, the node-condition queue, and the optional external sink. Only then does it run the pipeline, queue the batch and send the acknowledgement. If the batch fails a check, the replica replies with a rejection and does nothing else: no room is used, the pipeline does not run (so dedup does not remember the batch's faults), and nothing is queued. When the monitor retries later, the batch is treated as new.
-- The room is also shared fairly. All the monitors on one node together may hold only a limited number of batches and bytes on a replica; the node comes from the caller's token, so a broken monitor on one node cannot fill the replica for everyone else. The four components that report about many nodes get their own allowance instead, counted in events. Each replica counts only what it holds itself, and a monitor talks to one replica for as long as its connection lives, so the fleet-wide total is the per-replica value times the number of replicas; the values are chosen with that in mind.
-- Every rejection tells the client why it was refused and how long to wait. If the whole replica is full, the client closes its connection and opens a new one, because gRPC picks a replica only when a connection is opened; without the reconnect the client would keep hitting the same full replica while the others have room. If only the client's own allowance is used up, reconnecting would not help, so it waits the suggested time and retries on the same connection. If the batch itself is too big, retrying can never succeed, so the client drops it and counts the drop.
+- A replica works on only so many requests at the same time. At that limit it refuses new requests with a "busy, retry later" reply instead of taking them on. The monitor waits the suggested time and retries, on the same connection or a new one.
+- A single request may not be too big: there is a cap on its size in bytes, on the number of events in one batch, and on the number of different nodes one batch may name. The size cap is checked before the request is decoded, so an oversized request cannot eat memory just by being read. A batch that is too big can never succeed, so the client drops it and counts the drop.
+- The checks run before the server does anything with the batch. A refused batch leaves no trace: the pipeline does not run (so dedup does not remember the batch's faults) and nothing is written. When the monitor retries later, the batch is treated as new.
 
-Once these limits are fixed, a replica's worst-case memory can be added up (held batches, the token cache, the node informer, connection buffers), and the chart's resource requests come from that sum.
-
-#### Replica lifecycle
-
-A replica holds every acknowledged batch in memory until it has been written. If the replica simply exited, those batches would be lost. So before any planned stop (a rollout, a scale-down, a node being drained by an operator) a replica first finishes what it holds. This is called draining:
-
-- The replica knows it is finished when it holds nothing any more. It does not look at the length of its queues for this, because a batch that has already left the queue and is being written right now is still in memory and could still fail. Instead it counts batches from the moment one is accepted until the moment every destination (the database write, the node-condition update, the optional external sink) has either completed or given up on it. Draining is complete when that count reaches zero.
-- When Kubernetes asks a replica to stop, it first marks itself not ready, so the Service stops sending it new connections. Then it stops accepting new batches, so monitors go to the other replicas. Then it keeps writing what it still holds, including retrying failed writes. It has `terminationGracePeriodSeconds` to finish, set longer than the datastore retry window so that a batch that is still legitimately retrying is not cut off. If the time runs out with batches still unwritten, for example because the datastore was down the whole time, those batches are given up and counted under a forced-drop metric. Nothing disappears silently.
-- Rolling updates use `maxSurge: 0` and `maxUnavailable: 1`: Kubernetes takes down one replica, waits until its replacement is ready, and only then moves to the next, so only one replica is draining at any time while the others keep serving. A PodDisruptionBudget stops a node drain or cluster upgrade from evicting two replicas at once, and anti-affinity spreads the replicas over different nodes so that losing one node loses at most one replica's memory.
-
-A crash (an out-of-memory kill, a panic, a node failure) skips all of this: there is no time to write anything out, and the batches the replica held are gone. Two things bound the damage. The admission limits cap how much a replica can hold, so the loss is never unbounded. And because nothing had the chance to count the lost batches one by one, the loss is visible only indirectly, as the gap between what the monitors report sending and what ended up stored.
+Fair sharing between nodes needs no extra rule. A monitor sends one batch at a time and waits for the answer, so the monitors on one node can hold only a few requests on a replica at once, and a broken monitor cannot fill the replica for everyone else. Once these limits are fixed, a replica's worst-case memory can be added up (requests in flight, the token cache, the node informer, connection buffers), and the chart's resource requests come from that sum.
 
 ### Write API
 
-Monitors call the same `PlatformConnector` gRPC service as today, just at the `platform-connector-deployment` Service address instead of the socket path. Each client holds one connection, and the Service picks a replica only when that connection is opened. That is why a full replica has to tell the client to reconnect, and why the server closes connections after a set time so monitors spread back across replicas (see ["Connections"](#connections)).
+Monitors call the same `PlatformConnector` gRPC service as today, just at the `platform-connector-deployment` Service address instead of the socket path.
 
 #### Delivery guarantees
 
-- The monitor's client retries a failed send with backoff for a time window (minutes by default) and then drops the batch. This is bounded best effort, and the window is sized to ride out server restarts and rollouts. Every kind of failure is retried within the window; the idempotency key makes repeats safe.
-- The acknowledgement keeps its meaning from today: the batch was accepted and queued, not yet stored. After acknowledging, the server writes from its queue within `platformConnector.deployment.datastore.retryWindow` and drops batches that outlive it.
-- A replica crash loses that queue. One replica holds batches from many nodes, so such a crash loses more than a single DaemonSet pod's crash does today. The loss is capped by the admission limits, planned stops drain first, and the disk-backed queue under future scope would remove it. If the datastore is down for longer than both windows (about ten minutes), batches are dropped and counted. Today's unbounded queue instead grows until the pod is killed for memory and everything queued is lost.
-- Events can be stored out of order and up to two windows late (retries, several replicas), so consumers must order by the event's own `generatedTimestamp`. The server writes each node's batches through one store worker, which keeps them in send order. Whether fault-quarantine and health-events-analyzer also need a staleness check on `generatedTimestamp` is decided before the switchover.
-- The datastore write and the Kubernetes side effects finish independently after the acknowledgement; one can succeed while the other gives up. That is accepted and counted. Making them atomic would mean holding batches through datastore outages.
+- The acknowledgement means stored. The server writes the batch to the datastore inside the request and acknowledges only when the write has succeeded. Today's acknowledgement means accepted and queued; this one is stronger, and monitors need no change to benefit from it.
+- One monitor's events are stored in the order it sent them, on any replica. The monitor sends one batch at a time and waits for the acknowledgement, so a batch is in the datastore before the next one is sent. Different monitors on the same node are not ordered against each other, but they never were, and they report different checks. Consumers therefore see each check's events in order and need no staleness check.
+- The monitor's client retries a failed or unanswered send with backoff for a time window (minutes by default) and then drops the batch and counts the drop. That is the same bounded best effort a monitor has today. The window is sized to ride out replica restarts, rollouts and a MongoDB primary election, and the request timeout leaves room for the datastore write and a node condition update. If a monitor crashes, the batches waiting in its client are lost; that is accepted, as it is for the ring buffer today. The idempotency key makes a repeated send safe (["Idempotency"](#idempotency)).
+- The server keeps nothing between requests, so a replica crash or restart loses nothing a monitor considers delivered. A datastore outage is felt by the monitors directly: their sends fail, they retry within their window, and if the outage outlasts the window they drop, as they do today when the platform connector pod on their node cannot write. There is no second buffer in the server; ["Future scope: persistent queue"](#future-scope-persistent-queue) records how one could be added later.
+- The node condition update runs in parallel with the write and is best effort; the write alone decides the reply (["Node condition updates"](#node-condition-updates)).
 
 #### Idempotency
 
-Clients retry, so a batch could be stored twice if the server accepted it but the acknowledgement got lost on the way back. Every batch therefore carries a client-generated idempotency key in the `idempotency-key` gRPC header (the standard [HTTP Idempotency-Key](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Idempotency-Key) semantics). The database enforces the key, because a retry may reach a different replica.
+Clients retry, so a batch could be stored twice if the server stored it but the acknowledgement got lost on the way back, for example because the monitor's request timed out while the write was still finishing. Every batch therefore carries a client-generated idempotency key in the `idempotency-key` gRPC header (the standard [HTTP Idempotency-Key](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Idempotency-Key) semantics). The database enforces the key, because a retry may reach a different replica.
 
-The key is enforced per event rather than per batch, because MongoDB can store part of a batch and fail the rest. The server builds each event's key from the caller's pod UID, the client's key and the event's position in the batch, so two callers can never collide. A partial unique index rejects duplicates, and a duplicate on that index counts as success, so a retry inserts only the events that are still missing. The key is mandatory, its format is checked, and the server always overwrites the metadata field instead of trusting an incoming value.
+The key is enforced per event rather than per batch, because MongoDB can store part of a batch and fail the rest. The server builds each event's key from the caller's pod UID, the client's key and the event's position in the batch, so two callers can never collide. A partial unique index rejects duplicates, and a duplicate on that index counts as success, so a retry inserts only the events that are still missing. The key is mandatory, its format is checked, and the server always writes the key into the stored event itself; it never trusts a key already present in an incoming event.
 
 - A client uses one key per batch and keeps using that same key every time it retries that batch. It must also send the same events with it, because the server only compares keys; it never compares the events themselves. If a client reused a key for a different batch, that batch would be silently treated as a duplicate and dropped.
 - The unique index must exist before any replica writes, otherwise duplicates from that time would never be caught. So a small Job that ships with the Helm release creates the index once, and every replica checks that the index is really there, with the right field, uniqueness and filter, before it reports itself ready. A replica that is not ready receives no traffic, so no client can write before the guarantee is in place. It is a plain Job, not a Helm hook: replicas are not ready until the index exists, and a post-install hook runs only once the pods are ready, so the two would wait for each other. The index definition lives once in `store-client`, shared by the Job and the replicas' readiness check, and covers PostgreSQL too.
@@ -166,13 +144,13 @@ The key is enforced per event rather than per batch, because MongoDB can store p
 ```mermaid
 flowchart LR
     M["monitor<br/>events + key + token"]
-    API["deployment platform connector<br/>authorize · derive keys · enqueue"]
-    ACK["acknowledged: monitor<br/>drops its copy"]
+    API["deployment platform connector<br/>authorize · derive keys · write"]
     DB[("unordered InsertMany<br/>duplicates on the key<br/>index count as success")]
+    ACK["acknowledged once stored:<br/>monitor drops its copy"]
 
     M --> API
-    API --> ACK
-    API == "from the server queue" ==> DB
+    API == "inside the request" ==> DB
+    DB --> ACK
     M -. "retry, same key,<br/>any replica" .-> API
 
     classDef client fill:#DBEAFE,stroke:#2563EB,color:#172554,stroke-width:1.5px
@@ -199,87 +177,56 @@ Monitors authenticate exactly as they do on the socket today (ADR-030): a projec
 - Node scope comes from the token instead of the connector. The socket checked that a token's node claim matched the node it was running on. The central service has no node of its own, so it pins each batch to the node named in the caller's token.
 - The option to fall back to node-local scope when TokenReview is unavailable has no central equivalent. The server rejects requests and clients retry within their windows.
 
-```mermaid
-flowchart LR
-    B["Batch"] --> C{"Token valid, pod-bound,<br/>identity allowlisted?"}
-    C -- no --> REJ["Reject"]
-    C -- yes --> N{"Events match caller's<br/>node claim?"}
-    N -- yes --> ACCEPT["Accept"]
-    N -- no --> X{"Cross-node<br/>allowlisted?"}
-    X -- yes --> ACCEPT
-    X -- no --> REJ
-
-    classDef start fill:#DBEAFE,stroke:#2563EB,color:#172554,stroke-width:1.5px
-    classDef decision fill:#F1F5F9,stroke:#64748B,color:#0F172A,stroke-width:1.5px
-    classDef accept fill:#DCFCE7,stroke:#16A34A,color:#052E16,stroke-width:2px
-    classDef deny fill:#FEE2E2,stroke:#DC2626,color:#450A0A,stroke-width:1.5px
-    class B start
-    class C,N,X decision
-    class ACCEPT accept
-    class REJ deny
-```
-
 #### Transport security and observability
 
 Tokens now cross the pod network, so TLS is required. Both the chart and the server refuse a plaintext listener unless an explicitly named insecure development mode is set. Cert-manager issues the certificate, and the server picks up rotated certificates without a restart. A NetworkPolicy lets only publisher pods reach the gRPC port; every publishing component labels its pods for this, including health-events-analyzer and csp-health-monitor.
 
-A replica is ready when the idempotency index is verified and it is not draining. Replicas stay ready while full or during a datastore outage, so the Service never empties. The signals to alert on are the forced-drop counter, admission rejections, the outstanding-admissions gauge and queue pressure.
+A replica is ready when the idempotency index is verified and its node informer has synced. Replicas stay ready while busy or during a datastore outage, so the Service never empties. The signals to alert on are request latency, failed writes, busy rejections, and condition updates that failed or ran out of time.
 
 ### Node condition updates
 
-The k8s connector code is unchanged, but several central replicas can now update the same node, and one of them can re-apply an older event after a conflict retry. A new guard prevents that:
+The k8s connector code is unchanged. What changes is when it runs and what the reply waits for:
 
-- Each fault identity (the entity set and error code within a check) keeps a watermark: the time of the last event applied for it, stored next to the condition's message entries. Events at or below the watermark are skipped; newer events are applied and move it forward. Each identity is reported by one monitor, so its timestamps come from one clock and nothing needs to be ordered across nodes.
-- Watermarks are stored in the condition message next to the fault text; when space runs out, the fault text is shortened first. They are kept long after a fault clears, far longer than the delivery retry window. A watermark is dropped only when more identities clear at once than the message can hold. That drop is counted, and a stale fault can then reappear until the monitor's next periodic publish.
-- The ordering time is the event's own `generatedTimestamp`. An event with a missing timestamp, a timestamp too far in the future, or one older than the delivery retry window is stored but never updates conditions. Each case is counted.
+- The condition update runs inside the request, in parallel with the datastore write, and the acknowledgement waits for both. A monitor sends its next batch only after the acknowledgement, so its condition updates land in the order it sent them, on any replica.
+- A replica updates the node only when the batch would change what the node already shows: a check going from healthy to unhealthy or back, a new fault joining an existing one, or one of several faults clearing. It decides that by comparing the batch with the node's current condition in its informer cache. Everything else is a repeat of what the node already shows, and a repeat makes no Kubernetes API call at all. Most events are repeats, so for most requests the reply waits only for the datastore write.
+- Condition updates are best effort. The replica waits a short, bounded time for the update. If it fails or runs out of time after the write succeeded, the batch is still acknowledged and the failure is counted. The node then still shows the old state, so the monitor's next event, a repeat from the monitor's point of view, is a change from the node's point of view and is applied. Conditions heal within one monitor cycle without the server remembering anything.
+- One narrow case can leave a condition briefly wrong: a monitor's request times out on a slow replica, the monitor resends to another replica, and the slow replica's older update lands last. The monitor's next event corrects it in the same way. Fault-quarantine and node-drainer work from the datastore, not from conditions, so they are not affected.
+- Kubernetes Event objects follow the same rule: written on changes only, best effort.
 
 ```mermaid
 flowchart LR
-    E["Event"] --> TS{"Valid<br/>timestamp?"}
-    TS -- no --> STORE["Datastore only<br/>metered"]
-    TS -- yes --> SKEW{"Within skew<br/>bounds?"}
-    SKEW -- no --> STORE
-    SKEW -- yes --> GUARD{"Newer than its identity's<br/>watermark?"}
-    GUARD -- no --> SKIP["Skip update<br/>metered"]
-    GUARD -- yes --> APPLY["Update condition<br/>advance watermark"]
+    B["Batch"] --> W["Datastore write"]
+    B --> Q{"Would the node<br/>condition change?"}
+    Q -- no --> SKIP["No API call"]
+    Q -- yes --> UPD["Update condition<br/>bounded wait, best effort"]
+    W --> ACK["Acknowledge once<br/>the write succeeded"]
+    UPD --> ACK
+    SKIP --> ACK
 
     classDef start fill:#DBEAFE,stroke:#2563EB,color:#172554,stroke-width:1.5px
     classDef decision fill:#F1F5F9,stroke:#64748B,color:#0F172A,stroke-width:1.5px
     classDef partial fill:#FEF3C7,stroke:#D97706,color:#451A03,stroke-width:1.5px
     classDef apply fill:#DCFCE7,stroke:#16A34A,color:#052E16,stroke-width:2px
-    class E start
-    class TS,SKEW,GUARD decision
-    class STORE,SKIP partial
-    class APPLY apply
+    class B start
+    class Q,SKIP decision
+    class W,UPD partial
+    class ACK apply
 ```
 
 ### Event pipeline
 
-The pipeline (transformation, dedup, metadata enrichment) runs unchanged in the central service. Two details change:
+The pipeline (transformation, dedup, metadata enrichment) runs unchanged in the central service, inside the request and before the writes. Its stages are in-memory lookups and must stay that way: anything slow added to the pipeline later would slow every acknowledgement. Two details change:
 
 - Node metadata comes from a shared node informer instead of per-node reads, and a replica reports ready only after that informer has synced. A metadata miss never blocks storage.
 - Each replica keeps its own dedup state, so with 3 replicas the same duplicate can slip through up to 3 times per window. Dedup never drops datastore writes; it only stops duplicates from triggering cluster changes (ADR-039). So duplicates may reach remediation checks more often, but they do not add stored events. Whether downstream remediation tolerates that is checked before the switchover.
-
-### Publisher requirements
-
-A monitor publishes directly with four changes:
-
-1. Its projected token minted for the deployment platform connector's audience instead of the socket's.
-2. The Service address in place of the socket path.
-3. A bounded local queue with a time-based retry window and jitter, plus drop and queue-pressure metrics.
-4. A stable idempotency key, kept for the whole retry window.
-
-Items 3 and 4 are what make a monitor survive outages; today it relies on the platform connector's ring buffer for that. Both live in the shared publishing clients: the Go library that five of the six monitors use, and a Python client for the GPU health monitor. If a monitor crashes, its client queue is lost; that is accepted, as it is for the ring buffer today.
-
-All first-party monitors must support direct publishing before the switchover. Some publishers cannot be put on the allowlist: custom or token-less socket publishers, and the injected preflight checks that run under tenant ServiceAccounts. Each of them must either be deprecated together with the socket, keep a thin node-local shim, or get an explicit identity and network carve-out. That decision is outside this ADR but has to be made before the DaemonSet is removed.
 
 ### Scaling and availability
 
 #### Connections
 
-Any replica can serve any request, because every durable fact lives in the database. So the service scales horizontally, and each added replica costs about 16 database connections. The plain ClusterIP Service balances connections, one replica per connection, with no extra load balancer. Each monitor pod holds one HTTP/2 connection, so at 100,000 nodes each of 3 replicas holds about 100,000 connections. A gRPC connection costs tens of kilobytes of server memory (its read and write buffers, both tunable), so this comes to several GiB per replica at default buffer sizes. It is part of the pod sizing, and the load test measures it.
+Any replica can serve any request, because every durable fact lives in the database. So the service scales horizontally, and each added replica costs about 16 database connections. The pool has to cover the writes in flight at once, since writes now happen inside requests; that is still a small fixed number per replica, set by the load test. The plain ClusterIP Service balances connections, one replica per connection, with no extra load balancer. Each monitor pod holds one HTTP/2 connection, so at 100,000 nodes each of 3 replicas holds about 100,000 connections. A gRPC connection costs tens of kilobytes of server memory (its read and write buffers, both tunable), so this comes to several GiB per replica at default buffer sizes. It is part of the pod sizing, and the load test measures it.
 
-A monitor stays on the same replica for as long as its connection lives, and two server settings bound that lifetime. `MaxConnectionAge` makes the server close a connection once it has been open for a set time (minutes, with some randomness so that connections do not all expire together). The client reconnects at once, and the Service picks a replica afresh, which may be a different one. This is what spreads monitors back across replicas after a rollout, or after a replica was full, without any coordination. `MaxConnectionIdle` makes the server close a connection that has carried no requests for a set time, freeing its memory; a monitor that publishes every minute never reaches it. The expected ingest is one small batch per monitor pod per check interval, a few thousand batches per second across the fleet; the load test runs at these rates.
+A monitor stays on the same replica for as long as its connection lives, and two server settings bound that lifetime. `MaxConnectionAge` makes the server close a connection once it has been open for a set time (minutes, with some randomness so that connections do not all expire together). The client reconnects at once, and the Service picks a replica afresh, which may be a different one. This is what spreads monitors back across replicas after a rollout, or after a replica was busy, without any coordination. `MaxConnectionIdle` makes the server close a connection that has carried no requests for a set time, freeing its memory; a monitor that publishes every minute never reaches it. The expected ingest is one small batch per monitor pod per check interval, a few thousand batches per second across the fleet; the load test runs at these rates.
 
 #### TokenReview load
 
@@ -289,9 +236,9 @@ The same token validations move from the socket to the central service, one cach
 |-----------------------------------------------|-------------------------|
 | Every pod writes in every window (worst case) | ~2,500 (~830 per replica at 3 replicas) |
 | 5% of pods write per window                   | ~125                    |
-| Reconnect wave, transient until caches rewarm | ~2,500 fleet-wide (~833 per replica at 3 replicas) |
+| Reconnect wave, transient until caches rewarm | ~2,500 fleet-wide (~830 per replica at 3 replicas) |
 
-We plan for the worst case, because dedup does not stop monitors from sending. Two of today's constants become configuration: the cache capacity (the full token population plus rotation overlap per replica, about 450,000 entries instead of today's fixed 4,096) and the TokenReview client's QPS and burst. The connection age limit must stay well above the cache window: if monitors moved between replicas more often than that, most validations would land on a replica that has not cached their token yet.
+We plan for the worst case, because dedup does not stop monitors from sending. Two of today's constants become configuration: the cache capacity (every token in the fleet plus the extra ones that exist while tokens rotate, about 450,000 entries per replica instead of today's fixed 4,096) and the TokenReview client's QPS and burst. The connection age limit must stay well above the cache window: if monitors moved between replicas more often than that, most validations would land on a replica that has not cached their token yet.
 
 ### Configuration
 
@@ -315,9 +262,8 @@ platformConnector:
       crossNodePublishers: []   # override for the derived list of components
                                 # allowed to name other nodes
     datastore:
-      maxPoolSize: 10   # database connections per replica
-      retryWindow: 5m   # server-side budget for acknowledged batches;
-                        # also sizes terminationGracePeriodSeconds
+      maxPoolSize: 10   # database connections per replica; must cover the
+                        # writes in flight at once
   daemonset:
     enabled: true      # turn off once every monitor publishes to the deployment
 
@@ -325,22 +271,23 @@ gpuHealthMonitor:      # every monitor chart exposes the same knob
   publishTo: socket    # socket | deployment
 ```
 
-Tuning values (queue bounds, request limits, cache capacities, TokenReview client rates) are configuration, chosen during implementation and the load test. The only ordering rule this ADR sets is that the index migration Job and server readiness come before monitor traffic, and the readiness gate enforces that. Everything else about the transition, including when the DaemonSet's flag is turned off, belongs to the separate rollout design.
+Tuning values (request limits, the wait for a condition update, cache capacities, TokenReview client rates) are configuration, chosen during implementation and the load test. The only ordering rule this ADR sets is that the index migration Job and server readiness come before monitor traffic, and the readiness gate enforces that. Everything else about the transition, including when the DaemonSet's flag is turned off, belongs to the separate rollout design.
 
 ### Future scope: pass-through tunnel
 
-Later, an authenticated TCP pass-through tunnel could carry the central services' database traffic: the server would validate a token per connection and then copy bytes without looking at them, so change streams, transactions and the database's end-to-end TLS keep working. It would not reduce connection counts, so it is out of scope for now. Its value is network control: one controlled path to the database, an identity check for clusters that do not enforce NetworkPolicies, and a Kubernetes identity behind every database connection.
+Later, an authenticated TCP pass-through tunnel (see ["Appendix: tunnel versus write API"](#appendix-tunnel-versus-write-api)) could carry the central services' database traffic: the server would validate a token per connection and then copy bytes without looking at them, so change streams, transactions and the database's end-to-end TLS keep working. It would not reduce connection counts, so it is out of scope for now. Its value is network control: one controlled path to the database, an identity check for clusters that do not enforce NetworkPolicies, and a Kubernetes identity behind every database connection.
 
-### Future scope: disk-backed queue
+### Future scope: persistent queue
 
-The server's queue is in memory on purpose. That is why admission pushes back into the monitors' client queues, and why a crash can lose acknowledged batches within the admission bounds. Backing the queue with disk would remove that crash-loss window, absorb datastore outages without backpressure, and shrink the client queues monitors need. The costs are a stateful Deployment and a disk write per batch. The in-memory design should prove itself first; the queue sits behind one interface, which is where durability can be added later.
+If a datastore outage longer than the monitors' retry window ever has to be survived without loss, a persistent queue can be added in front of the write, together with the delivery guarantees it would need. Nothing in this design blocks that: the write sits behind the store connector, which is where a queue would go.
 
 ## Rationale
 
 - Database connections stop growing with the fleet: at 100,000 nodes the write path drops from roughly 300,000 connections to about 50, and the central services are unchanged.
-- The central role reuses the existing gRPC service, token stack and `store-client`, so behavior stays the same as today. A proof of concept ran it end to end on a kind cluster.
+- The central role reuses the existing gRPC service, token stack and `store-client`, so behavior stays the same as today. A proof of concept ran the central role end to end on a kind cluster, with the earlier queued write path.
+- Writing inside the request keeps the server stateless, so there is no queue to bound, drain or make durable, and no coordination between replicas.
 - Database credentials leave the fleet: no per-node pod carries one, and rotating the write path's credential touches 3 pods instead of every node.
-- No dependency on an unmaintained third-party proxy, and PostgreSQL benefits just as much.
+- No dependency on an unmaintained third-party proxy (mongobetween), and PostgreSQL benefits just as much.
 
 ## Consequences
 
@@ -349,37 +296,43 @@ The server's queue is in memory on purpose. That is why admission pushes back in
 - Database connections, and the memory they cost, stop growing with the fleet.
 - Write access is tied to each publisher's identity and its own node, wherever the token is used. No per-node pod carries a database credential.
 - The read path is untouched. An outage of the deployment platform connector delays writes but cannot affect change streams or the central services.
+- The server holds nothing a monitor considers delivered, so a replica crash loses nothing, and each monitor's events are stored in order.
 
 ### Negative
 
-- A new central service sits on the write path. It must be sized, monitored and alerted on, and it adds one network hop. Admission tuning, TokenReview load and the condition guard all meet production for the first time at the switchover.
-- Every first-party publisher must adopt the shared publishing client before the switchover, and custom or token-less publishers need a product decision.
-- A replica crash loses its in-memory queue and a monitor crash loses its client queue. Both are bounded, but a replica holds many nodes' batches, so one crash loses more than one DaemonSet pod's crash does today.
-- Events can arrive out of order or more than once within the retry windows. The condition guard handles that for node conditions; how the consumers handle stale events must be confirmed before the switchover.
+- The write path now depends on one central service. If it is down, every monitor's writes stop at once and the whole fleet buffers in its clients for the retry window, where today a platform connector pod failure affects only its own node.
+- Every first-party publisher must adopt the shared publishing client before the switchover. Custom or token-less socket publishers, and the injected preflight checks that run under tenant ServiceAccounts, cannot be put on the allowlist. Each must be deprecated together with the socket, keep a thin node-local shim, or get its own identity and a network rule that lets it in. That decision is outside this ADR but has to be made before the DaemonSet is removed.
+- The server keeps no buffer. A datastore outage is felt by every monitor at once, a MongoDB primary election shows up as a burst of retries, and an outage longer than the monitors' retry window loses events at the edge, as it does today.
+- Node condition updates are best effort, and when a batch changes the node they add Kubernetes API latency to the acknowledgement. A condition can be briefly wrong after a client time-out until the monitor's next event.
 
 ### Mitigations
 
 - The load test at the modeled rates is the gate before any switchover, and the mode is off by default.
-- The shared Go and Python clients carry the queue, retry and key logic once, and the per-monitor flag lets monitors switch one at a time.
-- Every drop is counted where it happens (forced drops, admission rejections, skipped condition updates). A disk-backed queue is recorded as future scope in case bounded in-memory loss turns out to be too tight.
-- The per-fault watermark, the timestamp bounds and the per-node store workers keep ordering effects within known bounds.
+- The shared Go and Python clients carry the one-at-a-time sending, retry and key logic once, and the per-monitor flag lets monitors switch one at a time.
+- Every drop and failure is counted where it happens (client drops, busy rejections, failed writes, condition updates that failed or ran out of time). A persistent queue is recorded as future scope in case client-side retries turn out to be too tight.
+- Repeats never touch the Kubernetes API and the condition update has a bounded wait, so for most requests the acknowledgement waits only for the datastore write.
 
 ## Alternatives Considered
 
-### Purpose-built central service
+### Acknowledge when queued, write later
 
-**Rejected** because the document shape, pipeline behavior and condition semantics must match exactly. Running the platform connector binary centrally reuses that exact code; a separate implementation could drift from it. One binary also means one image and no second build, scan or allowlist path. A purpose-built service could offer a stronger reply (acknowledging only after the batch is stored, rather than when it is queued), but keeping the existing contract was judged safer, and a later change could still make the server write synchronously through the store connector.
+**Rejected.** Earlier drafts of this design kept today's reply: the server acknowledged a batch as soon as it was queued and wrote it later from an in-memory queue. Run centrally, that needed a lot of machinery: bounds and per-node quotas on the queue, a drain step before every planned stop, a server-side retry window, forced-drop metrics, and a per-fault watermark inside each node condition so that several replicas could update conditions safely. It still lost every queued batch on a crash. And it could store a monitor's events out of order: when a monitor's connection moved to another replica while the old one was behind, the newer batch was written first, and fault-quarantine reacts to events in the order they are stored. Writing inside the request removes all of that for a slightly longer reply.
+
+### Sequence numbers with gap filling
+
+**Rejected.** Keep the queue, number every batch per monitor, and have each consumer (fault-quarantine, health-events-analyzer, the condition writer) hold an event back until the numbers before it have arrived, the way TCP reassembles packets. It gives exact order when nothing is lost. But every consumer has to carry the reassembly logic and remember its position per monitor, and because a monitor gives up on a batch after its retry window, a gap can be permanent. The consumer then needs a give-up timer of several minutes, during which every later event from that monitor waits: a fatal event stuck behind a lost one would wait minutes before anyone cordons the node.
+
+### Pinning each node to one replica
+
+**Rejected.** Give the replicas stable names and have each monitor pick its replica by hashing its node name, so one replica is the only writer for a node, as the DaemonSet pod is today. Order per node holds while that replica is up. But every rollout, crash or node drain takes it down, and then either the nodes pinned to it stop publishing until it is back, so a third of the fleet pauses on every restart, or they fail over to another replica and the ordering problem comes straight back. The safe version needs a hand-off protocol in the database, and the four components that report about many nodes would have to split each batch by node and hold a connection to every replica.
+
+### Node conditions from a change-stream consumer
+
+**Deferred.** A consumer reading the datastore's change stream could update node conditions in exact storage order and survive restarts through resume tokens. It would be new stateful code, a fourth reader of the whole event stream, and it would make the datastore a hard dependency for node conditions, which today are updated even when the datastore is down. Updating conditions inside the request keeps that independence. If best-effort conditions ever prove insufficient, this is the way to make them durable.
 
 ### mongobetween
 
-**Rejected** for four reasons. Clients cannot authenticate to it: its handshake offers no authentication, so the database credentials inside the proxy would be protected only by network reachability. It is built for `mongos` shard routers, and its README says direct replica set use is not battle tested, while NVSentinel's default deployment is a replica set. It is MongoDB-only, while NVSentinel also supports PostgreSQL. And it has been unmaintained for about two years (Go 1.18, reflection into driver internals, a MongoDB 4.2 wire-version handshake). Its lessons and parts of its code remain reusable (Apache 2.0) if a pooled MongoDB-protocol endpoint is ever needed.
-
-## Notes
-
-- Non-goal: changing what the event pipeline does. It runs centrally with the same transformations, and the stored event shape is unchanged apart from the idempotency key and its unique index.
-- Non-goal: a general query API; the central services keep their direct database connections.
-- Non-goal: a pooled MongoDB-protocol endpoint; mongobetween is the reference to borrow from if one is ever needed.
-- The optional external gRPC sink (ADR-033) runs centrally as another attached queue under the same admission reservation. It has no idempotency index, so external consumers keep the duplicate-tolerant at-least-once delivery its contract already requires.
+[mongobetween](https://github.com/coinbase/mongobetween) is the third-party MongoDB connection pooler that issue #1595 originally proposed. **Rejected** for four reasons. Clients cannot authenticate to it: its handshake offers no authentication, so the database credentials inside the proxy would be protected only by network reachability. It is built for `mongos` shard routers, and its README says direct replica set use is not battle tested, while NVSentinel's default deployment is a replica set. It is MongoDB-only, while NVSentinel also supports PostgreSQL. And it has been unmaintained for about two years (Go 1.18, reflection into driver internals, a MongoDB 4.2 wire-version handshake). Its lessons and parts of its code remain reusable (Apache 2.0) if a pooled MongoDB-protocol endpoint is ever needed.
 
 ## References
 
