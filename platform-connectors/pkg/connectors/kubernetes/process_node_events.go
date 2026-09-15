@@ -649,7 +649,9 @@ func (r *K8sConnector) rememberNodeEvent(nodeName string, event *corev1.Event, e
 		r.nodeEventMemory().Add(key, written)
 	}
 
-	if len(written) >= maxRememberedMessagesPerCheck {
+	// A refresh of a remembered message must not cost the other messages
+	// their memory; only a new message arriving at capacity starts over.
+	if _, exists := written[event.Message]; !exists && len(written) >= maxRememberedMessagesPerCheck {
 		clear(written)
 	}
 

@@ -25,7 +25,7 @@ import (
 // Name is the pipeline registry name for the deduplication transformer.
 const Name = "Deduplicator"
 
-// Deduplicator marks repeated health events as STORE_AND_ANALYSE within a tracker suppression window.
+// Deduplicator marks repeated unhealthy events as STORE_AND_ANALYSE within a tracker suppression window.
 type Deduplicator struct {
 	tracker *tracker
 	include map[string]bool

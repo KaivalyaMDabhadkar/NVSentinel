@@ -259,12 +259,12 @@ func TestClearUnhealthyCounterpartNoopForUnhealthyEvent(t *testing.T) {
 	assert.True(t, tracker.checkAndMark(event))
 }
 
-// TestTrackerResendOfTheSameBatchIsNotADuplicate: the deployment platform
+// TestCheckAndMark_SameIdempotencyKeyResend_NotDuplicate: the deployment platform
 // connector stamps a per-event idempotency key and runs dedup before the
 // write. A resend with the same key (the write failed, the client retried)
 // keeps its first decision; a different batch with the same content is a
 // duplicate; events without a key (the socket path) behave as before.
-func TestTrackerResendOfTheSameBatchIsNotADuplicate(t *testing.T) {
+func TestCheckAndMark_SameIdempotencyKeyResend_NotDuplicate(t *testing.T) {
 	tracker := newTracker(time.Minute)
 
 	stamped := func(key string) *pb.HealthEvent {
@@ -287,9 +287,9 @@ func TestTrackerResendOfTheSameBatchIsNotADuplicate(t *testing.T) {
 	assert.True(t, unstamped.checkAndMark(plain), "without keys every repeat is a duplicate")
 }
 
-// TestTrackerIsBounded: the tracker never holds more than maxEntries keys;
+// TestCheckAndMark_CapacityReached_StaysBounded: the tracker never holds more than maxEntries keys;
 // the key just marked always survives the eviction.
-func TestTrackerIsBounded(t *testing.T) {
+func TestCheckAndMark_CapacityReached_StaysBounded(t *testing.T) {
 	tracker := newTracker(time.Hour, withMaxEntries(8))
 
 	for i := range 50 {

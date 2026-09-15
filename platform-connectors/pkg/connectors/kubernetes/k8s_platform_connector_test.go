@@ -36,8 +36,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
@@ -47,7 +49,23 @@ var (
 	k8sConnector *K8sConnector
 	clientSet    *fake.Clientset
 	ctx          context.Context
+
+	// One envtest API server for the whole package: the tests that assert on
+	// what the API server recorded (node resourceVersion, Event objects and
+	// counts) share it and keep to nodes of their own. Started in TestMain;
+	// a start failure is kept so those tests fail with the reason instead of
+	// a nil pointer.
+	sharedEnvtestCli *kubernetes.Clientset
+	sharedEnvtestErr error
 )
+
+// envtestClient returns the package's shared envtest client.
+func envtestClient(t *testing.T) *kubernetes.Clientset {
+	t.Helper()
+	require.NoError(t, sharedEnvtestErr, "envtest is not available; run make dev-env-setup and export KUBEBUILDER_ASSETS")
+
+	return sharedEnvtestCli
+}
 
 func TestMain(m *testing.M) {
 	clientSet = fake.NewSimpleClientset()
@@ -59,7 +77,20 @@ func TestMain(m *testing.M) {
 		CompactedHealthEventMsgLen:    72,
 	}
 	k8sConnector = NewK8sConnector(clientSet, ringBuffer, stopCh, ctx, cfg)
+
+	sharedEnv := &envtest.Environment{}
+	if restCfg, err := sharedEnv.Start(); err != nil {
+		sharedEnvtestErr = err
+	} else if sharedEnvtestCli, err = kubernetes.NewForConfig(restCfg); err != nil {
+		sharedEnvtestErr = err
+	}
+
 	exitVal := m.Run()
+
+	if sharedEnvtestErr == nil {
+		_ = sharedEnv.Stop()
+	}
+
 	os.Exit(exitVal)
 }
 

@@ -149,7 +149,9 @@ func TestGetOrFetchMetadata_SameNodeSharesOneRead(t *testing.T) {
 	for range callers {
 		wg.Go(func() {
 			metadata, err := augmentor.getOrFetchMetadata(ctx, "shared")
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return
+			}
 			results <- metadata
 		})
 	}

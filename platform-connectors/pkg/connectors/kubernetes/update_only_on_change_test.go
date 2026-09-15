@@ -17,6 +17,8 @@ package kubernetes
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -25,40 +27,91 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/client-go/kubernetes/fake"
-	k8stesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 )
 
-// countingConnector returns a connector over a fake clientset that counts node
-// status updates, so the tests below can tell an update call from a skipped
-// one.
-func countingConnector(t *testing.T, onlyOnChange bool) (*K8sConnector, *int) {
+// These tests run against the package's envtest API server (see TestMain), so
+// the evidence is what the API server recorded, not what a fake counted: a
+// node status write moves the node's resourceVersion and a skipped one does
+// not; a Kubernetes Event write shows up as an Event object, and a refresh
+// bumps its count.
+
+var nonNodeNameChars = regexp.MustCompile(`[^a-zA-Z0-9.-]+`)
+
+// envtestConnector returns a connector over the shared API server and a node
+// of this test's own; the node and its Events are removed when the test ends.
+func envtestConnector(t *testing.T, onlyOnChange bool, cfg ...K8sConnectorConfig) (*K8sConnector, *kubernetes.Clientset, string) {
 	t.Helper()
 
-	clientset := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
+	cli := envtestClient(t)
+	ctx := context.Background()
+	// Node names are DNS subdomains: lower case letters, digits, "-" and ".".
+	nodeName := "node-" + strings.ToLower(nonNodeNameChars.ReplaceAllString(t.Name(), "-"))
 
-	statusUpdates := 0
+	_, err := cli.CoreV1().Nodes().Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: nodeName}}, metav1.CreateOptions{})
+	require.NoError(t, err)
 
-	clientset.PrependReactor("update", "nodes", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		if action.GetSubresource() == "status" {
-			statusUpdates++
-		}
-
-		return false, nil, nil
+	t.Cleanup(func() {
+		_ = cli.CoreV1().Nodes().Delete(ctx, nodeName, metav1.DeleteOptions{})
+		_ = cli.CoreV1().Events(DefaultNamespace).DeleteCollection(ctx, metav1.DeleteOptions{},
+			metav1.ListOptions{FieldSelector: "involvedObject.name=" + nodeName})
 	})
-	connector := NewK8sConnector(clientset, nil, nil, context.Background(), K8sConnectorConfig{
+
+	config := K8sConnectorConfig{
 		MaxNodeConditionMessageLength: 1024,
 		CompactedHealthEventMsgLen:    72,
 		UpdateOnlyOnChange:            onlyOnChange,
-	})
+	}
+	if len(cfg) > 0 {
+		config = cfg[0]
+		config.UpdateOnlyOnChange = onlyOnChange
+	}
 
-	return connector, &statusUpdates
+	return NewK8sConnector(cli, nil, nil, ctx, config), cli, nodeName
 }
 
-func xidEvent(at time.Time, healthy bool) *protos.HealthEvent {
+// nodeVersion is the node's resourceVersion: it moves on every status write
+// the API server accepted and stays put when the connector skipped the write.
+func nodeVersion(t *testing.T, cli *kubernetes.Clientset, nodeName string) string {
+	t.Helper()
+
+	node, err := cli.CoreV1().Nodes().Get(context.Background(), nodeName, metav1.GetOptions{})
+	require.NoError(t, err)
+
+	return node.ResourceVersion
+}
+
+// nodeEvents lists the Events written for the node, oldest name first.
+func nodeEvents(t *testing.T, cli *kubernetes.Clientset, nodeName string) []corev1.Event {
+	t.Helper()
+
+	list, err := cli.CoreV1().Events(DefaultNamespace).List(context.Background(),
+		metav1.ListOptions{FieldSelector: "involvedObject.name=" + nodeName})
+	require.NoError(t, err)
+
+	sort.Slice(list.Items, func(i, j int) bool { return list.Items[i].Name < list.Items[j].Name })
+
+	return list.Items
+}
+
+// eventCount returns the count of the one Event carrying the message.
+func eventCount(t *testing.T, cli *kubernetes.Clientset, nodeName, message string) int32 {
+	t.Helper()
+
+	for _, event := range nodeEvents(t, cli, nodeName) {
+		if event.Message == message {
+			return event.Count
+		}
+	}
+
+	require.Failf(t, "Event not found", "no Event on %s with message %q", nodeName, message)
+
+	return 0
+}
+
+func xidEvent(nodeName string, at time.Time, healthy bool) *protos.HealthEvent {
 	return &protos.HealthEvent{
 		CheckName:          "GpuXidError",
 		IsHealthy:          healthy,
@@ -69,7 +122,7 @@ func xidEvent(at time.Time, healthy bool) *protos.HealthEvent {
 		ComponentClass:     "GPU",
 		RecommendedAction:  protos.RecommendedAction_CONTACT_SUPPORT,
 		Message:            "XID 79 on GPU 0",
-		NodeName:           "node-a",
+		NodeName:           nodeName,
 	}
 }
 
@@ -79,65 +132,55 @@ func batch(events ...*protos.HealthEvent) *protos.HealthEvents {
 
 // TestUpdateOnlyOnChange_SkipsRepeats: the first fault is a transition and
 // updates the node; the same fault again (a repeat, or a resent batch) changes
-// nothing the node shows and must not cost an update call; a recovery is a
+// nothing the node shows and must not cost a status write; a recovery is a
 // transition again.
 func TestUpdateOnlyOnChange_SkipsRepeats(t *testing.T) {
-	connector, statusUpdates := countingConnector(t, true)
+	connector, cli, node := envtestConnector(t, true)
 	ctx := context.Background()
 	now := time.Now()
+	created := nodeVersion(t, cli, node)
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(now, false))))
-	require.Equal(t, 1, *statusUpdates, "the first fault is a transition")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(node, now, false))))
+	afterFault := nodeVersion(t, cli, node)
+	require.NotEqual(t, created, afterFault, "the first fault is a transition")
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(now, false))))
-	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(now.Add(time.Minute), false))))
-	require.Equal(t, 1, *statusUpdates, "a repeat of the same fault changes nothing and is skipped")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(node, now, false))))
+	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(node, now.Add(time.Minute), false))))
+	require.Equal(t, afterFault, nodeVersion(t, cli, node), "a repeat of the same fault changes nothing and is skipped")
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(now.Add(2*time.Minute), true))))
-	require.Equal(t, 2, *statusUpdates, "the recovery is a transition")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(node, now.Add(2*time.Minute), true))))
+	afterRecovery := nodeVersion(t, cli, node)
+	require.NotEqual(t, afterFault, afterRecovery, "the recovery is a transition")
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(now.Add(3*time.Minute), true))))
-	require.Equal(t, 2, *statusUpdates, "healthy again is a repeat")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(node, now.Add(3*time.Minute), true))))
+	require.Equal(t, afterRecovery, nodeVersion(t, cli, node), "healthy again is a repeat")
 }
 
 // TestUpdateOnlyOnChange_SaturatedMessageIsStillARepeat: when a node's
 // condition message would exceed its length cap the stored entries are
 // compacted, so their text never equals a repeat's full text again; the repeat
 // must still count as no change, or exactly the busiest nodes would pay a
-// status update on every repeat.
+// status write on every repeat.
 func TestUpdateOnlyOnChange_SaturatedMessageIsStillARepeat(t *testing.T) {
-	clientset := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
-
-	statusUpdates := 0
-
-	clientset.PrependReactor("update", "nodes", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		if action.GetSubresource() == "status" {
-			statusUpdates++
-		}
-
-		return false, nil, nil
-	})
-	connector := NewK8sConnector(clientset, nil, nil, context.Background(), K8sConnectorConfig{
+	connector, cli, node := envtestConnector(t, true, K8sConnectorConfig{
 		// Tight enough that six full messages do not fit and are compacted,
 		// wide enough that the six compacted ones do.
 		MaxNodeConditionMessageLength: 700,
 		CompactedHealthEventMsgLen:    40,
-		UpdateOnlyOnChange:            true,
 	})
 	ctx := context.Background()
 	now := time.Now()
 
 	faults := make([]*protos.HealthEvent, 0, 6)
 	for gpu := range 6 {
-		fault := xidEvent(now.Add(time.Duration(gpu)*time.Second), false)
+		fault := xidEvent(node, now.Add(time.Duration(gpu)*time.Second), false)
 		fault.EntitiesImpacted = []*protos.Entity{{EntityType: "GPU", EntityValue: fmt.Sprint(gpu)}}
 		fault.Message = fmt.Sprintf("XID 79 on GPU %d: %s", gpu, strings.Repeat("diagnostic detail ", 8))
 		faults = append(faults, fault)
 	}
 
 	require.NoError(t, connector.ProcessBatch(ctx, batch(faults...)))
-	updatesAfterFirst := statusUpdates
-	require.GreaterOrEqual(t, updatesAfterFirst, 1)
+	afterFirst := nodeVersion(t, cli, node)
 
 	// The same faults again, as one batch and one by one: nothing changed.
 	require.NoError(t, connector.ProcessBatch(ctx, batch(faults...)))
@@ -146,81 +189,48 @@ func TestUpdateOnlyOnChange_SaturatedMessageIsStillARepeat(t *testing.T) {
 		require.NoError(t, connector.ProcessBatch(ctx, batch(fault)))
 	}
 
-	require.Equal(t, updatesAfterFirst, statusUpdates, "repeats of compacted faults are no change")
+	require.Equal(t, afterFirst, nodeVersion(t, cli, node), "repeats of compacted faults are no change")
 }
 
 // TestUpdateOnlyOnChange_NewFaultJoiningIsAChange: a second fault on the same
 // check adds a message, which the node does not show yet.
 func TestUpdateOnlyOnChange_NewFaultJoiningIsAChange(t *testing.T) {
-	connector, statusUpdates := countingConnector(t, true)
+	connector, cli, node := envtestConnector(t, true)
 	ctx := context.Background()
 	now := time.Now()
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(now, false))))
+	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(node, now, false))))
+	afterFirst := nodeVersion(t, cli, node)
 
-	second := xidEvent(now.Add(time.Second), false)
+	second := xidEvent(node, now.Add(time.Second), false)
 	second.EntitiesImpacted = []*protos.Entity{{EntityType: "GPU", EntityValue: "1"}}
 
 	require.NoError(t, connector.ProcessBatch(ctx, batch(second)))
-	require.Equal(t, 2, *statusUpdates, "a new fault joining an existing one changes the message")
+	afterSecond := nodeVersion(t, cli, node)
+	require.NotEqual(t, afterFirst, afterSecond, "a new fault joining an existing one changes the message")
 
 	require.NoError(t, connector.ProcessBatch(ctx, batch(second)))
-	require.Equal(t, 2, *statusUpdates)
+	require.Equal(t, afterSecond, nodeVersion(t, cli, node))
 }
 
 // TestUpdateOnlyOnChange_OffKeepsHeartbeatUpdates: the DaemonSet keeps
-// today's behavior, one status update per batch.
+// today's behavior, one status write per batch; the heartbeat time follows
+// the event, so a later repeat is a real write.
 func TestUpdateOnlyOnChange_OffKeepsHeartbeatUpdates(t *testing.T) {
-	connector, statusUpdates := countingConnector(t, false)
+	connector, cli, node := envtestConnector(t, false)
 	ctx := context.Background()
 	now := time.Now()
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(now, false))))
-	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(now, false))))
-	require.Equal(t, 2, *statusUpdates)
-}
+	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(node, now, false))))
+	afterFirst := nodeVersion(t, cli, node)
 
-// eventCountingConnector returns a connector over a fake clientset that counts
-// the Kubernetes Events it creates (a create answered with AlreadyExists is
-// not one) and the updates it makes.
-func eventCountingConnector(t *testing.T, onlyOnChange bool) (*K8sConnector, *int, *int) {
-	t.Helper()
-
-	clientset := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
-
-	creates, updates := 0, 0
-
-	clientset.PrependReactor("create", "events", func(action k8stesting.Action) (bool, runtime.Object, error) {
-		create, ok := action.(k8stesting.CreateAction)
-		require.True(t, ok)
-
-		object, ok := create.GetObject().(metav1.Object)
-		require.True(t, ok)
-
-		if _, err := clientset.Tracker().Get(action.GetResource(), action.GetNamespace(), object.GetName()); err != nil {
-			creates++
-		}
-
-		return false, nil, nil
-	})
-	clientset.PrependReactor("update", "events", func(_ k8stesting.Action) (bool, runtime.Object, error) {
-		updates++
-
-		return false, nil, nil
-	})
-
-	connector := NewK8sConnector(clientset, nil, nil, context.Background(), K8sConnectorConfig{
-		MaxNodeConditionMessageLength: 1024,
-		CompactedHealthEventMsgLen:    72,
-		UpdateOnlyOnChange:            onlyOnChange,
-	})
-
-	return connector, &creates, &updates
+	require.NoError(t, connector.ProcessBatch(ctx, batch(xidEvent(node, now.Add(time.Minute), false))))
+	require.NotEqual(t, afterFirst, nodeVersion(t, cli, node), "every batch is written")
 }
 
 // thermalEvent is a non-fatal fault, the kind that is announced as a
 // Kubernetes Event rather than a node condition.
-func thermalEvent(at time.Time, healthy bool, gpu string) *protos.HealthEvent {
+func thermalEvent(nodeName string, at time.Time, healthy bool, gpu string) *protos.HealthEvent {
 	return &protos.HealthEvent{
 		CheckName:          "GpuThermalWatch",
 		IsHealthy:          healthy,
@@ -231,79 +241,83 @@ func thermalEvent(at time.Time, healthy bool, gpu string) *protos.HealthEvent {
 		ComponentClass:     "GPU",
 		RecommendedAction:  protos.RecommendedAction_NONE,
 		Message:            "GPU " + gpu + " is hot",
-		NodeName:           "node-a",
+		NodeName:           nodeName,
 	}
 }
 
 // TestUpdateOnlyOnChange_EventsWrittenOnChange: a fault's first report
-// creates its Event; repeats cost no API call; a fault on another GPU is a
-// change; after the check recovers, the same fault is announced again.
+// creates its Event; repeats write nothing; a fault on another GPU is a
+// change; after the check recovers, the same fault is announced again by
+// refreshing the Event that still exists in the cluster.
 func TestUpdateOnlyOnChange_EventsWrittenOnChange(t *testing.T) {
-	connector, creates, updates := eventCountingConnector(t, true)
+	connector, cli, node := envtestConnector(t, true)
 	ctx := context.Background()
 	now := time.Now()
+	hot0 := connector.fetchHealthEventMessage(thermalEvent(node, now, false, "0"))
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now, false, "0"))))
-	require.Equal(t, 1, *creates, "the first report of a fault creates its Event")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now, false, "0"))))
+	require.Len(t, nodeEvents(t, cli, node), 1, "the first report of a fault creates its Event")
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now, false, "0"))))
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(time.Minute), false, "0"))))
-	require.Equal(t, 1, *creates, "a repeat, or a resent batch, writes nothing")
-	require.Equal(t, 0, *updates)
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now, false, "0"))))
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(time.Minute), false, "0"))))
+	require.Len(t, nodeEvents(t, cli, node), 1, "a repeat, or a resent batch, writes nothing")
+	require.Equal(t, int32(1), eventCount(t, cli, node, hot0))
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(time.Minute), false, "1"))))
-	require.Equal(t, 2, *creates, "a fault on another GPU is a change")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(time.Minute), false, "1"))))
+	require.Len(t, nodeEvents(t, cli, node), 2, "a fault on another GPU is a change")
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(2*time.Minute), true, "0"))))
-	require.Equal(t, 2, *creates, "a recovery writes no Event")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(2*time.Minute), true, "0"))))
+	require.Len(t, nodeEvents(t, cli, node), 2, "a recovery writes no Event")
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(3*time.Minute), false, "0"))))
-	require.Equal(t, 2, *creates, "the fault's return reuses its Event, which still exists in the cluster")
-	require.Equal(t, 1, *updates, "the return after a recovery is announced by refreshing that Event")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(3*time.Minute), false, "0"))))
+	require.Len(t, nodeEvents(t, cli, node), 2, "the fault's return reuses its Event, which still exists in the cluster")
+	require.Equal(t, int32(2), eventCount(t, cli, node, hot0), "the return after a recovery is announced by refreshing that Event")
 }
 
 // TestUpdateOnlyOnChange_EventRefreshedAfterInterval: once the refresh
 // interval has passed, the next repeat refreshes the existing Event (count and
 // timestamp) instead of creating another one.
 func TestUpdateOnlyOnChange_EventRefreshedAfterInterval(t *testing.T) {
-	connector, creates, updates := eventCountingConnector(t, true)
+	connector, cli, node := envtestConnector(t, true)
 	ctx := context.Background()
 	now := time.Now()
+	hot0 := connector.fetchHealthEventMessage(thermalEvent(node, now, false, "0"))
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now, false, "0"))))
-	require.Equal(t, 1, *creates)
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now, false, "0"))))
+	require.Len(t, nodeEvents(t, cli, node), 1)
 
-	k8sEvent := connector.createK8sEvent(ctx, thermalEvent(now, false, "0"))
+	k8sEvent := connector.createK8sEvent(ctx, thermalEvent(node, now, false, "0"))
 
 	connector.nodeEventMu.Lock()
-	written, ok := connector.nodeEventMemory().Get(nodeCheckKey("node-a", k8sEvent.Type))
+	written, ok := connector.nodeEventMemory().Get(nodeCheckKey(node, k8sEvent.Type))
 	require.True(t, ok)
 	remembered := written[k8sEvent.Message]
 	remembered.writtenAt = now.Add(-nodeEventRefreshInterval - time.Second)
 	written[k8sEvent.Message] = remembered
 	connector.nodeEventMu.Unlock()
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(time.Minute), false, "0"))))
-	require.Equal(t, 1, *creates, "the refresh reuses the existing Event")
-	require.Equal(t, 1, *updates, "the refresh bumps its count")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(time.Minute), false, "0"))))
+	require.Len(t, nodeEvents(t, cli, node), 1, "the refresh reuses the existing Event")
+	require.Equal(t, int32(2), eventCount(t, cli, node, hot0), "the refresh bumps its count")
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(2*time.Minute), false, "0"))))
-	require.Equal(t, 1, *updates, "the refresh restarts the interval")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(2*time.Minute), false, "0"))))
+	require.Equal(t, int32(2), eventCount(t, cli, node, hot0), "the refresh restarts the interval")
 }
 
 // TestUpdateOnlyOnChange_OffBumpsEventCount: the DaemonSet keeps today's
 // behavior, every repeat bumps the Event's count.
 func TestUpdateOnlyOnChange_OffBumpsEventCount(t *testing.T) {
-	connector, creates, updates := eventCountingConnector(t, false)
+	connector, cli, node := envtestConnector(t, false)
 	ctx := context.Background()
 	now := time.Now()
+	hot0 := connector.fetchHealthEventMessage(thermalEvent(node, now, false, "0"))
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now, false, "0"))))
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now, false, "0"))))
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(time.Minute), true, "0"))))
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(2*time.Minute), false, "0"))))
-	require.Equal(t, 1, *creates)
-	require.Equal(t, 2, *updates, "repeats bump the count, also after a recovery")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now, false, "0"))))
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now, false, "0"))))
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(time.Minute), true, "0"))))
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(2*time.Minute), false, "0"))))
+	require.Len(t, nodeEvents(t, cli, node), 1)
+	require.Equal(t, int32(3), eventCount(t, cli, node, hot0), "repeats bump the count, also after a recovery")
 }
 
 // TestUpdateOnlyOnChange_EventsFollowTimestampOrder: a batch is processed in
@@ -311,61 +325,80 @@ func TestUpdateOnlyOnChange_OffBumpsEventCount(t *testing.T) {
 // after a newer fault in the same batch does not erase the memory of that
 // fault, which would announce it again on its next repeat.
 func TestUpdateOnlyOnChange_EventsFollowTimestampOrder(t *testing.T) {
-	connector, creates, updates := eventCountingConnector(t, true)
+	connector, cli, node := envtestConnector(t, true)
 	ctx := context.Background()
 	now := time.Now()
+	hot0 := connector.fetchHealthEventMessage(thermalEvent(node, now, false, "0"))
 
 	// Wire order: the fault first, then a recovery that is a minute older.
 	require.NoError(t, connector.ProcessBatch(ctx, batch(
-		thermalEvent(now.Add(time.Minute), false, "0"),
-		thermalEvent(now, true, "0"),
+		thermalEvent(node, now.Add(time.Minute), false, "0"),
+		thermalEvent(node, now, true, "0"),
 	)))
-	require.Equal(t, 1, *creates, "the fault, the latest word on GPU 0, is announced")
+	require.Len(t, nodeEvents(t, cli, node), 1, "the fault, the latest word on GPU 0, is announced")
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(2*time.Minute), false, "0"))))
-	require.Equal(t, 1, *creates)
-	require.Equal(t, 0, *updates, "the fault is still remembered: the older recovery did not erase it")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(2*time.Minute), false, "0"))))
+	require.Len(t, nodeEvents(t, cli, node), 1)
+	require.Equal(t, int32(1), eventCount(t, cli, node, hot0), "the fault is still remembered: the older recovery did not erase it")
 }
 
 // TestUpdateOnlyOnChange_PartialRecoveryKeepsOtherFaults: a recovery names
 // the entities that recovered, so only their Events are forgotten; a fault on
 // another entity of the same check stays a repeat.
 func TestUpdateOnlyOnChange_PartialRecoveryKeepsOtherFaults(t *testing.T) {
-	connector, creates, updates := eventCountingConnector(t, true)
+	connector, cli, node := envtestConnector(t, true)
 	ctx := context.Background()
 	now := time.Now()
+	hot0 := connector.fetchHealthEventMessage(thermalEvent(node, now, false, "0"))
+	hot1 := connector.fetchHealthEventMessage(thermalEvent(node, now, false, "1"))
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now, false, "0"))))
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now, false, "1"))))
-	require.Equal(t, 2, *creates)
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now, false, "0"))))
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now, false, "1"))))
+	require.Len(t, nodeEvents(t, cli, node), 2)
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(time.Minute), true, "0"))))
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(time.Minute), true, "0"))))
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(2*time.Minute), false, "1"))))
-	require.Equal(t, 2, *creates, "GPU 1 is still the same fault; GPU 0 recovering does not re-announce it")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(2*time.Minute), false, "1"))))
+	require.Len(t, nodeEvents(t, cli, node), 2, "GPU 1 is still the same fault; GPU 0 recovering does not re-announce it")
+	require.Equal(t, int32(1), eventCount(t, cli, node, hot1))
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(3*time.Minute), false, "0"))))
-	require.Equal(t, 2, *creates)
-	require.Equal(t, 1, *updates, "GPU 0 faulting again after its recovery is announced by refreshing its Event")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(3*time.Minute), false, "0"))))
+	require.Len(t, nodeEvents(t, cli, node), 2)
+	require.Equal(t, int32(2), eventCount(t, cli, node, hot0), "GPU 0 faulting again after its recovery is announced by refreshing its Event")
 
 	// A recovery naming no entity clears the whole check.
-	recoveredAll := thermalEvent(now.Add(4*time.Minute), true, "0")
+	recoveredAll := thermalEvent(node, now.Add(4*time.Minute), true, "0")
 	recoveredAll.EntitiesImpacted = nil
 	require.NoError(t, connector.ProcessBatch(ctx, batch(recoveredAll)))
 
-	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(now.Add(5*time.Minute), false, "1"))))
-	require.Equal(t, 2, *creates)
-	require.Equal(t, 2, *updates, "GPU 1 is announced again the same way")
+	require.NoError(t, connector.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(5*time.Minute), false, "1"))))
+	require.Len(t, nodeEvents(t, cli, node), 2)
+	require.Equal(t, int32(2), eventCount(t, cli, node, hot1), "GPU 1 is announced again the same way")
 }
 
 // TestNodeEventMemory_BoundsMessagesPerCheck: the message is producer
 // controlled, so the Events remembered for one check on one node are bounded;
 // past the bound the check's memory is dropped and starts again with the
-// entry being written.
+// entry being written. A refresh of a message already remembered is not a
+// new entry and must not cost the others their memory.
 func TestNodeEventMemory_BoundsMessagesPerCheck(t *testing.T) {
 	connector := &K8sConnector{}
+	remembered := func(message string) bool {
+		_, ok := connector.rememberedNodeEvent("node-a", &corev1.Event{Type: "check", Message: message})
 
-	for i := range maxRememberedMessagesPerCheck + 8 {
+		return ok
+	}
+
+	for i := range maxRememberedMessagesPerCheck {
+		connector.rememberNodeEvent("node-a", &corev1.Event{Type: "check", Message: fmt.Sprintf("message-%d", i)}, nil)
+	}
+
+	// The memory is full; refreshing a known message keeps every other one.
+	connector.rememberNodeEvent("node-a", &corev1.Event{Type: "check", Message: "message-0"}, nil)
+	require.True(t, remembered("message-0"))
+	require.True(t, remembered(fmt.Sprintf("message-%d", maxRememberedMessagesPerCheck-1)), "a refresh at capacity keeps the other messages")
+
+	for i := maxRememberedMessagesPerCheck; i < maxRememberedMessagesPerCheck+8; i++ {
 		connector.rememberNodeEvent("node-a", &corev1.Event{Type: "check", Message: fmt.Sprintf("message-%d", i)}, nil)
 	}
 
@@ -375,60 +408,51 @@ func TestNodeEventMemory_BoundsMessagesPerCheck(t *testing.T) {
 
 	require.True(t, ok)
 	require.LessOrEqual(t, len(written), maxRememberedMessagesPerCheck)
-
-	last := fmt.Sprintf("message-%d", maxRememberedMessagesPerCheck+7)
-	_, ok = connector.rememberedNodeEvent("node-a", &corev1.Event{Type: "check", Message: last})
-	require.True(t, ok, "the newest entry is kept")
-
-	_, ok = connector.rememberedNodeEvent("node-a", &corev1.Event{Type: "check", Message: "message-0"})
-	require.False(t, ok, "the memory was dropped when it filled up")
+	require.True(t, remembered(fmt.Sprintf("message-%d", maxRememberedMessagesPerCheck+7)), "the newest entry is kept")
+	require.False(t, remembered("message-0"), "the memory was dropped when a new message arrived at capacity")
 }
 
 // TestNodeEventName_DerivedFromTheFault: the same fault gets the same name on
 // every replica and across restarts; a different message is a different
 // Event.
 func TestNodeEventName_DerivedFromTheFault(t *testing.T) {
-	connector, _, _ := eventCountingConnector(t, true)
+	connector, _, node := envtestConnector(t, true)
 	ctx := context.Background()
 	now := time.Now()
 
-	first := connector.createK8sEvent(ctx, thermalEvent(now, false, "0"))
-	again := connector.createK8sEvent(ctx, thermalEvent(now.Add(time.Hour), false, "0"))
-	other := connector.createK8sEvent(ctx, thermalEvent(now, false, "1"))
+	first := connector.createK8sEvent(ctx, thermalEvent(node, now, false, "0"))
+	again := connector.createK8sEvent(ctx, thermalEvent(node, now.Add(time.Hour), false, "0"))
+	other := connector.createK8sEvent(ctx, thermalEvent(node, now, false, "1"))
 
 	require.Equal(t, first.Name, again.Name, "the time of the report does not change the name")
 	require.NotEqual(t, first.Name, other.Name, "another GPU is another Event")
-	require.Regexp(t, `^node-a\.[0-9a-f]{16}$`, first.Name)
+	require.Regexp(t, `^`+node+`\.[0-9a-f]{16}$`, first.Name)
 }
 
 // TestNodeEvents_ReplicaWithoutMemoryRefreshesTheExistingEvent: a replica that
 // has never seen a fault (or lost its memory of it) finds the Event another
-// replica wrote and bumps it instead of writing a second one. The same holds
-// for the DaemonSet after a restart.
+// replica wrote and bumps it instead of writing a second one; the API server
+// answers its create with AlreadyExists for real. The same holds for the
+// DaemonSet after a restart.
 func TestNodeEvents_ReplicaWithoutMemoryRefreshesTheExistingEvent(t *testing.T) {
 	for _, onlyOnChange := range []bool{true, false} {
-		clientset := fake.NewSimpleClientset(&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-a"}})
-		cfg := K8sConnectorConfig{
-			MaxNodeConditionMessageLength: 1024,
-			CompactedHealthEventMsgLen:    72,
-			UpdateOnlyOnChange:            onlyOnChange,
-		}
-		ctx := context.Background()
-		now := time.Now()
+		t.Run(fmt.Sprintf("onlyOnChange=%v", onlyOnChange), func(t *testing.T) {
+			first, cli, node := envtestConnector(t, onlyOnChange)
+			ctx := context.Background()
+			now := time.Now()
+			hot0 := first.fetchHealthEventMessage(thermalEvent(node, now, false, "0"))
 
-		first := NewK8sConnector(clientset, nil, nil, ctx, cfg)
-		require.NoError(t, first.ProcessBatch(ctx, batch(thermalEvent(now, false, "0"))))
+			require.NoError(t, first.ProcessBatch(ctx, batch(thermalEvent(node, now, false, "0"))))
 
-		// Another replica, or the same process after a restart: empty memory.
-		second := NewK8sConnector(clientset, nil, nil, ctx, cfg)
-		require.NoError(t, second.ProcessBatch(ctx, batch(thermalEvent(now.Add(time.Minute), false, "0"))))
+			// Another replica, or the same process after a restart: empty memory.
+			second := NewK8sConnector(cli, nil, nil, ctx, first.config)
+			require.NoError(t, second.ProcessBatch(ctx, batch(thermalEvent(node, now.Add(time.Minute), false, "0"))))
 
-		events, err := clientset.CoreV1().Events(DefaultNamespace).List(ctx, metav1.ListOptions{})
-		require.NoError(t, err)
-		require.Len(t, events.Items, 1, "one Event per fault, however many replicas saw it (onlyOnChange=%v)", onlyOnChange)
-		require.Equal(t, int32(2), events.Items[0].Count, "the second replica bumped the existing Event")
+			require.Len(t, nodeEvents(t, cli, node), 1, "one Event per fault, however many replicas saw it")
+			require.Equal(t, int32(2), eventCount(t, cli, node, hot0), "the second replica bumped the existing Event")
 
-		_, known := second.rememberedNodeEvent("node-a", second.createK8sEvent(ctx, thermalEvent(now, false, "0")))
-		require.True(t, known, "the second replica now remembers the Event it refreshed")
+			_, known := second.rememberedNodeEvent(node, second.createK8sEvent(ctx, thermalEvent(node, now, false, "0")))
+			require.True(t, known, "the second replica now remembers the Event it refreshed")
+		})
 	}
 }
