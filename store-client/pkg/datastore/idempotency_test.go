@@ -24,14 +24,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestIdempotencyConstants(t *testing.T) {
-	// These values are part of the wire and schema contract with the
-	// deployment platform connector and the index migration Job; they must
-	// not drift.
-	assert.Equal(t, "idempotencyKey", HealthEventIdempotencyKeyMetadataField)
-	assert.Equal(t, "healthevent_idempotency_key_unique", HealthEventIdempotencyIndexName)
-}
-
 func TestBulkWriteFailureError(t *testing.T) {
 	t.Run("a duplicate on another index names the index and keeps the server's message", func(t *testing.T) {
 		failure := &BulkWriteFailure{

@@ -20,6 +20,9 @@ import (
 	"strings"
 )
 
+// The two names below are part of the stored schema: documents carry the field,
+// and the index Job creates the index under this name, which every replica then
+// verifies. Changing either changes what is on disk, so treat them as fixed.
 const (
 	// HealthEventIdempotencyKeyMetadataField is the health event metadata key that
 	// carries the server-derived per-event idempotency key. Documents that contain
