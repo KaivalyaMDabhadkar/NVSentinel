@@ -38,7 +38,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
-	"github.com/nvidia/nvsentinel/platform-connectors/pkg/pipeline"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 )
 
@@ -1021,31 +1020,31 @@ func TestGetOrFetchMetadata_CancelledFollowerReturnsPromptly(t *testing.T) {
 	require.NoError(t, <-leaderDone, "the shared read was not stopped by the follower leaving")
 }
 
-// TestTransform_SpentBudgetFailsOpenAtOnce: once the batch's pipeline budget
-// is spent, a cache miss fails open immediately instead of waiting a whole
+// TestTransform_CancelledCallerFailsOpenAtOnce: once the caller's context has
+// ended, a cache miss fails open immediately instead of waiting a whole
 // lookup timeout per event.
-func TestTransform_SpentBudgetFailsOpenAtOnce(t *testing.T) {
-	node := "spent-budget"
+func TestTransform_CancelledCallerFailsOpenAtOnce(t *testing.T) {
+	node := "cancelled-caller"
 	ensureNode(t, node)
 
 	augmentor, err := New(context.Background(), &Config{CacheSize: 10, CacheTTL: time.Hour}, testClient)
 	require.NoError(t, err)
 
-	spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	gone, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 
 	event := &pb.HealthEvent{NodeName: node, ProcessingStrategy: pb.ProcessingStrategy_EXECUTE_REMEDIATION}
 
 	start := time.Now()
-	require.NoError(t, augmentor.Transform(spent, event))
+	require.NoError(t, augmentor.Transform(gone, event))
 	require.Less(t, time.Since(start), time.Second)
 	require.Empty(t, event.Metadata)
 }
 
-// TestGetOrFetchMetadata_SpentBudgetStartsNoReads: once a batch's budget is
-// spent, the remaining uncached nodes fail open without starting any read,
-// detached or not.
-func TestGetOrFetchMetadata_SpentBudgetStartsNoReads(t *testing.T) {
+// TestGetOrFetchMetadata_CancelledCallerStartsNoReads: once the caller's
+// context has ended, the remaining uncached nodes fail open without starting
+// any read, detached or not.
+func TestGetOrFetchMetadata_CancelledCallerStartsNoReads(t *testing.T) {
 	var reads atomic.Int32
 
 	clientset := fake.NewSimpleClientset()
@@ -1058,253 +1057,16 @@ func TestGetOrFetchMetadata_SpentBudgetStartsNoReads(t *testing.T) {
 	augmentor, err := New(context.Background(), &Config{CacheSize: 10, CacheTTL: time.Hour}, clientset)
 	require.NoError(t, err)
 
-	spent, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	gone, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 
 	for i := range 20 {
 		event := &pb.HealthEvent{NodeName: fmt.Sprintf("uncached-%d", i)}
-		require.NoError(t, augmentor.Transform(spent, event), "every event fails open")
+		require.NoError(t, augmentor.Transform(gone, event), "every event fails open")
 	}
 
 	time.Sleep(50 * time.Millisecond)
 	require.Zero(t, reads.Load(), "no read is started for a caller that will not wait for it")
-}
-
-// TestPrewarm_ReadsEachUncachedNodeOnce: a batch naming several nodes, some
-// repeatedly, costs one read per distinct node, and the per-event pass then
-// finds everything cached.
-func TestPrewarm_ReadsEachUncachedNodeOnce(t *testing.T) {
-	var reads atomic.Int32
-
-	clientset := fake.NewSimpleClientset(
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n1"}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n2"}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "n3"}},
-	)
-	clientset.PrependReactor("get", "nodes", func(_ k8stesting.Action) (bool, runtime.Object, error) {
-		reads.Add(1)
-
-		return false, nil, nil
-	})
-
-	augmentor, err := New(context.Background(), &Config{CacheSize: 10, CacheTTL: time.Hour}, clientset)
-	require.NoError(t, err)
-
-	events := []*pb.HealthEvent{
-		{NodeName: "n1"}, {NodeName: "n2"}, {NodeName: "n1"}, {NodeName: "n3"}, {NodeName: "n2"}, {NodeName: ""},
-	}
-
-	require.NoError(t, augmentor.Prewarm(context.Background(), events))
-	require.EqualValues(t, 3, reads.Load(), "one read per distinct node")
-
-	for _, event := range events {
-		if event.NodeName != "" {
-			require.NoError(t, augmentor.Transform(context.Background(), event))
-		}
-	}
-
-	require.EqualValues(t, 3, reads.Load(), "the per-event pass is served from the cache")
-}
-
-// TestPrewarm_ReadsNodesConcurrently: the distinct nodes of a batch are read
-// at the same time, not one after another, so a cold batch costs about one
-// lookup, not one per node.
-func TestPrewarm_ReadsNodesConcurrently(t *testing.T) {
-	nodes := []string{"prewarm-a", "prewarm-b", "prewarm-c"}
-	for _, node := range nodes {
-		ensureNode(t, node)
-	}
-
-	var inFlight atomic.Int32
-
-	release := make(chan struct{})
-
-	restCfg := rest.CopyConfig(testEnv.Config)
-	restCfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
-		return roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.Path, "/nodes/prewarm-") {
-				inFlight.Add(1)
-				defer inFlight.Add(-1)
-
-				select {
-				case <-release:
-				case <-req.Context().Done():
-					return nil, req.Context().Err()
-				}
-			}
-
-			return rt.RoundTrip(req)
-		})
-	})
-
-	clientset, err := kubernetes.NewForConfig(restCfg)
-	require.NoError(t, err)
-
-	augmentor, err := New(context.Background(), &Config{CacheSize: 10, CacheTTL: time.Hour, LookupTimeout: 10 * time.Second}, clientset)
-	require.NoError(t, err)
-
-	events := make([]*pb.HealthEvent, 0, len(nodes))
-	for _, node := range nodes {
-		events = append(events, &pb.HealthEvent{NodeName: node})
-	}
-
-	done := make(chan struct{})
-
-	go func() {
-		_ = augmentor.Prewarm(context.Background(), events)
-		close(done)
-	}()
-
-	require.Eventually(t, func() bool { return inFlight.Load() == int32(len(nodes)) },
-		5*time.Second, time.Millisecond, "all nodes are read at once")
-
-	close(release)
-
-	select {
-	case <-done:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Prewarm did not return")
-	}
-
-	for _, node := range nodes {
-		_, found := augmentor.cache.Get(node)
-		require.True(t, found)
-	}
-}
-
-// TestPrewarm_BoundsConcurrentReads: a batch naming more nodes than the bound
-// reads them in waves; the number of reads in flight never exceeds the bound.
-func TestPrewarm_BoundsConcurrentReads(t *testing.T) {
-	const nodes = maxPrewarmReads + 8
-
-	names := make([]string, 0, nodes)
-	for i := range nodes {
-		name := fmt.Sprintf("prewarm-bound-%d", i)
-		ensureNode(t, name)
-		names = append(names, name)
-	}
-
-	var inFlight, maxInFlight atomic.Int32
-
-	release := make(chan struct{})
-
-	restCfg := rest.CopyConfig(testEnv.Config)
-	restCfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
-		return roundTripFunc(func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.Path, "/nodes/prewarm-bound-") {
-				now := inFlight.Add(1)
-				defer inFlight.Add(-1)
-
-				for {
-					seen := maxInFlight.Load()
-					if now <= seen || maxInFlight.CompareAndSwap(seen, now) {
-						break
-					}
-				}
-
-				select {
-				case <-release:
-				case <-req.Context().Done():
-					return nil, req.Context().Err()
-				}
-			}
-
-			return rt.RoundTrip(req)
-		})
-	})
-
-	clientset, err := kubernetes.NewForConfig(restCfg)
-	require.NoError(t, err)
-
-	augmentor, err := New(context.Background(), &Config{CacheSize: nodes, CacheTTL: time.Hour, LookupTimeout: 10 * time.Second}, clientset)
-	require.NoError(t, err)
-
-	events := make([]*pb.HealthEvent, 0, nodes)
-	for _, name := range names {
-		events = append(events, &pb.HealthEvent{NodeName: name})
-	}
-
-	done := make(chan struct{})
-
-	go func() {
-		_ = augmentor.Prewarm(context.Background(), events)
-		close(done)
-	}()
-
-	require.Eventually(t, func() bool { return inFlight.Load() == maxPrewarmReads },
-		5*time.Second, time.Millisecond, "the first wave fills the bound")
-	time.Sleep(50 * time.Millisecond)
-	assert.EqualValues(t, maxPrewarmReads, maxInFlight.Load(), "no read starts beyond the bound")
-
-	close(release)
-
-	select {
-	case <-done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Prewarm did not return")
-	}
-
-	assert.EqualValues(t, maxPrewarmReads, maxInFlight.Load())
-
-	for _, name := range names {
-		_, found := augmentor.cache.Get(name)
-		require.True(t, found, "%s was read", name)
-	}
-}
-
-// TestPrewarm_SpentBudgetIsReported: the nodes a batch's budget ended before
-// reading are reported, so the batch is deferred instead of those nodes
-// passing the skip-label gate unread; the reads that had started finish
-// detached and the resend finds them cached.
-func TestPrewarm_SpentBudgetIsReported(t *testing.T) {
-	clientset := fake.NewSimpleClientset(
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "slow-1"}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "slow-2"}},
-	)
-	clientset.PrependReactor("get", "nodes", func(_ k8stesting.Action) (bool, runtime.Object, error) {
-		time.Sleep(150 * time.Millisecond)
-
-		return false, nil, nil
-	})
-
-	augmentor, err := New(context.Background(), &Config{CacheSize: 10, CacheTTL: time.Hour, LookupTimeout: 5 * time.Second}, clientset)
-	require.NoError(t, err)
-
-	events := []*pb.HealthEvent{{NodeName: "slow-1"}, {NodeName: "slow-2"}, {NodeName: "slow-1"}}
-
-	budget, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
-	defer cancel()
-
-	err = augmentor.Prewarm(budget, events)
-	require.ErrorIs(t, err, ErrBudgetExhausted)
-	require.ErrorContains(t, err, "2 of 2 node(s)")
-
-	// The detached reads finish on their own and warm the cache for the resend.
-	require.Eventually(t, func() bool {
-		_, found1 := augmentor.cache.Get("slow-1")
-		_, found2 := augmentor.cache.Get("slow-2")
-
-		return found1 && found2
-	}, 2*time.Second, 10*time.Millisecond)
-	require.NoError(t, augmentor.Prewarm(context.Background(), events), "the resend finds every node cached")
-}
-
-// TestPrewarm_LookupFailureInsideTheBudgetIsNotReported: a read that fails
-// while the budget is still running is a lookup failure, left to the
-// per-event pass (which fails open on it), not a spent budget.
-func TestPrewarm_LookupFailureInsideTheBudgetIsNotReported(t *testing.T) {
-	clientset := fake.NewSimpleClientset()
-	clientset.PrependReactor("get", "nodes", func(_ k8stesting.Action) (bool, runtime.Object, error) {
-		return true, nil, fmt.Errorf("the API server answered 500")
-	})
-
-	augmentor, err := New(context.Background(), &Config{CacheSize: 10, CacheTTL: time.Hour}, clientset)
-	require.NoError(t, err)
-
-	budget, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	require.NoError(t, augmentor.Prewarm(budget, []*pb.HealthEvent{{NodeName: "broken"}}))
 }
 
 // TestNew_IgnoresTheLabelNamedLikeTheIdempotencyKey: the platform connector
@@ -1321,65 +1083,4 @@ func TestNew_IgnoresTheLabelNamedLikeTheIdempotencyKey(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{"topology.kubernetes.io/zone", "nvidia.com/gpu.product"}, augmentor.config.AllowedLabels)
 	require.Len(t, cfg.AllowedLabels, 3, "the caller's config is left alone")
-}
-
-// TestPrewarm_ResultsOutliveTheSharedCacheForTheBatch: the gate decided in
-// the preparation holds for the whole batch even when the shared cache has
-// since dropped the node (capacity one, two unmanaged nodes) and the budget
-// is spent, so no event of the batch passes ungated.
-func TestPrewarm_ResultsOutliveTheSharedCacheForTheBatch(t *testing.T) {
-	clientset := fake.NewSimpleClientset(
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gated-a", Labels: map[string]string{"nvsentinel.dgxc.nvidia.com/managed": "false"}}},
-		&corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "gated-b", Labels: map[string]string{"nvsentinel.dgxc.nvidia.com/managed": "false"}}},
-	)
-
-	augmentor, err := New(context.Background(), &Config{
-		CacheSize:     1,
-		CacheTTL:      time.Hour,
-		SkipNodeLabel: "nvsentinel.dgxc.nvidia.com/managed=false",
-	}, clientset)
-	require.NoError(t, err)
-
-	events := []*pb.HealthEvent{
-		{NodeName: "gated-a", ProcessingStrategy: pb.ProcessingStrategy_EXECUTE_REMEDIATION},
-		{NodeName: "gated-b", ProcessingStrategy: pb.ProcessingStrategy_EXECUTE_REMEDIATION},
-	}
-
-	ctx := pipeline.WithBatchScope(context.Background())
-	require.NoError(t, augmentor.Prewarm(ctx, events))
-
-	// The budget is spent before the transformers run.
-	spent, cancel := context.WithCancel(ctx)
-	cancel()
-
-	for _, event := range events {
-		require.NoError(t, augmentor.Transform(spent, event))
-		require.Equal(t, pb.ProcessingStrategy_STORE_ONLY, event.ProcessingStrategy,
-			"node %s was read as unmanaged in the preparation and must stay gated", event.NodeName)
-	}
-
-	// A node the shared cache already held when the batch started is kept
-	// for the batch too: reading the other node evicts it from a cache of
-	// one, and the spent budget then allows no second lookup.
-	cachedFirst := []*pb.HealthEvent{
-		{NodeName: "gated-a", ProcessingStrategy: pb.ProcessingStrategy_EXECUTE_REMEDIATION},
-		{NodeName: "gated-b", ProcessingStrategy: pb.ProcessingStrategy_EXECUTE_REMEDIATION},
-	}
-
-	_, err = augmentor.lookupMetadata(context.Background(), "gated-a")
-	require.NoError(t, err, "node a is in the shared cache before the batch")
-
-	ctx = pipeline.WithBatchScope(context.Background())
-	require.NoError(t, augmentor.Prewarm(ctx, cachedFirst))
-	_, stillCached := augmentor.cache.Get("gated-a")
-	require.False(t, stillCached, "reading node b evicted node a from the cache of one")
-
-	spent, cancel = context.WithCancel(ctx)
-	cancel()
-
-	for _, event := range cachedFirst {
-		require.NoError(t, augmentor.Transform(spent, event))
-		require.Equal(t, pb.ProcessingStrategy_STORE_ONLY, event.ProcessingStrategy,
-			"node %s must stay gated whether the preparation read it or found it cached", event.NodeName)
-	}
 }

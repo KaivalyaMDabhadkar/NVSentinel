@@ -38,12 +38,13 @@ type seenEvent struct {
 
 // tracker remembers recently seen health-event keys for one burst window.
 type tracker struct {
-	mu   sync.RWMutex
-	seen map[eventKey]seenEvent
-	// byCheck groups the tracked keys of one node, check and processing
-	// strategy, so a recovery event visits only the entries it can clear
+	mu sync.RWMutex
+	// seen holds the tracked keys grouped by node, check and processing
+	// strategy, so a recovery event visits only the bucket it can clear
 	// instead of the whole set, which is sized for the fleet.
-	byCheck    map[checkKey]map[eventKey]struct{}
+	seen map[checkKey]map[eventKey]seenEvent
+	// count is the number of tracked keys across every bucket.
+	count      int
 	ttl        time.Duration
 	maxEntries int
 	now        func() time.Time
@@ -60,28 +61,58 @@ func (k eventKey) check() checkKey {
 	return checkKey{nodeName: k.nodeName, checkName: k.checkName, processingStrategy: k.processingStrategy}
 }
 
-// add records a key in seen and in its check's bucket; t.mu must be held.
-func (t *tracker) add(k eventKey, seen seenEvent) {
-	t.seen[k] = seen
+// lookup returns the tracked state of k; t.mu must be held.
+func (t *tracker) lookup(k eventKey) (seenEvent, bool) {
+	seen, ok := t.seen[k.check()][k]
 
-	bucket, ok := t.byCheck[k.check()]
-	if !ok {
-		bucket = map[eventKey]struct{}{}
-		t.byCheck[k.check()] = bucket
-	}
-
-	bucket[k] = struct{}{}
+	return seen, ok
 }
 
-// remove forgets a key in seen and in its check's bucket; t.mu must be held.
+// add records k in its check's bucket; t.mu must be held.
+func (t *tracker) add(k eventKey, seen seenEvent) {
+	bucket, ok := t.seen[k.check()]
+	if !ok {
+		bucket = map[eventKey]seenEvent{}
+		t.seen[k.check()] = bucket
+	}
+
+	if _, present := bucket[k]; !present {
+		t.count++
+	}
+
+	bucket[k] = seen
+}
+
+// remove forgets k, and its check's bucket once empty; t.mu must be held.
 func (t *tracker) remove(k eventKey) {
-	delete(t.seen, k)
+	bucket, ok := t.seen[k.check()]
+	if !ok {
+		return
+	}
 
-	if bucket, ok := t.byCheck[k.check()]; ok {
-		delete(bucket, k)
+	if _, present := bucket[k]; !present {
+		return
+	}
 
-		if len(bucket) == 0 {
-			delete(t.byCheck, k.check())
+	delete(bucket, k)
+
+	t.count--
+
+	if len(bucket) == 0 {
+		delete(t.seen, k.check())
+	}
+}
+
+// evictOneOther removes one tracked key other than keep; map iteration order
+// is random, so which one is arbitrary. t.mu must be held.
+func (t *tracker) evictOneOther(keep eventKey) {
+	for _, bucket := range t.seen {
+		for other := range bucket {
+			if other != keep {
+				t.remove(other)
+
+				return
+			}
 		}
 	}
 }
@@ -94,8 +125,7 @@ func withMaxEntries(n int) trackerOption {
 // newTracker creates a tracker that treats repeated keys within ttl as duplicates.
 func newTracker(ttl time.Duration, opts ...trackerOption) *tracker {
 	t := &tracker{
-		seen:       make(map[eventKey]seenEvent),
-		byCheck:    make(map[checkKey]map[eventKey]struct{}),
+		seen:       make(map[checkKey]map[eventKey]seenEvent),
 		ttl:        ttl,
 		maxEntries: DefaultMaxEntries,
 		now:        time.Now,
@@ -125,24 +155,18 @@ func (t *tracker) checkAndMark(event *pb.HealthEvent) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	seen, ok := t.seen[k]
+	seen, ok := t.lookup(k)
 	if ok && now.Sub(seen.at) < t.ttl {
 		return idempotencyKey == "" || idempotencyKey != seen.idempotencyKey
 	}
 
 	t.add(k, seenEvent{at: now, idempotencyKey: idempotencyKey})
 
-	// Bounded: over capacity, one other entry goes (map iteration order is
-	// random). Losing an entry only lets one repeat through to remediation
-	// once more, which beats unbounded memory and a long cleanup scan.
-	if len(t.seen) > t.maxEntries {
-		for other := range t.seen {
-			if other != k {
-				t.remove(other)
-
-				break
-			}
-		}
+	// Bounded: over capacity, one other entry goes. Losing an entry only lets
+	// one repeat through to remediation once more, which beats unbounded
+	// memory and a long cleanup scan.
+	if t.count > t.maxEntries {
+		t.evictOneOther(k)
 	}
 
 	return false
@@ -164,7 +188,7 @@ func (t *tracker) clearUnhealthyCounterpart(event *pb.HealthEvent) bool {
 
 	// Only this node and check can hold the counterpart; deleting while
 	// ranging over the bucket is safe in Go.
-	for key := range t.byCheck[clearKey.check()] {
+	for key := range t.seen[clearKey.check()] {
 		if key.matchesUnhealthyCounterpart(clearKey, event) {
 			t.remove(key)
 
@@ -175,16 +199,18 @@ func (t *tracker) clearUnhealthyCounterpart(event *pb.HealthEvent) bool {
 	return cleared
 }
 
-// evictExpired walks the entire seen set and removes entries past ttl.
+// evictExpired walks every bucket and removes entries past ttl.
 func (t *tracker) evictExpired() {
 	now := t.now()
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	for k, seen := range t.seen {
-		if now.Sub(seen.at) >= t.ttl {
-			t.remove(k)
+	for _, bucket := range t.seen {
+		for k, seen := range bucket {
+			if now.Sub(seen.at) >= t.ttl {
+				t.remove(k)
+			}
 		}
 	}
 }

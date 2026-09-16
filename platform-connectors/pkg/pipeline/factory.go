@@ -33,10 +33,6 @@ type Options struct {
 	KubeClientBurst       int
 	NodeMetadataCacheSize int
 	NodeMetadataCacheTTL  time.Duration
-	// BatchBudget bounds the pipeline for one batch as a whole and turns on
-	// the preparation step; see Pipeline.ProcessBatch. Zero, the node-local
-	// role, processes events as they are.
-	BatchBudget time.Duration
 }
 
 // Factory creates a Transformer from its pipeline config and shared options.
@@ -145,5 +141,5 @@ func NewFromConfigs(ctx context.Context, configs []Config, opts Options) (*Pipel
 		return nil, fmt.Errorf("unknown pipeline stage: %s", cfg.Name)
 	}
 
-	return New(transformers...).WithBatchBudget(opts.BatchBudget), nil
+	return New(transformers...), nil
 }

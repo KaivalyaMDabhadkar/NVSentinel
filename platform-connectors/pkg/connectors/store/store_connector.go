@@ -41,13 +41,13 @@ import (
 	"github.com/nvidia/nvsentinel/store-client/pkg/factory"
 )
 
-// Outcomes of a successful batch insert.
+// Outcomes of a successful batch insert, the label of batchesWritten.
 const (
-	// OutcomeStored means every document of the batch was inserted.
-	OutcomeStored = "stored"
-	// OutcomeDuplicate means the only failures were duplicate-key violations of
+	// outcomeStored means every document of the batch was inserted.
+	outcomeStored = "stored"
+	// outcomeDuplicate means the only failures were duplicate-key violations of
 	// the idempotency index, i.e. a replayed batch whose events already exist.
-	OutcomeDuplicate = "duplicate"
+	outcomeDuplicate = "duplicate"
 )
 
 // batchesWritten counts the batches written to the datastore, by outcome:
@@ -231,10 +231,12 @@ func (r *DatabaseStoreConnector) Disconnect(ctx context.Context) error {
 }
 
 // ProcessBatch writes one batch inside the caller's request, the deployment
-// platform connector's path: the reply follows the returned error, and a
-// resend whose events already exist is a success, counted as a duplicate.
+// platform connector's path: the events already carry their idempotency keys
+// (stamped before the pipeline ran), the reply follows the returned error,
+// and a resend whose events already exist is a success, counted as a
+// duplicate.
 func (r *DatabaseStoreConnector) ProcessBatch(ctx context.Context, healthEvents *protos.HealthEvents) error {
-	outcome, err := r.InsertBatch(ctx, healthEvents)
+	outcome, err := r.insertHealthEvents(ctx, healthEvents, "")
 	if err != nil {
 		return terminalIfDocumentError(err)
 	}
@@ -262,23 +264,14 @@ func terminalIfDocumentError(err error) error {
 		failure.Failed.DocumentIndex, failure.Failed.IndexName, failure.Failed.Message)
 }
 
-// InsertBatch inserts one batch whose events already carry their idempotency
-// keys (the deployment platform connector stamps them before the pipeline
-// runs) and reports its outcome (OutcomeStored or OutcomeDuplicate), or an
-// error the caller may retry.
-func (r *DatabaseStoreConnector) InsertBatch(
-	ctx context.Context,
-	healthEvents *protos.HealthEvents,
-) (string, error) {
-	return r.insertHealthEvents(ctx, healthEvents, "")
-}
-
 // insertHealthEvents writes one batch: in order, past the documents that
 // already exist under the idempotency index, so a resent or retried batch
 // stores only its missing events and a monitor's events land in the order it
 // sent them; such duplicates count as success. With a batchKey the stored
 // copies are keyed batchKey#index (the ring buffer loop, whose events carry no
-// keys yet); without one the events keep the keys they arrived with.
+// keys yet); without one the events keep the keys they arrived with. It
+// reports the outcome (outcomeStored or outcomeDuplicate), or an error the
+// caller may retry.
 func (r *DatabaseStoreConnector) insertHealthEvents(
 	ctx context.Context,
 	healthEvents *protos.HealthEvents,
@@ -288,7 +281,7 @@ func (r *DatabaseStoreConnector) insertHealthEvents(
 	// driver rejects an empty insert with ErrEmptySlice, which classifies as
 	// retryable and would burn the whole retry budget.
 	if len(healthEvents.GetEvents()) == 0 {
-		return OutcomeStored, nil
+		return outcomeStored, nil
 	}
 
 	// Prepare all documents for batch insertion
@@ -372,19 +365,19 @@ func (r *DatabaseStoreConnector) insertHealthEvents(
 				"duplicateCount", result.DuplicateCount)
 			dbSpan.SetAttributes(attribute.String("platform_connector.store.status", "partial_resend"))
 
-			return OutcomeStored, nil
+			return outcomeStored, nil
 		}
 
 		slog.InfoContext(ctx, "Resent batch detected, events already stored",
 			"duplicateCount", result.DuplicateCount)
 		dbSpan.SetAttributes(attribute.String("platform_connector.store.status", "duplicate"))
 
-		return OutcomeDuplicate, nil
+		return outcomeDuplicate, nil
 	}
 
 	slog.DebugContext(ctx, "InsertMany completed successfully")
 
-	return OutcomeStored, nil
+	return outcomeStored, nil
 }
 
 func GenerateRandomObjectID() string {

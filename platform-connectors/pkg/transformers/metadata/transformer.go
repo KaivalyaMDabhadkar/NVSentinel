@@ -16,22 +16,18 @@ package metadata
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log/slog"
-	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/golang-lru/v2/expirable"
 	"go.opentelemetry.io/otel/attribute"
-	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/tracing"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
-	"github.com/nvidia/nvsentinel/platform-connectors/pkg/pipeline"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 )
 
@@ -181,122 +177,20 @@ func (a *Augmentor) Name() string {
 	return "MetadataAugmentor"
 }
 
-// maxPrewarmReads bounds how many node reads one batch runs at once. The
-// client's rate limiter and the lookup timeout already cap the API calls; the
-// bound keeps a batch naming thousands of nodes from starting as many
-// goroutines and connections at once.
-const maxPrewarmReads = 64
-
-// ErrBudgetExhausted reports that a batch's budget ended before the metadata
-// of every node it names was read, so the managed-label gate could not be
-// evaluated for the rest. The caller defers the batch; the reads that were
-// started finish detached and warm the cache for the resend.
-var ErrBudgetExhausted = errors.New("node metadata not read within the batch budget")
-
-// Prewarm reads the metadata of every distinct uncached node in the batch
-// concurrently, up to maxPrewarmReads at a time, so the per-event pass finds
-// it cached. The events of a batch are processed one after another inside one
-// budget; without this, a cross-node batch naming many uncached nodes would
-// spend the budget on the first few. A read that fails inside the budget is
-// left to the per-event pass, which reports it and fails open; the nodes the
-// budget ended before reading are reported as ErrBudgetExhausted instead, so
-// the batch is deferred rather than passing the skip-label gate unread.
-func (a *Augmentor) Prewarm(ctx context.Context, events []*pb.HealthEvent) error {
-	var (
-		group  errgroup.Group
-		unread atomic.Int32
-	)
-
-	group.SetLimit(maxPrewarmReads)
-
-	started := map[string]bool{}
-	reads := 0
-	scope := pipeline.BatchScopeFromContext(ctx)
-
-	for _, event := range events {
-		name := event.GetNodeName()
-		if name == "" || started[name] {
-			continue
-		}
-
-		started[name] = true
-
-		if metadata, found := a.cache.Get(name); found {
-			// The value this batch will use is kept now: the shared cache may
-			// drop it while the other nodes are read, and a second lookup
-			// then could run out of budget and pass the gate ungated.
-			if scope != nil {
-				scope.Store(name, metadata)
-			}
-
-			continue
-		}
-
-		reads++
-
-		group.Go(func() error {
-			// A read that ended without metadata once the budget was spent
-			// was cut short by it, whether it never started or was running.
-			if _, err := a.getOrFetchMetadata(ctx, name); err != nil && ctx.Err() != nil {
-				unread.Add(1)
-			}
-
-			return nil
-		})
-	}
-
-	_ = group.Wait()
-
-	if n := unread.Load(); n > 0 {
-		return fmt.Errorf("%w: %d of %d node(s)", ErrBudgetExhausted, n, reads)
-	}
-
-	return nil
-}
-
 // getOrFetchMetadata serves a node's metadata from the cache and reads it
 // from the API on a miss. Concurrent misses for the same node share one read;
-// misses for different nodes proceed independently (across requests, and
-// within a batch through Prewarm). The shared read does not die with the
-// caller that happened to start it: it runs detached from that caller's
-// cancellation, bounded by the lookup timeout, and each waiter leaves on its
-// own context instead.
+// misses for different nodes proceed independently. The shared read does not
+// die with the caller that happened to start it: it runs detached from that
+// caller's cancellation, bounded by the lookup timeout, and each waiter leaves
+// on its own context instead.
 func (a *Augmentor) getOrFetchMetadata(ctx context.Context, nodeName string) (*NodeMetadata, error) {
-	// What Prewarm read for this batch is what Transform uses, whatever the
-	// shared cache has dropped or expired since: otherwise a node read as
-	// unmanaged in the preparation could be looked up again here, run out of
-	// budget, and pass the gate ungated.
-	scope := pipeline.BatchScopeFromContext(ctx)
-	if scope != nil {
-		if prepared, ok := scope.Load(nodeName); ok {
-			if metadata, ok := prepared.(*NodeMetadata); ok {
-				return metadata, nil
-			}
-		}
-	}
-
-	metadata, err := a.lookupMetadata(ctx, nodeName)
-	if err != nil {
-		return nil, err
-	}
-
-	if scope != nil {
-		scope.Store(nodeName, metadata)
-	}
-
-	return metadata, nil
-}
-
-// lookupMetadata serves the node from the shared cache or reads it from the
-// API, as described on getOrFetchMetadata.
-func (a *Augmentor) lookupMetadata(ctx context.Context, nodeName string) (*NodeMetadata, error) {
 	if metadata, found := a.cache.Get(nodeName); found {
 		return metadata, nil
 	}
 
-	// A caller whose budget is already spent must not start a read it will
-	// not wait for: a large batch past its budget would otherwise fan out one
-	// detached read per remaining node.
+	// A caller that is already gone must not start a read it will not wait
+	// for: a cancelled batch would otherwise fan out one detached read per
+	// remaining node.
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

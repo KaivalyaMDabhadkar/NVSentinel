@@ -40,7 +40,6 @@ import (
 const (
 	outcomeOK       = "ok"
 	outcomeRejected = "rejected"
-	outcomeDeferred = "deferred"
 	outcomeFailed   = "failed"
 )
 
@@ -52,8 +51,7 @@ var (
 
 	requestDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "platform_connector_request_duration_seconds",
-		Help: "Duration of health event batch requests, by outcome: ok, rejected (the batch is invalid), " +
-			"deferred (the pipeline budget ended before every node was read; the caller resends) or " +
+		Help: "Duration of health event batch requests, by outcome: ok, rejected (the batch is invalid) or " +
 			"failed (a connector did not accept the batch; the caller retries)",
 		Buckets: prometheus.DefBuckets,
 	}, []string{"outcome"})
@@ -70,10 +68,6 @@ type PlatformConnectorServer struct {
 	pb.UnimplementedPlatformConnectorServer
 	Pipeline  *pipeline.Pipeline
 	Connector connectors.Connector
-	// PayloadLogLevel is the level of the per-batch log line that carries the
-	// whole payload. The zero value, Info, is the node-local role's level; the
-	// deployment role serves the whole fleet and logs it at Debug.
-	PayloadLogLevel slog.Level
 }
 
 // ApplyEventDefaultsAndValidate fills per-event defaults in place and rejects
@@ -141,7 +135,7 @@ func (p *PlatformConnectorServer) handle(ctx context.Context, he *pb.HealthEvent
 		attribute.Int("platform_connector.grpc.event_count", eventCount),
 	)
 
-	slog.Log(ctx, p.PayloadLogLevel, "Health events received", "events", he)
+	slog.DebugContext(ctx, "Health events received", "events", he)
 	healthEventsReceived.Add(float64(eventCount))
 
 	if err := ApplyEventDefaultsAndValidate(he.GetEvents()); err != nil {
@@ -149,11 +143,7 @@ func (p *PlatformConnectorServer) handle(ctx context.Context, he *pb.HealthEvent
 	}
 
 	if p.Pipeline != nil {
-		if err := p.Pipeline.ProcessBatch(ctx, he.GetEvents()); err != nil {
-			tracing.RecordError(span, err)
-
-			return outcomeDeferred, deferBatch(ctx, err, eventCount)
-		}
+		p.Pipeline.ProcessBatch(ctx, he.GetEvents())
 	}
 
 	if p.Connector != nil {
@@ -165,22 +155,6 @@ func (p *PlatformConnectorServer) handle(ctx context.Context, he *pb.HealthEvent
 	}
 
 	return outcomeOK, nil
-}
-
-// deferBatch answers a batch the pipeline could not prepare inside its
-// budget: nothing was written, so the caller resends it with the same key and
-// finds the cache warmed by the node reads that were started. The caller's
-// own cancellation is reported as such.
-func deferBatch(ctx context.Context, err error, eventCount int) error {
-	if ctx.Err() != nil {
-		return status.FromContextError(ctx.Err()).Err()
-	}
-
-	slog.WarnContext(ctx, "Deferring batch: node metadata not read within the pipeline budget",
-		"eventCount", eventCount, "error", err)
-
-	return status.Error(codes.Unavailable,
-		"node metadata not read within the pipeline budget; resend: "+err.Error())
 }
 
 // batchFailure turns a connector's failure into the reply: the caller's own

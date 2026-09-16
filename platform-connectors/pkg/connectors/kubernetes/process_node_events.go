@@ -50,14 +50,16 @@ const (
 
 // updateNodeConditions updates node conditions for a single node.
 // All healthEvents must belong to the same node; callers must partition by NodeName.
+// updateNodeConditions folds one node's events of a batch into its conditions.
+// The events must be in timestamp order: processHealthEvents sorts the whole
+// batch once, for this path and the Event path alike.
 func (r *K8sConnector) updateNodeConditions(ctx context.Context, healthEvents []*protos.HealthEvent) (bool, error) {
 	nodeName := ""
 	if len(healthEvents) > 0 && healthEvents[0] != nil {
 		nodeName = healthEvents[0].NodeName
 	}
 
-	sortedHealthEvents := sortHealthEventsByTimestamp(healthEvents)
-	conditionEventsMap := buildConditionEventsMap(sortedHealthEvents)
+	conditionEventsMap := buildConditionEventsMap(healthEvents)
 
 	if len(conditionEventsMap) == 0 {
 		return false, nil
@@ -711,7 +713,7 @@ func (r *K8sConnector) forgetNodeCheck(nodeName, checkName string, recovered []s
 // (true, nil) on success, (false, nil) when the Event is gone and a fresh one
 // should be created, and (true, error) for other lookup or update failures.
 func (r *K8sConnector) refreshNodeEvent(
-	ctx context.Context, span trace.Span, remembered rememberedEvent, event *corev1.Event, nodeName string,
+	ctx context.Context, span trace.Span, entities []string, event *corev1.Event, nodeName string,
 ) (bool, error) {
 	name := event.Name
 
@@ -726,7 +728,7 @@ func (r *K8sConnector) refreshNodeEvent(
 
 		switch {
 		case err == nil:
-			r.rememberNodeEvent(nodeName, event, remembered.entities)
+			r.rememberNodeEvent(nodeName, event, entities)
 			nodeEventOperationsCounter.WithLabelValues(OperationUpdate, StatusSuccess).Inc()
 
 			return true, nil
@@ -770,9 +772,7 @@ func (r *K8sConnector) createOrRefreshNodeEvent(
 
 		return nil
 	case apierrors.IsAlreadyExists(err):
-		found := rememberedEvent{entities: entities}
-
-		refreshed, refreshErr := r.refreshNodeEvent(ctx, span, found, event, nodeName)
+		refreshed, refreshErr := r.refreshNodeEvent(ctx, span, entities, event, nodeName)
 		if refreshErr == nil && !refreshed {
 			// Gone between the create and the refresh: not chased, the next
 			// report creates it again, but the write did not happen.
@@ -820,7 +820,7 @@ func (r *K8sConnector) writeNodeEvent(ctx context.Context, healthEvent *protos.H
 		return apierrors.IsConflict(err) || isTemporaryError(err)
 	}, func() error {
 		if known {
-			refreshed, err := r.refreshNodeEvent(ctx, span, remembered, event, nodeName)
+			refreshed, err := r.refreshNodeEvent(ctx, span, remembered.entities, event, nodeName)
 			if refreshed {
 				return err
 			}

@@ -21,7 +21,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
@@ -67,10 +66,6 @@ func batch() *pb.HealthEvents {
 	return &pb.HealthEvents{Events: []*pb.HealthEvent{{NodeName: "node-a", CheckName: "check"}}}
 }
 
-func failures(name, reason string) float64 {
-	return testutil.ToFloat64(bestEffortFailures.WithLabelValues(name, reason))
-}
-
 // TestSet_EveryMemberGetsTheBatch: the happy path hands the batch to every
 // member once and succeeds.
 func TestSet_EveryMemberGetsTheBatch(t *testing.T) {
@@ -89,20 +84,22 @@ func TestSet_EmptyIsANoOp(t *testing.T) {
 	require.NoError(t, Set{}.ProcessBatch(context.Background(), batch()))
 }
 
-// TestSet_FailsWithTheFirstErrorAndCancelsTheRest: a failing member decides
-// the result, and the members still running are cancelled so the reply does
-// not wait for work on a batch that will be resent.
-func TestSet_FailsWithTheFirstErrorAndCancelsTheRest(t *testing.T) {
+// TestSet_ReportsEveryFailureAndWaitsForTheRest: a failing member does not
+// cut the others short. Every member runs to completion on the caller's
+// context, and the result names every member that failed.
+func TestSet_ReportsEveryFailureAndWaitsForTheRest(t *testing.T) {
 	failing := &fake{err: errors.New("primary stepped down")}
-	blocking := &fake{block: true}
+	alsoFailing := &fake{err: errors.New("sink unreachable")}
+	slow := &fake{delay: 100 * time.Millisecond}
 
 	start := time.Now()
-	err := Set{blocking, failing}.ProcessBatch(context.Background(), batch())
+	err := Set{failing, slow, alsoFailing}.ProcessBatch(context.Background(), batch())
 
 	require.ErrorContains(t, err, "primary stepped down")
-	require.Less(t, time.Since(start), 2*time.Second, "the blocking member was cancelled, not waited for")
-	require.NotNil(t, blocking.endedBy.Load())
-	require.ErrorIs(t, *blocking.endedBy.Load(), context.Canceled)
+	require.ErrorContains(t, err, "sink unreachable")
+	require.GreaterOrEqual(t, time.Since(start), 100*time.Millisecond, "the slow member was waited for")
+	require.EqualValues(t, 1, slow.calls.Load())
+	require.Nil(t, slow.endedBy.Load(), "the slow member was not cancelled")
 }
 
 // funcConnector adapts a function to the Connector interface.
@@ -152,76 +149,4 @@ func TestSet_CallerCancellationReachesTheMembers(t *testing.T) {
 
 	err := Set{blocking}.ProcessBatch(ctx, batch())
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-}
-
-// TestBestEffort_FailureIsCountedNotReturned: the wrapped connector's failure
-// is counted as failed and the batch succeeds anyway.
-func TestBestEffort_FailureIsCountedNotReturned(t *testing.T) {
-	before := failures("k8s-failed", reasonFailed)
-
-	c := BestEffort("k8s-failed", &fake{err: errors.New("node not found")}, time.Second)
-	require.NoError(t, c.ProcessBatch(context.Background(), batch()))
-	require.Equal(t, before+1, failures("k8s-failed", reasonFailed))
-}
-
-// TestBestEffort_TimeoutIsBoundedAndCounted: a hung connector cannot hold the
-// batch past the bound; the timeout is counted separately from a failure.
-func TestBestEffort_TimeoutIsBoundedAndCounted(t *testing.T) {
-	before := failures("k8s-timeout", reasonTimedOut)
-
-	c := BestEffort("k8s-timeout", &fake{block: true}, 50*time.Millisecond)
-
-	start := time.Now()
-	require.NoError(t, c.ProcessBatch(context.Background(), batch()))
-	require.Less(t, time.Since(start), 2*time.Second)
-	require.Equal(t, before+1, failures("k8s-timeout", reasonTimedOut))
-	require.Zero(t, failures("k8s-timeout", reasonFailed))
-}
-
-// TestBestEffort_CancelledRequestIsNotAFailure: when the caller gives up, the
-// connector ends with the request and nothing is counted, since the batch is
-// not acknowledged and will be resent.
-func TestBestEffort_CancelledRequestIsNotAFailure(t *testing.T) {
-	c := BestEffort("k8s-cancelled", &fake{block: true}, time.Minute)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(30 * time.Millisecond)
-		cancel()
-	}()
-
-	require.NoError(t, c.ProcessBatch(ctx, batch()))
-	require.Zero(t, failures("k8s-cancelled", reasonFailed))
-	require.Zero(t, failures("k8s-cancelled", reasonTimedOut))
-}
-
-// TestSet_BestEffortMemberDoesNotFailTheBatch: the deployment shape. The
-// store decides; a failing or slow best-effort member is counted, and the
-// batch is acknowledged once the store is done.
-func TestSet_BestEffortMemberDoesNotFailTheBatch(t *testing.T) {
-	store := &fake{}
-	conditions := &fake{err: errors.New("conflict")}
-
-	set := Set{store, BestEffort("k8s-set", conditions, time.Second)}
-	require.NoError(t, set.ProcessBatch(context.Background(), batch()))
-	require.EqualValues(t, 1, store.calls.Load())
-	require.EqualValues(t, 1, conditions.calls.Load(), "the best-effort member runs alongside the store")
-}
-
-// TestSet_DeciderFailureCutsBestEffortShort: when the store fails, a
-// best-effort member still running is cancelled and not counted as a
-// failure, and the reply carries the store's error at once.
-func TestSet_DeciderFailureCutsBestEffortShort(t *testing.T) {
-	store := &fake{err: errors.New("primary stepped down")}
-	conditions := &fake{block: true}
-
-	set := Set{store, BestEffort("k8s-cut", conditions, time.Minute)}
-
-	start := time.Now()
-	err := set.ProcessBatch(context.Background(), batch())
-
-	require.ErrorContains(t, err, "primary stepped down")
-	require.Less(t, time.Since(start), 2*time.Second)
-	require.Zero(t, failures("k8s-cut", reasonFailed))
-	require.Zero(t, failures("k8s-cut", reasonTimedOut))
 }

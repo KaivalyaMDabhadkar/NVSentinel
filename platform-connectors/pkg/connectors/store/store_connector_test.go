@@ -151,7 +151,7 @@ func TestInsertHealthEvents(t *testing.T) {
 
 		outcome, err := connector.insertHealthEvents(context.Background(), healthEvents, "inst#1")
 		require.NoError(t, err)
-		require.Equal(t, OutcomeStored, outcome)
+		require.Equal(t, outcomeStored, outcome)
 		mockClient.AssertExpectations(t)
 	})
 
@@ -203,7 +203,7 @@ func TestInsertHealthEvents(t *testing.T) {
 
 		outcome, err := connector.insertHealthEvents(context.Background(), healthEvents, "inst#1")
 		require.NoError(t, err)
-		require.Equal(t, OutcomeStored, outcome)
+		require.Equal(t, outcomeStored, outcome)
 		require.Equal(t, "pod-uid#key#0",
 			healthEvents.Events[0].Metadata[datastore.HealthEventIdempotencyKeyMetadataField],
 			"the incoming event is left as it was; only the stored copy is keyed")
@@ -212,7 +212,7 @@ func TestInsertHealthEvents(t *testing.T) {
 
 	t.Run("without a batch key the events keep the keys they arrived with", func(t *testing.T) {
 		// The deployment platform connector keys its batches before the
-		// pipeline runs and calls InsertBatch, which passes no batch key.
+		// pipeline runs and calls ProcessBatch, which passes no batch key.
 		mockClient := &mockDatabaseClient{}
 		mockClient.On("InsertManyIdempotent", mock.Anything, mock.MatchedBy(func(docs []any) bool {
 			doc, ok := docs[0].(model.HealthEventWithStatus)
@@ -227,9 +227,9 @@ func TestInsertHealthEvents(t *testing.T) {
 			Metadata:       map[string]string{datastore.HealthEventIdempotencyKeyMetadataField: "pod-uid#key#0"},
 		}}}
 
-		outcome, err := connector.InsertBatch(context.Background(), healthEvents)
+		outcome, err := connector.insertHealthEvents(context.Background(), healthEvents, "")
 		require.NoError(t, err)
-		require.Equal(t, OutcomeStored, outcome)
+		require.Equal(t, outcomeStored, outcome)
 		mockClient.AssertExpectations(t)
 	})
 }
@@ -500,9 +500,9 @@ func TestDuplicateOnlyReplayIsSuccess(t *testing.T) {
 
 	connector := &DatabaseStoreConnector{databaseClient: mockClient, maxRetries: 3}
 
-	outcome, err := connector.InsertBatch(context.Background(), simpleHealthEvents())
+	outcome, err := connector.insertHealthEvents(context.Background(), simpleHealthEvents(), "")
 	require.NoError(t, err)
-	require.Equal(t, OutcomeDuplicate, outcome)
+	require.Equal(t, outcomeDuplicate, outcome)
 	mockClient.AssertNumberOfCalls(t, "InsertManyIdempotent", 1)
 }
 
@@ -517,9 +517,9 @@ func TestPartialReplayStoresMissingEvents(t *testing.T) {
 
 	connector := &DatabaseStoreConnector{databaseClient: mockClient}
 
-	outcome, err := connector.InsertBatch(context.Background(), simpleHealthEvents())
+	outcome, err := connector.insertHealthEvents(context.Background(), simpleHealthEvents(), "")
 	require.NoError(t, err)
-	require.Equal(t, OutcomeStored, outcome, "the resend inserted something, so it is a store")
+	require.Equal(t, outcomeStored, outcome, "the resend inserted something, so it is a store")
 	mockClient.AssertExpectations(t)
 }
 
@@ -531,9 +531,9 @@ func TestEmptyBatchIsTerminalSuccess(t *testing.T) {
 
 	connector := &DatabaseStoreConnector{databaseClient: mockClient, maxRetries: 3}
 
-	outcome, err := connector.InsertBatch(context.Background(), &protos.HealthEvents{})
+	outcome, err := connector.insertHealthEvents(context.Background(), &protos.HealthEvents{}, "")
 	require.NoError(t, err)
-	require.Equal(t, OutcomeStored, outcome)
+	require.Equal(t, outcomeStored, outcome)
 	mockClient.AssertNotCalled(t, "InsertManyIdempotent")
 	mockClient.AssertExpectations(t)
 }
@@ -557,7 +557,7 @@ func TestDuplicateOnOtherIndexStaysError(t *testing.T) {
 
 	connector := &DatabaseStoreConnector{databaseClient: mockClient}
 
-	_, err := connector.InsertBatch(context.Background(), simpleHealthEvents())
+	_, err := connector.insertHealthEvents(context.Background(), simpleHealthEvents(), "")
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "insertMany failed")
 	require.Contains(t, err.Error(), `duplicate on index "some_other_unique_index"`)
@@ -568,8 +568,8 @@ func TestDuplicateOnOtherIndexStaysError(t *testing.T) {
 // the connector answers with the error alone; stored and duplicate outcomes
 // are both successes, told apart in the store's own counter.
 func TestProcessBatch_ReportsOnlyTheErrorAndCountsTheOutcome(t *testing.T) {
-	storedBefore := testutil.ToFloat64(batchesWritten.WithLabelValues(OutcomeStored))
-	duplicateBefore := testutil.ToFloat64(batchesWritten.WithLabelValues(OutcomeDuplicate))
+	storedBefore := testutil.ToFloat64(batchesWritten.WithLabelValues(outcomeStored))
+	duplicateBefore := testutil.ToFloat64(batchesWritten.WithLabelValues(outcomeDuplicate))
 
 	mockClient := &mockDatabaseClient{}
 	mockClient.On("InsertManyIdempotent", mock.Anything, mock.Anything).
@@ -585,8 +585,8 @@ func TestProcessBatch_ReportsOnlyTheErrorAndCountsTheOutcome(t *testing.T) {
 	require.NoError(t, connector.ProcessBatch(context.Background(), simpleHealthEvents()), "a resend is a success")
 	require.Error(t, connector.ProcessBatch(context.Background(), simpleHealthEvents()))
 
-	require.Equal(t, storedBefore+1, testutil.ToFloat64(batchesWritten.WithLabelValues(OutcomeStored)))
-	require.Equal(t, duplicateBefore+1, testutil.ToFloat64(batchesWritten.WithLabelValues(OutcomeDuplicate)))
+	require.Equal(t, storedBefore+1, testutil.ToFloat64(batchesWritten.WithLabelValues(outcomeStored)))
+	require.Equal(t, duplicateBefore+1, testutil.ToFloat64(batchesWritten.WithLabelValues(outcomeDuplicate)))
 	mockClient.AssertExpectations(t)
 }
 

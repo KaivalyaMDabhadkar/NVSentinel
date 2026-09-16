@@ -41,7 +41,6 @@ import (
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/pipeline"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 	_ "github.com/nvidia/nvsentinel/platform-connectors/pkg/transformers/dedup"
-	nodemeta "github.com/nvidia/nvsentinel/platform-connectors/pkg/transformers/metadata"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 )
 
@@ -343,61 +342,6 @@ func TestDispatch_RetryAfterFailedWriteKeepsStrategy(t *testing.T) {
 	require.Len(t, store.accepted, 2)
 	require.Equal(t, pb.ProcessingStrategy_STORE_AND_ANALYSE, store.accepted[1].Events[0].ProcessingStrategy,
 		"the same content in another batch is a repeat")
-}
-
-// stallingTransformer blocks each event until its context ends, like a node
-// metadata read against a stalled API server.
-type stallingTransformer struct{ calls atomic.Int32 }
-
-func (s *stallingTransformer) Name() string { return "stalling" }
-
-func (s *stallingTransformer) Transform(ctx context.Context, _ *pb.HealthEvent) error {
-	s.calls.Add(1)
-	<-ctx.Done()
-
-	return nil
-}
-
-// TestDispatch_PipelineBudgetCoversTheWholeBatch: one budget bounds the
-// pipeline for the batch, not one per event, so a batch naming many stalled
-// nodes still reaches the connector, which keeps the request's own context.
-func TestDispatch_PipelineBudgetCoversTheWholeBatch(t *testing.T) {
-	store := &fakeConnector{}
-	stalling := &stallingTransformer{}
-	srv := newServer(store, pipeline.New(stalling).WithBatchBudget(200*time.Millisecond))
-
-	start := time.Now()
-	_, err := srv.HealthEventOccurredV1(context.Background(), keyedBatch("batch-1", "node-a", "node-b", "node-c", "node-d"))
-	elapsed := time.Since(start)
-
-	require.NoError(t, err)
-	require.Less(t, elapsed, 600*time.Millisecond, "the batch spends one budget, not one per event")
-	require.EqualValues(t, 4, stalling.calls.Load(), "every event still passes through the pipeline")
-	require.Len(t, store.accepted, 1, "the connector ran on the request context, not the spent budget")
-}
-
-// budgetPrewarmer stands in for the metadata augmentor whose batch budget
-// ended before every node was read.
-type budgetPrewarmer struct{ err error }
-
-func (b budgetPrewarmer) Transform(context.Context, *pb.HealthEvent) error { return nil }
-func (b budgetPrewarmer) Name() string                                     { return "budget-prewarmer" }
-func (b budgetPrewarmer) Prewarm(context.Context, []*pb.HealthEvent) error { return b.err }
-
-// TestDispatch_DefersWhenTheMetadataBudgetEnds: a batch whose node metadata
-// was not all read inside the pipeline budget is answered Unavailable before
-// the connector sees it, so the client resends it with the same key instead
-// of the unread nodes passing the managed-label gate.
-func TestDispatch_DefersWhenTheMetadataBudgetEnds(t *testing.T) {
-	store := &fakeConnector{}
-	p := pipeline.New(budgetPrewarmer{err: fmt.Errorf("%w: 2 of 2 node(s)", nodemeta.ErrBudgetExhausted)}).
-		WithBatchBudget(time.Second)
-
-	_, err := newServer(store, p).HealthEventOccurredV1(context.Background(), keyedBatch("batch-1", "node-a", "node-a"))
-	require.Error(t, err)
-	require.Equal(t, codes.Unavailable, status.Code(err))
-	require.Contains(t, status.Convert(err).Message(), "resend")
-	require.Zero(t, store.calls.Load(), "nothing reaches the connector")
 }
 
 // TestDispatch_QueuesAcknowledgeAtOnceAndHoldTheBatch: the node-local shape.

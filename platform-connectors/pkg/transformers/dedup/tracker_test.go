@@ -295,25 +295,25 @@ func TestCheckAndMark_CapacityReached_StaysBounded(t *testing.T) {
 	for i := range 50 {
 		event := &pb.HealthEvent{NodeName: fmt.Sprintf("node-%d", i), CheckName: "SysLogsXIDError", ErrorCode: []string{"79"}}
 		require.False(t, tracker.checkAndMark(event))
-		assert.LessOrEqual(t, len(tracker.seen), 8)
+		assert.LessOrEqual(t, tracker.count, 8)
 		assert.True(t, tracker.checkAndMark(event), "the key just marked is still remembered")
 	}
 }
 
-// bucketed sums the keys held in the per-check buckets.
-func bucketed(t *tracker) int {
+// tracked sums the keys held in the per-check buckets.
+func tracked(t *tracker) int {
 	n := 0
-	for _, bucket := range t.byCheck {
+	for _, bucket := range t.seen {
 		n += len(bucket)
 	}
 
 	return n
 }
 
-// TestTrackerIndexStaysInStep: the per-check index that a recovery event
-// searches holds exactly the tracked keys through marks, recoveries,
-// evictions and expiry.
-func TestTrackerIndexStaysInStep(t *testing.T) {
+// TestCheckAndMark_RecoveriesEvictionsExpiry_CountStaysInStep: the count that
+// bounds the tracker equals the keys held in the buckets through marks,
+// recoveries, evictions and expiry, and an emptied bucket is dropped.
+func TestCheckAndMark_RecoveriesEvictionsExpiry_CountStaysInStep(t *testing.T) {
 	now := time.Now()
 	tr := newTracker(time.Minute, withMaxEntries(3))
 	tr.now = func() time.Time { return now }
@@ -325,23 +325,24 @@ func TestTrackerIndexStaysInStep(t *testing.T) {
 	tr.checkAndMark(unhealthy("node-a", "xid"))
 	tr.checkAndMark(unhealthy("node-b", "xid"))
 	tr.checkAndMark(unhealthy("node-a", "sxid"))
-	require.Len(t, tr.seen, 3)
-	require.Equal(t, len(tr.seen), bucketed(tr))
+	require.Equal(t, 3, tr.count)
+	require.Equal(t, tr.count, tracked(tr))
 
 	require.True(t, tr.clearUnhealthyCounterpart(&pb.HealthEvent{NodeName: "node-a", CheckName: "xid", IsHealthy: true}))
-	require.Len(t, tr.seen, 2)
-	require.Equal(t, len(tr.seen), bucketed(tr))
+	require.Equal(t, 2, tr.count)
+	require.Equal(t, tr.count, tracked(tr))
+	require.Len(t, tr.seen, 2, "the emptied bucket of node-a/xid is dropped")
 	require.False(t, tr.clearUnhealthyCounterpart(&pb.HealthEvent{NodeName: "node-a", CheckName: "xid", IsHealthy: true}),
 		"nothing left to clear for that check")
 
 	// Over capacity, one other entry goes from both maps.
 	tr.checkAndMark(unhealthy("node-c", "xid"))
 	tr.checkAndMark(unhealthy("node-d", "xid"))
-	require.Len(t, tr.seen, 3)
-	require.Equal(t, len(tr.seen), bucketed(tr))
+	require.Equal(t, 3, tr.count)
+	require.Equal(t, tr.count, tracked(tr))
 
 	now = now.Add(2 * time.Minute)
 	tr.evictExpired()
+	require.Zero(t, tr.count)
 	require.Empty(t, tr.seen)
-	require.Empty(t, tr.byCheck)
 }
