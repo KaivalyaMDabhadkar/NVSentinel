@@ -2435,33 +2435,24 @@ func TestWriteNodeEvent_UpdateRacesDeletion(t *testing.T) {
 	require.True(t, ok, "The recreated event should be remembered")
 }
 
-func TestK8sConnector_NodeEventMemory_EvictsOnlyOldest(t *testing.T) {
+// TestK8sConnector_NodeEventMemory_HasNoSizeCap: the memory is bounded by
+// time, not by a count: every check written inside the refresh interval is
+// remembered, however many there are.
+func TestK8sConnector_NodeEventMemory_HasNoSizeCap(t *testing.T) {
 	connector := &K8sConnector{}
-	eventFor := func(check string) *corev1.Event {
-		return &corev1.Event{Type: check, Message: "message"}
+
+	const checks = 5000
+
+	for i := range checks {
+		connector.rememberNodeEvent("node", &corev1.Event{Type: fmt.Sprintf("check-%d", i), Message: "message"}, nil)
 	}
 
-	for i := range maxRememberedNodeChecks {
-		connector.rememberNodeEvent("node", eventFor(fmt.Sprintf("check-%d", i)), nil)
+	for _, check := range []string{"check-0", fmt.Sprintf("check-%d", checks-1)} {
+		_, ok := connector.rememberedNodeEvent("node", &corev1.Event{Type: check, Message: "message"})
+		require.True(t, ok, "%s is remembered", check)
 	}
-
-	// Refresh check-0's recency so overflow must evict check-1 instead.
-	_, ok := connector.rememberedNodeEvent("node", eventFor("check-0"))
-	require.True(t, ok, "Filling the memory to capacity should not evict")
-
-	connector.rememberNodeEvent("node", eventFor("overflow"), nil)
-
-	_, ok = connector.rememberedNodeEvent("node", eventFor("check-1"))
-	assert.False(t, ok, "Overflow should evict the least-recently-used entry")
-
-	_, ok = connector.rememberedNodeEvent("node", eventFor("check-0"))
-	assert.True(t, ok, "A recently-read entry should survive overflow")
-
-	_, ok = connector.rememberedNodeEvent("node", eventFor("overflow"))
-	require.True(t, ok, "The overflowing entry should be remembered")
 
 	connector.nodeEventMu.Lock()
 	defer connector.nodeEventMu.Unlock()
-	assert.Equal(t, maxRememberedNodeChecks, connector.nodeEventMemory().Len(),
-		"Overflow should evict exactly one entry, not flush the memory")
+	assert.Equal(t, checks, connector.nodeEventMemory().Len(), "no entry was evicted for size")
 }

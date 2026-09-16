@@ -43,10 +43,6 @@ Hence, ignoring this file as part of unit testing for now.
 type K8sConnectorConfig struct {
 	MaxNodeConditionMessageLength int64
 	CompactedHealthEventMsgLen    int64
-	// NodeEventMemorySize bounds how many node checks' written Events are
-	// remembered, one entry per node and check with a non-fatal fault. Zero
-	// means the node-local default, enough for one node.
-	NodeEventMemorySize int
 }
 
 // K8sConnector writes health events to the cluster as node conditions and

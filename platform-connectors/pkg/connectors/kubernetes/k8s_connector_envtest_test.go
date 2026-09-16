@@ -1356,12 +1356,13 @@ func TestUpdateOnChange_PartialRecoveryKeepsOtherFaults(t *testing.T) {
 	require.Equal(t, int32(2), eventCount(t, cli, node, hot1), "GPU 1 is announced again the same way")
 }
 
-// TestNodeEventMemory_BoundsMessagesPerCheck: the message is producer
-// controlled, so the Events remembered for one check on one node are bounded;
-// past the bound the check's memory is dropped and starts again with the
-// entry being written. A refresh of a message already remembered is not a
-// new entry and must not cost the others their memory.
-func TestNodeEventMemory_BoundsMessagesPerCheck(t *testing.T) {
+// TestNodeEventMemory_PrunesWritesOlderThanTheRefreshInterval: a remembered
+// write is useful only inside the refresh interval, after which the next
+// repeat refreshes the Event through the API anyway. Remembering a new message
+// drops the stale ones, so one check's memory holds only the faults written
+// in the last interval, however many distinct messages it produces over time;
+// a message still inside the interval is kept.
+func TestNodeEventMemory_PrunesWritesOlderThanTheRefreshInterval(t *testing.T) {
 	connector := &K8sConnector{}
 	remembered := func(message string) bool {
 		_, ok := connector.rememberedNodeEvent("node-a", &corev1.Event{Type: "check", Message: message})
@@ -1369,27 +1370,15 @@ func TestNodeEventMemory_BoundsMessagesPerCheck(t *testing.T) {
 		return ok
 	}
 
-	for i := range maxRememberedMessagesPerCheck {
-		connector.rememberNodeEvent("node-a", &corev1.Event{Type: "check", Message: fmt.Sprintf("message-%d", i)}, nil)
-	}
+	connector.rememberNodeEvent("node-a", &corev1.Event{Type: "check", Message: "stale"}, nil)
+	connector.rememberNodeEvent("node-a", &corev1.Event{Type: "check", Message: "fresh"}, nil)
+	ageRememberedEvent(t, connector, "node-a", &corev1.Event{Type: "check", Message: "stale"})
 
-	// The memory is full; refreshing a known message keeps every other one.
-	connector.rememberNodeEvent("node-a", &corev1.Event{Type: "check", Message: "message-0"}, nil)
-	require.True(t, remembered("message-0"))
-	require.True(t, remembered(fmt.Sprintf("message-%d", maxRememberedMessagesPerCheck-1)), "a refresh at capacity keeps the other messages")
+	connector.rememberNodeEvent("node-a", &corev1.Event{Type: "check", Message: "new"}, nil)
 
-	for i := maxRememberedMessagesPerCheck; i < maxRememberedMessagesPerCheck+8; i++ {
-		connector.rememberNodeEvent("node-a", &corev1.Event{Type: "check", Message: fmt.Sprintf("message-%d", i)}, nil)
-	}
-
-	connector.nodeEventMu.Lock()
-	written, ok := connector.nodeEventMemory().Get(nodeCheckKey("node-a", "check"))
-	connector.nodeEventMu.Unlock()
-
-	require.True(t, ok)
-	require.LessOrEqual(t, len(written), maxRememberedMessagesPerCheck)
-	require.True(t, remembered(fmt.Sprintf("message-%d", maxRememberedMessagesPerCheck+7)), "the newest entry is kept")
-	require.False(t, remembered("message-0"), "the memory was dropped when a new message arrived at capacity")
+	require.False(t, remembered("stale"), "a write older than the refresh interval is dropped")
+	require.True(t, remembered("fresh"), "a write inside the interval is kept")
+	require.True(t, remembered("new"))
 }
 
 // TestNodeEventName_DerivedFromTheFault: the same fault gets the same name on

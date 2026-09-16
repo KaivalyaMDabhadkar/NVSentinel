@@ -548,26 +548,15 @@ func messageMatchesAnyErrorCode(msg string, errorCodes []string) bool {
 	return false
 }
 
-// maxRememberedNodeChecks bounds the Event memory of the node-local
-// connector, which serves one node; the deployment platform connector sizes
-// it for the fleet (K8sConnectorConfig.NodeEventMemorySize). Overflow evicts
-// only the least-recently-used entry, which costs one extra Event write.
-const maxRememberedNodeChecks = 1024
-
 // nodeEventRefreshInterval is how long repeats of a fault whose Event is
 // already written are skipped. Once it has passed, the next repeat
 // refreshes the Event (count and timestamp), so a fault that lasts stays in
 // the Event list, which drops Events an hour after their last write. It also
 // bounds how long a replica can miss a recurrence when the recovery in
-// between was reported to another replica.
+// between was reported to another replica, and how long a write is
+// remembered at all: the memory holds only the faults written inside the
+// last interval, so it needs no size.
 const nodeEventRefreshInterval = 10 * time.Minute
-
-// maxRememberedMessagesPerCheck bounds the Events remembered for one check
-// on one node. A check reports a handful of distinct faults at a time, and
-// the message is producer-controlled, so the map must not grow with it; past
-// the bound the check's memory is dropped and its faults are announced again,
-// which costs one extra Event write each.
-const maxRememberedMessagesPerCheck = 32
 
 // rememberedEvent is the Kubernetes Event last written for one fault, with
 // the entities it named so a recovery of those entities can forget it. The
@@ -606,16 +595,14 @@ func sharesEntity(a, b []string) bool {
 	return false
 }
 
-// nodeEventMemory returns the memory, initialized lazily so struct-literal
-// construction works. Callers hold nodeEventMu.
+// nodeEventMemory is the memory of written Events, keyed by node and check.
+// Entries expire nodeEventRefreshInterval after their last write and the
+// memory has no size limit: it can hold only faults whose Event was written
+// in the last interval, and every such write was an API call. It is built on
+// first use so that a zero K8sConnector works.
 func (r *K8sConnector) nodeEventMemory() *expirable.LRU[string, map[string]rememberedEvent] {
 	if r.nodeEvents == nil {
-		size := r.config.NodeEventMemorySize
-		if size <= 0 {
-			size = maxRememberedNodeChecks
-		}
-
-		r.nodeEvents = expirable.NewLRU[string, map[string]rememberedEvent](size, nil, 0)
+		r.nodeEvents = expirable.NewLRU[string, map[string]rememberedEvent](0, nil, nodeEventRefreshInterval)
 	}
 
 	return r.nodeEvents
@@ -643,20 +630,28 @@ func (r *K8sConnector) rememberNodeEvent(nodeName string, event *corev1.Event, e
 	defer r.nodeEventMu.Unlock()
 
 	key := nodeCheckKey(nodeName, event.Type)
+	now := time.Now()
 
 	written, ok := r.nodeEventMemory().Get(key)
 	if !ok {
 		written = map[string]rememberedEvent{}
-		r.nodeEventMemory().Add(key, written)
 	}
 
-	// A refresh of a remembered message must not cost the other messages
-	// their memory; only a new message arriving at capacity starts over.
-	if _, exists := written[event.Message]; !exists && len(written) >= maxRememberedMessagesPerCheck {
-		clear(written)
+	// A write is useful only inside the refresh interval; after it the next
+	// repeat refreshes the Event through the API anyway. Dropping the stale
+	// ones here keeps the check's memory to the faults written in the last
+	// interval, however many distinct messages it produces over time.
+	for message, remembered := range written {
+		if now.Sub(remembered.writtenAt) >= nodeEventRefreshInterval {
+			delete(written, message)
+		}
 	}
 
-	written[event.Message] = rememberedEvent{entities: entities, writtenAt: time.Now()}
+	written[event.Message] = rememberedEvent{entities: entities, writtenAt: now}
+
+	// Added again so the entry's expiry follows its last write; a check that
+	// stops reporting leaves the memory by itself.
+	r.nodeEventMemory().Add(key, written)
 }
 
 // forgetNodeEvent drops the memory of one fault's Event because the Event no
