@@ -178,8 +178,8 @@ submitting health events naming another node. See
 
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
-| `k8s_platform_connector_node_condition_update_total` | Counter | `status` | Total number of node condition updates by status. Status values: `success`, `failed` |
-| `k8s_platform_connector_node_event_operations_total` | Counter | `node_name`, `operation`, `status` | Total number of node event operations by type and status. Operation values: `create`, `update`. Status values: `success`, `failed` |
+| `k8s_platform_connector_node_condition_update_total` | Counter | `status` | Total number of node condition updates by status. Status values: `success`, `failed`, `skipped` (an update that would leave the node's conditions as they are, such as a monitor's repeat of a fault the node already shows, is skipped) |
+| `k8s_platform_connector_node_event_operations_total` | Counter | `operation`, `status` | Total number of node event operations by type and status. Operation values: `create`, `update`. Status values: `success`, `failed`, `skipped` (a repeat of a fault whose Event was written less than 10 minutes ago is skipped; later repeats refresh the Event) |
 | `k8s_platform_connector_node_condition_update_duration_milliseconds` | Histogram | - | Duration of node condition updates in milliseconds. Uses linear buckets (0, 10, 500) |
 | `k8s_platform_connector_node_event_update_create_duration_milliseconds` | Histogram | - | Duration of node event updates/creations in milliseconds. Uses linear buckets (0, 10, 500) |
 
@@ -219,6 +219,16 @@ sum by (agent, check_name) (rate(health_events_total{recommended_action!="NONE",
 # Per node, correct for every agent including health-events-analyzer
 sum by (node) (rate(health_events_total{recommended_action!="NONE"}[1h]))
 ```
+
+### Platform Connector Request Metrics
+
+Both roles of the platform connector, the node-local DaemonSet and the deployment platform connector, expose these for the batches that reach the request handler. Alert on `failed` outcomes and on best-effort failures.
+
+| Metric Name | Type | Labels | Description |
+|------------|------|--------|-------------|
+| `platform_connector_request_duration_seconds` | Histogram | `outcome` | Duration of health event batch requests that reached the handler, by outcome: `ok` (acknowledged), `rejected` (the batch is invalid), `deferred` (answered Unavailable before any write because the node metadata of a node it names was not read inside the pipeline budget; the caller resends), `failed` (the datastore write did not succeed; the caller retries). Both roles expose it; on the node-local DaemonSet a batch is `ok` once queued, unless it is invalid. |
+| `platform_connector_store_batches_total` | Counter | `outcome` | Batches written to the datastore by either role: `stored`, or `duplicate` (a resend, or a retried batch, whose events already existed; treated like a store) |
+| `platform_connector_best_effort_failures_total` | Counter | `connector`, `reason` | Work a best-effort connector (`kubernetes` node conditions and Events, `grpcsink` forwards) did not finish although the batch was acknowledged: `failed` or `timeout`; the node shows the old state until the monitor next reports |
 
 ### Workqueue Metrics
 

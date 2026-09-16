@@ -27,6 +27,7 @@ import (
 
 	"github.com/nvidia/nvsentinel/commons/pkg/auditlogger"
 	"github.com/nvidia/nvsentinel/commons/pkg/tracing"
+	"github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/kubeconfig"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/ringbuffer"
 )
@@ -42,8 +43,19 @@ Hence, ignoring this file as part of unit testing for now.
 type K8sConnectorConfig struct {
 	MaxNodeConditionMessageLength int64
 	CompactedHealthEventMsgLen    int64
+	// NodeEventMemorySize bounds how many node checks' written Events are
+	// remembered, one entry per node and check with a non-fatal fault. Zero
+	// means the node-local default, enough for one node.
+	NodeEventMemorySize int
 }
 
+// K8sConnector writes health events to the cluster as node conditions and
+// Kubernetes Events. A batch costs API calls only when it changes what the
+// cluster shows: the node status update is skipped when every condition would
+// keep its status, reason and message, and the Event write is skipped for a
+// fault whose Event was written less than nodeEventRefreshInterval ago. So a
+// monitor that reports every cycle, or a resent batch, costs nothing until
+// something changes; the condition's heartbeat time moves with those changes.
 type K8sConnector struct {
 	clientset  kubernetes.Interface
 	ringBuffer *ringbuffer.RingBuffer
@@ -51,10 +63,11 @@ type K8sConnector struct {
 	ctx        context.Context
 	config     K8sConnectorConfig
 
-	// nodeEventNames caches the last written event name per dedupe key;
-	// see writeNodeEvent. nodeEventMu guards only the lazy init.
-	nodeEventMu    sync.Mutex
-	nodeEventNames *expirable.LRU[string, string]
+	// nodeEvents remembers, per node and check, the Kubernetes Events written
+	// for its faults (message to Event name and write time); see
+	// writeNodeEvent. nodeEventMu guards it, including the maps it holds.
+	nodeEventMu sync.Mutex
+	nodeEvents  *expirable.LRU[string, map[string]rememberedEvent]
 }
 
 // NewK8sConnector creates a K8sConnector with the given Kubernetes client, ring buffer, and configuration.
@@ -106,6 +119,14 @@ func InitializeK8sConnector(ctx context.Context, ringbuffer *ringbuffer.RingBuff
 	kubernetesConnector := NewK8sConnector(clientSet, ringbuffer, stopCh, ctx, cfg)
 
 	return kubernetesConnector, clientSet, nil
+}
+
+// ProcessBatch applies one batch to the cluster: node conditions and
+// Kubernetes Events for every processable event. It is the entry point for
+// callers that hold no queue (the deployment platform connector) and does
+// exactly what one iteration of FetchAndProcessHealthMetric does.
+func (r *K8sConnector) ProcessBatch(ctx context.Context, healthEvents *protos.HealthEvents) error {
+	return r.processHealthEvents(ctx, healthEvents)
 }
 
 func (r *K8sConnector) FetchAndProcessHealthMetric(ctx context.Context) {

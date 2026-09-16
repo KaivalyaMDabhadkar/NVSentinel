@@ -20,10 +20,23 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"time"
 )
 
 type Options struct {
 	KubeconfigPath string
+	// The deployment platform connector sets the fields below so the metadata
+	// transformer is sized for the whole fleet instead of one node. Zero keeps
+	// the value of the transformer's config file, or the Kubernetes client
+	// default for the rate limit.
+	KubeClientQPS         float32
+	KubeClientBurst       int
+	NodeMetadataCacheSize int
+	NodeMetadataCacheTTL  time.Duration
+	// BatchBudget bounds the pipeline for one batch as a whole and turns on
+	// the preparation step; see Pipeline.ProcessBatch. Zero, the node-local
+	// role, processes events as they are.
+	BatchBudget time.Duration
 }
 
 // Factory creates a Transformer from its pipeline config and shared options.
@@ -59,6 +72,48 @@ func Create(cfg *Config, opts Options) (Transformer, error) {
 	return factory(cfg, opts)
 }
 
+// NewFromRawConfig creates a Pipeline from the parsed platform connector
+// config map (config.json), reading the "pipeline" stage list. Both the
+// node-local and the central role construct their pipeline through here.
+func NewFromRawConfig(ctx context.Context, rawCfg map[string]any, opts Options) (*Pipeline, error) {
+	pipelineCfg, ok := rawCfg["pipeline"].([]any)
+	if !ok || len(pipelineCfg) == 0 {
+		return nil, fmt.Errorf("no pipeline configuration found in config file")
+	}
+
+	var transformerConfigs []Config
+
+	for _, item := range pipelineCfg {
+		configMap, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("failed to convert pipeline configuration to map: %v", item)
+		}
+
+		name, ok := configMap["name"].(string)
+		if !ok {
+			return nil, fmt.Errorf("pipeline config missing or invalid 'name' field: %v", configMap["name"])
+		}
+
+		enabled, ok := configMap["enabled"].(bool)
+		if !ok {
+			return nil, fmt.Errorf("pipeline config missing or invalid 'enabled' field: %v", configMap["enabled"])
+		}
+
+		configPath, ok := configMap["config"].(string)
+		if !ok {
+			return nil, fmt.Errorf("pipeline config missing or invalid 'config' field: %v", configMap["config"])
+		}
+
+		transformerConfigs = append(transformerConfigs, Config{
+			Name:       name,
+			Enabled:    enabled,
+			ConfigPath: configPath,
+		})
+	}
+
+	return NewFromConfigs(ctx, transformerConfigs, opts)
+}
+
 // NewFromConfigs creates a Pipeline from a slice of transformer configurations.
 // Disabled stages are skipped. Returns an error if any enabled stage fails to initialize.
 func NewFromConfigs(ctx context.Context, configs []Config, opts Options) (*Pipeline, error) {
@@ -90,5 +145,5 @@ func NewFromConfigs(ctx context.Context, configs []Config, opts Options) (*Pipel
 		return nil, fmt.Errorf("unknown pipeline stage: %s", cfg.Name)
 	}
 
-	return New(transformers...), nil
+	return New(transformers...).WithBatchBudget(opts.BatchBudget), nil
 }

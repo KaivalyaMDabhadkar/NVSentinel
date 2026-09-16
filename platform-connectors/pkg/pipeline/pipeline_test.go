@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -25,14 +26,16 @@ import (
 )
 
 type mockTransformer struct {
-	name   string
-	called bool
-	fail   bool
-	mutate func(*pb.HealthEvent)
+	name      string
+	called    bool
+	processed int
+	fail      bool
+	mutate    func(*pb.HealthEvent)
 }
 
 func (m *mockTransformer) Transform(ctx context.Context, event *pb.HealthEvent) error {
 	m.called = true
+	m.processed++
 	if m.fail {
 		return fmt.Errorf("mock error")
 	}
@@ -125,4 +128,57 @@ func TestPipelineOrder(t *testing.T) {
 	pipeline.Process(context.Background(), event)
 
 	assert.Equal(t, []string{"first", "second"}, order)
+}
+
+// budgetPrewarmer is a transformer whose batch preparation reports what the
+// budget cut short.
+type budgetPrewarmer struct {
+	mockTransformer
+	err error
+}
+
+func (b *budgetPrewarmer) Prewarm(context.Context, []*pb.HealthEvent) error { return b.err }
+
+// TestPipeline_PrewarmReportsWhatTheBudgetCutShort: the pipeline surfaces a
+// prewarmer's error so the caller can defer the batch; transformers that do
+// not prewarm, and prewarmers that finished, add nothing.
+func TestPipeline_PrewarmReportsWhatTheBudgetCutShort(t *testing.T) {
+	cut := &budgetPrewarmer{mockTransformer: mockTransformer{name: "cut"}, err: fmt.Errorf("2 of 3 nodes unread")}
+	done := &budgetPrewarmer{mockTransformer: mockTransformer{name: "done"}}
+	plain := &mockTransformer{name: "plain"}
+
+	err := New(plain, done, cut).Prewarm(context.Background(), []*pb.HealthEvent{{NodeName: "n1"}})
+	assert.ErrorContains(t, err, "2 of 3 nodes unread")
+
+	assert.NoError(t, New(plain, done).Prewarm(context.Background(), []*pb.HealthEvent{{NodeName: "n1"}}))
+}
+
+// TestPipeline_ProcessBatch: with a budget, a preparation the budget cut
+// short is reported before any event is processed, so the caller can defer
+// the batch while no transformer remembers it; without a budget the events
+// are processed as they are and nothing is reported.
+func TestPipeline_ProcessBatch(t *testing.T) {
+	events := []*pb.HealthEvent{{NodeName: "n1"}, {NodeName: "n2"}}
+
+	t.Run("budget reports what was cut short before processing", func(t *testing.T) {
+		cut := &budgetPrewarmer{mockTransformer: mockTransformer{name: "cut"}, err: fmt.Errorf("1 of 2 nodes unread")}
+
+		err := New(cut).WithBatchBudget(time.Second).ProcessBatch(context.Background(), events)
+		assert.ErrorContains(t, err, "1 of 2 nodes unread")
+		assert.Zero(t, cut.processed, "no event is processed when the batch is deferred")
+	})
+
+	t.Run("budget covers the whole batch and every event is processed", func(t *testing.T) {
+		done := &budgetPrewarmer{mockTransformer: mockTransformer{name: "done"}}
+
+		assert.NoError(t, New(done).WithBatchBudget(time.Second).ProcessBatch(context.Background(), events))
+		assert.Equal(t, 2, done.processed)
+	})
+
+	t.Run("without a budget the preparation is skipped", func(t *testing.T) {
+		cut := &budgetPrewarmer{mockTransformer: mockTransformer{name: "cut"}, err: fmt.Errorf("would defer")}
+
+		assert.NoError(t, New(cut).ProcessBatch(context.Background(), events))
+		assert.Equal(t, 2, cut.processed)
+	})
 }
