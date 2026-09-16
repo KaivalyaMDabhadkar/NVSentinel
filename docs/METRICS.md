@@ -222,12 +222,12 @@ sum by (node) (rate(health_events_total{recommended_action!="NONE"}[1h]))
 
 ### Platform Connector Request Metrics
 
-Both roles of the platform connector, the node-local DaemonSet and the deployment platform connector, expose these for the batches that reach the request handler. Alert on `failed` outcomes.
+The platform connector exposes these for the batches that reach its request handler.
 
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|
-| `platform_connector_request_duration_seconds` | Histogram | `outcome` | Duration of health event batch requests that reached the handler, by outcome: `ok` (acknowledged), `rejected` (the batch is invalid), `failed` (the datastore write did not succeed; the caller retries). Both roles expose it; on the node-local DaemonSet a batch is `ok` once queued, unless it is invalid. |
-| `platform_connector_store_batches_total` | Counter | `outcome` | Batches written to the datastore by either role: `stored`, or `duplicate` (a resend, or a retried batch, whose events already existed; treated like a store) |
+| `platform_connector_request_duration_seconds` | Histogram | `outcome` | Duration of health event batch requests that reached the handler, by outcome: `ok` (acknowledged), `rejected` (the batch is invalid), `failed` (the connector returned an error while processing the batch; the caller retries). On the node-local DaemonSet the connector is the set of ring buffers, which always accept, so a batch is `ok` once queued unless it is invalid. |
+| `platform_connector_store_batches_total` | Counter | `outcome` | Batches written to the datastore by the store connector: `stored`, or `duplicate` (a resend, or a retried batch, whose events already existed; treated like a store) |
 
 ### Workqueue Metrics
 
