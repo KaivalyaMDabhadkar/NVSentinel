@@ -15,8 +15,6 @@
 package central
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strconv"
@@ -328,57 +326,4 @@ func loadTuningEnv(cfg *config) error {
 	}
 
 	return nil
-}
-
-// loadJSONConfig reads the platform connector config.json shared with the
-// DaemonSet. Numbers are decoded as json.Number so callers can coerce without
-// caring how the file was rendered.
-func loadJSONConfig(path string) (map[string]any, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config %s: %w", path, err)
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-
-	result := map[string]any{}
-	if err := dec.Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config %s: %w", path, err)
-	}
-
-	return result, nil
-}
-
-// cfgBool reads a toggle from a loadJSONConfig map, accepting both the chart's
-// quoted form and a raw bool.
-func cfgBool(m map[string]any, key string) bool {
-	switch v := m[key].(type) {
-	case bool:
-		return v
-	case string:
-		return v == trueValue
-	default:
-		return false
-	}
-}
-
-// cfgInt64 and cfgFloat64 coerce values out of a loadJSONConfig map, whose
-// numbers are always json.Number (UseNumber).
-func cfgInt64(m map[string]any, key string) (int64, error) {
-	v, ok := m[key].(json.Number)
-	if !ok {
-		return 0, fmt.Errorf("config key %q missing or not a number (got %T)", key, m[key])
-	}
-
-	return v.Int64()
-}
-
-func cfgFloat64(m map[string]any, key string) (float64, error) {
-	v, ok := m[key].(json.Number)
-	if !ok {
-		return 0, fmt.Errorf("config key %q missing or not a number (got %T)", key, m[key])
-	}
-
-	return v.Float64()
 }

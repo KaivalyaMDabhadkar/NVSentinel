@@ -17,36 +17,17 @@ package central
 import (
 	"fmt"
 	"log/slog"
-	"time"
 
 	"google.golang.org/grpc"
-	"k8s.io/client-go/kubernetes"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/grpcauth"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/auth"
-	"github.com/nvidia/nvsentinel/platform-connectors/pkg/kubeconfig"
 )
 
-// newValidator builds the TokenReview validator that authenticates callers.
-// Its Kubernetes client is sized for a call on the path of every batch of the
-// fleet, not for a controller that writes occasionally, and it is not wrapped
-// with the audit logger: a TokenReview is a question, not a change to the
-// cluster, and its request body is the caller's token.
+// newValidator builds the TokenReview validator that authenticates callers
+// with the builder the DaemonSet uses, sized for a call on the path of every
+// batch of the fleet rather than one node's callers.
 func newValidator(cfg *config) (*grpcauth.Validator, error) {
-	restConfig, err := kubeconfig.Load("")
-	if err != nil {
-		return nil, fmt.Errorf("loading in-cluster kubernetes config: %w", err)
-	}
-
-	restConfig.QPS = cfg.tokenReviewQPS
-	restConfig.Burst = cfg.tokenReviewBurst
-	restConfig.Timeout = 10 * time.Second
-
-	clientSet, err := kubernetes.NewForConfig(restConfig)
-	if err != nil {
-		return nil, fmt.Errorf("creating kubernetes clientset: %w", err)
-	}
-
 	// Every batch of the fleet authenticates; a line per success would be
 	// most of the log.
 	opts := []grpcauth.ValidatorOption{grpcauth.WithSuccessLogLevel(slog.LevelDebug)}
@@ -55,7 +36,7 @@ func newValidator(cfg *config) (*grpcauth.Validator, error) {
 		opts = append(opts, grpcauth.WithCacheSize(cfg.tokenCacheSize))
 	}
 
-	return grpcauth.NewValidator(clientSet, cfg.audience, opts...)
+	return auth.NewTokenReviewValidator("", cfg.audience, cfg.tokenReviewQPS, cfg.tokenReviewBurst, opts...)
 }
 
 // newAuthInterceptor builds caller authentication for the deployment role

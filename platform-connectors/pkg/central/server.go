@@ -18,7 +18,8 @@
 // fleet, with a small fixed pool of datastore connections.
 //
 // It reuses the gRPC handler, the event pipeline, the node-binding
-// interceptor and the connectors as they are. What differs from the
+// interceptor and the connectors as they are, built from the shared
+// config.json with the readers the DaemonSet uses. What differs from the
 // DaemonSet role:
 //   - callers authenticate with projected ServiceAccount tokens (TokenReview)
 //     and every batch is pinned to the caller token's node claim;
@@ -53,14 +54,11 @@ import (
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/keepalive"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
-	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/go-logr/logr"
-	"github.com/nvidia/nvsentinel/commons/pkg/auditlogger"
-	"github.com/nvidia/nvsentinel/commons/pkg/logger"
 	srv "github.com/nvidia/nvsentinel/commons/pkg/server"
 	"github.com/nvidia/nvsentinel/commons/pkg/tracing"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/configfile"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/grpcsink"
 	k8sconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/kubernetes"
@@ -74,9 +72,11 @@ import (
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
 )
 
-// appName is the deployment platform connector's application name: the
-// Kubernetes objects, the TLS certificate and the audience all derive from it.
-const appName = "platform-connector-deployment"
+// AppName is the deployment platform connector's application name: main
+// names the logger, the audit log and the tracing service with it, and the
+// chart derives the Kubernetes objects, the TLS certificate and the audience
+// from the same name.
+const AppName = "platform-connector-deployment"
 
 // indexVerifyInterval is how often an unready replica re-checks the
 // idempotency index while waiting for the datastore setup to create it;
@@ -193,81 +193,6 @@ func applyIndexCheck(ctx context.Context, ready *readiness, err error, retryIn t
 	}
 }
 
-// k8sClientRateLimit resolves the Kubernetes client rate limit each of a
-// replica's two clients gets (the k8s connector's and the metadata
-// transformer's): the fleet-sized override when set, else the shared
-// config's per-node values.
-func k8sClientRateLimit(cfg *config, rawCfg map[string]any) (float32, int, error) {
-	qps, err := cfgFloat64(rawCfg, "K8sConnectorQps")
-	if err != nil {
-		return 0, 0, err
-	}
-
-	burst, err := cfgInt64(rawCfg, "K8sConnectorBurst")
-	if err != nil {
-		return 0, 0, err
-	}
-
-	if cfg.k8sClientQPS > 0 {
-		qps = float64(cfg.k8sClientQPS)
-	}
-
-	if cfg.k8sClientBurst > 0 {
-		burst = int64(cfg.k8sClientBurst)
-	}
-
-	return float32(qps), int(burst), nil
-}
-
-// newK8sConnector starts the k8s connector for the fleet: node conditions
-// are updated and Kubernetes Events written only when a batch changes them.
-func newK8sConnector(
-	ctx context.Context, cfg *config, rawCfg map[string]any, qps float32, burst int,
-) (*k8sconnector.K8sConnector, error) {
-	maxLen, err := cfgInt64(rawCfg, "MaxNodeConditionMessageLength")
-	if err != nil {
-		return nil, err
-	}
-
-	compactLen, err := cfgInt64(rawCfg, "CompactedHealthEventMsgLen")
-	if err != nil {
-		return nil, err
-	}
-
-	connector, _, err := k8sconnector.InitializeK8sConnector(ctx, nil, qps, burst, nil,
-		k8sconnector.K8sConnectorConfig{
-			MaxNodeConditionMessageLength: maxLen,
-			CompactedHealthEventMsgLen:    compactLen,
-		}, "")
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize k8s connector: %w", err)
-	}
-
-	slog.InfoContext(ctx, "k8s connector enabled: node conditions and Events are written inside requests, on change")
-
-	return connector, nil
-}
-
-// newSink builds the optional ADR-033 gRPC sink connector from the shared
-// config; the connector set calls it once per batch, best effort.
-func newSink(ctx context.Context, rawCfg map[string]any) (*grpcsink.GRPCSinkConnector, error) {
-	target, ok := rawCfg["GRPCSinkTarget"].(string)
-	if !ok || target == "" {
-		return nil, fmt.Errorf("grpcSinkTarget not configured or empty")
-	}
-
-	tokenPath, _ := rawCfg["GRPCSinkTokenPath"].(string)
-
-	connector, err := grpcsink.InitializeGRPCSinkConnector(nil, target, 0, tokenPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize gRPC sink connector: %w", err)
-	}
-
-	slog.InfoContext(ctx, "gRPC sink connector enabled", "target", target)
-
-	return connector, nil
-}
-
 // buildServerOptions assembles the gRPC server options: transport security,
 // connection lifetimes, per-connection buffer sizes and the interceptors, run
 // in the order given. grpc-go itself spreads MaxConnectionAge by plus or
@@ -311,7 +236,7 @@ func buildServerOptions(cfg *config, interceptors ...grpc.UnaryServerInterceptor
 	return opts, cw, nil
 }
 
-// components is everything run wires together and shutdown tears down.
+// components is everything Run wires together and shutdown tears down.
 type components struct {
 	cfg        *config
 	ready      *readiness
@@ -327,10 +252,10 @@ type components struct {
 
 // initComponents builds the store connector, the other connectors, the
 // pipeline and the request handler from the environment and the shared
-// config.json. The connectors go into one set without queues: the store's
-// result is the reply, and every other connector is best effort inside the
-// condition update timeout, so a slow node update or sink never fails a
-// batch that is safely stored.
+// config.json, read with the same code as the DaemonSet role. The connectors
+// go into one set without queues: the store's result is the reply, and every
+// other connector is best effort inside the condition update timeout, so a
+// slow node update or sink never fails a batch that is safely stored.
 func initComponents(ctx context.Context, cfg *config) (*components, error) {
 	c := &components{cfg: cfg, ready: &readiness{}}
 
@@ -341,51 +266,24 @@ func initComponents(ctx context.Context, cfg *config) (*components, error) {
 
 	c.store = storeConnector
 
-	rawCfg, err := loadJSONConfig(cfg.configPath)
+	raw, err := configfile.Load(cfg.configPath)
 	if err != nil {
 		return nil, err
 	}
 
-	qps, burst, err := k8sClientRateLimit(cfg, rawCfg)
+	k8sSettings, err := fleetK8sSettings(cfg, raw)
 	if err != nil {
 		return nil, err
 	}
 
-	set := connectors.Set{storeConnector}
-
-	if cfgBool(rawCfg, "enableK8sPlatformConnector") {
-		k8s, err := newK8sConnector(ctx, cfg, rawCfg, qps, burst)
-		if err != nil {
-			return nil, err
-		}
-
-		set = append(set, connectors.BestEffort("kubernetes", k8s, cfg.conditionUpdateTimeout))
+	set, err := c.appendOptionalConnectors(ctx, connectors.Set{storeConnector}, raw, k8sSettings)
+	if err != nil {
+		return nil, err
 	}
 
-	if cfgBool(rawCfg, "enableGRPCSinkConnector") {
-		sink, err := newSink(ctx, rawCfg)
-		if err != nil {
-			return nil, err
-		}
-
-		c.sink = sink
-		set = append(set, connectors.BestEffort("grpcsink", sink, cfg.conditionUpdateTimeout))
-	}
-
-	if cfgBool(rawCfg, "enablePromPlatformConnector") {
-		// No ring buffer: the set hands it one batch at a time, so
-		// health_events_total counts every batch that passed validation and
-		// the pipeline, as the node-local role counts what reaches its queue.
-		// The write's outcome is not waited for, so a batch resent after a
-		// failed write is counted again.
-		set = append(set, prom.InitializePromConnector(nil))
-
-		slog.InfoContext(ctx, "Prometheus connector enabled: every accepted batch is counted in health_events_total")
-	}
-
-	c.pipeline, err = pipeline.NewFromRawConfig(ctx, rawCfg, pipeline.Options{
-		KubeClientQPS:         qps,
-		KubeClientBurst:       burst,
+	c.pipeline, err = pipeline.NewFromRawConfig(ctx, raw, pipeline.Options{
+		KubeClientQPS:         k8sSettings.QPS,
+		KubeClientBurst:       k8sSettings.Burst,
 		NodeMetadataCacheSize: cfg.nodeMetadataCacheSize,
 		NodeMetadataCacheTTL:  cfg.nodeMetadataCacheTTL,
 	})
@@ -398,7 +296,81 @@ func initComponents(ctx context.Context, cfg *config) (*components, error) {
 	return c, nil
 }
 
-func run() error {
+// fleetK8sSettings reads the k8s connector's settings from the shared
+// config.json and applies the fleet-sized overrides from the environment to
+// the client rate limit. It is read whether or not the k8s connector is on:
+// the metadata transformer's client is sized by the same rate limit.
+func fleetK8sSettings(cfg *config, raw map[string]any) (k8sconnector.Settings, error) {
+	settings, err := k8sconnector.SettingsFromConfig(raw)
+	if err != nil {
+		return k8sconnector.Settings{}, err
+	}
+
+	if cfg.k8sClientQPS > 0 {
+		settings.QPS = cfg.k8sClientQPS
+	}
+
+	if cfg.k8sClientBurst > 0 {
+		settings.Burst = cfg.k8sClientBurst
+	}
+
+	return settings, nil
+}
+
+// appendOptionalConnectors adds the connectors config.json enables to set,
+// built without queues: the k8s connector updates node conditions and writes
+// Events inside the request, on change, and the gRPC sink is called once per
+// batch, both best effort; the Prometheus connector counts every batch.
+func (c *components) appendOptionalConnectors(
+	ctx context.Context, set connectors.Set, raw map[string]any, k8sSettings k8sconnector.Settings,
+) (connectors.Set, error) {
+	if configfile.Bool(raw, "enableK8sPlatformConnector") {
+		connector, _, err := k8sconnector.InitializeK8sConnector(
+			ctx, nil, k8sSettings.QPS, k8sSettings.Burst, nil, k8sSettings.K8sConnectorConfig, "")
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize k8s connector: %w", err)
+		}
+
+		set = append(set, connectors.BestEffort("kubernetes", connector, c.cfg.conditionUpdateTimeout))
+
+		slog.InfoContext(ctx, "k8s connector enabled: node conditions and Events are written inside requests, on change")
+	}
+
+	if configfile.Bool(raw, "enableGRPCSinkConnector") {
+		sink, err := grpcsink.SettingsFromConfig(raw)
+		if err != nil {
+			return nil, err
+		}
+
+		// No queue, so no retry loop: BestEffort logs and counts a failure.
+		c.sink, err = grpcsink.InitializeGRPCSinkConnector(nil, sink.Target, 0, sink.TokenPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize gRPC sink connector: %w", err)
+		}
+
+		set = append(set, connectors.BestEffort("grpcsink", c.sink, c.cfg.conditionUpdateTimeout))
+
+		slog.InfoContext(ctx, "gRPC sink connector enabled", "target", sink.Target)
+	}
+
+	if configfile.Bool(raw, "enablePromPlatformConnector") {
+		// No ring buffer: the set hands it one batch at a time, so
+		// health_events_total counts every batch that passed validation and
+		// the pipeline, as the node-local role counts what reaches its queue.
+		// The write's outcome is not waited for, so a batch resent after a
+		// failed write is counted again.
+		set = append(set, prom.InitializePromConnector(nil))
+
+		slog.InfoContext(ctx, "Prometheus connector enabled: every accepted batch is counted in health_events_total")
+	}
+
+	return set, nil
+}
+
+// Run is the deployment platform connector: the platform connector binary
+// enters it with PC_MODE=deployment once main has set up logging, the audit
+// logger and tracing under AppName.
+func Run() error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -407,13 +379,7 @@ func run() error {
 		return err
 	}
 
-	// Same tracing setup as the DaemonSet: the monitor's span context arrives
-	// in the request metadata and every span below joins it.
-	if err := tracing.InitTracing(appName); err != nil {
-		slog.WarnContext(ctx, "Failed to initialize tracing, continuing without it", "error", err)
-	}
-
-	slog.InfoContext(ctx, "Starting the deployment platform connector",
+	slog.InfoContext(ctx, "Deployment platform connector configured",
 		"listenAddr", cfg.listenAddr, "audience", cfg.audience, "conditionUpdateTimeout", cfg.conditionUpdateTimeout)
 
 	c, err := initComponents(ctx, cfg)
@@ -580,34 +546,5 @@ func shutdown(ctx context.Context, c *components) {
 
 	if err := tracing.ShutdownTracing(tracingCtx); err != nil {
 		slog.WarnContext(ctx, "Error shutting down tracing", "error", err)
-	}
-}
-
-// Main is the deployment platform connector entrypoint, reached through the
-// platform connector binary with PC_MODE=deployment. version comes from the
-// caller because the build stamps only main.version.
-func Main(version string) {
-	logger.SetDefaultStructuredLoggerWithTraceCorrelation(appName, version)
-	// controller-runtime's certwatcher logs through logr; without a sink it
-	// drops its lines ("Updated current TLS certificate") and prints a
-	// "SetLogger(...) was never called" warning with a stack trace.
-	ctrllog.SetLogger(logr.FromSlogHandler(slog.Default().Handler()))
-
-	// Node condition updates and Events are cluster mutations; the k8s
-	// connector's client audits them through the same logger the DaemonSet
-	// uses, which is a no-op until initialized.
-	if err := auditlogger.InitAuditLogger(appName); err != nil {
-		slog.Warn("Failed to initialize audit logger", "error", err)
-	}
-
-	err := run()
-
-	if closeErr := auditlogger.CloseAuditLogger(); closeErr != nil {
-		slog.Warn("Failed to close audit logger", "error", closeErr)
-	}
-
-	if err != nil {
-		slog.Error("Deployment platform connector exited with error", "error", err)
-		os.Exit(1)
 	}
 }

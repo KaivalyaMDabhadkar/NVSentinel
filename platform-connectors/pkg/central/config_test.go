@@ -15,7 +15,6 @@
 package central
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -145,13 +144,4 @@ func TestDatastoreCertMountPath(t *testing.T) {
 
 	t.Setenv("POSTGRESQL_CLIENT_CERT_MOUNT_PATH", "/etc/ssl/client-certs")
 	require.Equal(t, "/etc/ssl/client-certs", datastoreCertMountPath(), "the PostgreSQL path wins when set")
-}
-
-func TestCfgBool(t *testing.T) {
-	m := map[string]any{"quoted": "true", "raw": true, "off": "false", "number": json.Number("1")}
-	require.True(t, cfgBool(m, "quoted"))
-	require.True(t, cfgBool(m, "raw"))
-	require.False(t, cfgBool(m, "off"))
-	require.False(t, cfgBool(m, "number"))
-	require.False(t, cfgBool(m, "missing"))
 }
