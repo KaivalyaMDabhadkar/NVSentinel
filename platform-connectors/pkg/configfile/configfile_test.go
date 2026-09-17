@@ -72,6 +72,25 @@ func TestLoad_Errors(t *testing.T) {
 
 	_, err = Load(writeConfig(t, `{"enableK8sPlatformConnector": `))
 	require.ErrorContains(t, err, "failed to unmarshal config")
+
+	_, err = Load(writeConfig(t, `{"a": 1} {"b": 2}`))
+	require.ErrorContains(t, err, "more than one JSON value")
+
+	_, err = Load(writeConfig(t, `{"a": 1} trailing`))
+	require.ErrorContains(t, err, "content after the JSON object")
+}
+
+func TestString(t *testing.T) {
+	m := map[string]any{"target": "sink:9000", "empty": "", "null": nil, "number": json.Number("1")}
+
+	for key, want := range map[string]string{"target": "sink:9000", "empty": "", "null": "", "missing": ""} {
+		got, err := String(m, key)
+		require.NoError(t, err, key)
+		require.Equal(t, want, got, key)
+	}
+
+	_, err := String(m, "number")
+	require.ErrorContains(t, err, `"number" must be a string`)
 }
 
 func TestBool(t *testing.T) {

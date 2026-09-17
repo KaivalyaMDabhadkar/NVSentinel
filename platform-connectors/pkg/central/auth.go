@@ -15,6 +15,8 @@
 package central
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -24,10 +26,35 @@ import (
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/auth"
 )
 
-// newValidator builds the TokenReview validator that authenticates callers
-// with the builder the DaemonSet uses, sized for a call on the path of every
-// batch of the fleet rather than one node's callers.
-func newValidator(cfg *config) (*grpcauth.Validator, error) {
+// deploymentAuthSettings reads the node-binding settings from the shared
+// config.json and checks the two the deployment role cannot do without: node
+// binding must be on, since every caller must present a token and there is no
+// local node to pin a tokenless caller to, and the allowlist must name the
+// publishers, since without a local node an empty allowlist would admit every
+// authenticated identity in the cluster.
+func deploymentAuthSettings(raw map[string]any) (auth.Settings, error) {
+	settings, err := auth.SettingsFromConfig(raw)
+	if err != nil {
+		return auth.Settings{}, fmt.Errorf("node-binding auth settings: %w", err)
+	}
+
+	if !settings.Enabled {
+		return auth.Settings{}, errors.New("enableNodeBindingAuth must be true for the deployment platform " +
+			"connector: every caller presents a token (set global.platformConnectorAuth.enabled)")
+	}
+
+	if len(settings.AllowedServiceAccounts) == 0 {
+		return auth.Settings{}, errors.New("AuthAllowedServiceAccounts must list the publishers for the deployment " +
+			"platform connector: without a local node an empty allowlist would admit every authenticated identity")
+	}
+
+	return settings, nil
+}
+
+// newValidator builds the TokenReview validator for the audience the shared
+// config.json names, with the builder the DaemonSet uses, sized for a call on
+// the path of every batch of the fleet rather than one node's callers.
+func newValidator(cfg *config, audience string) (*grpcauth.Validator, error) {
 	// Every batch of the fleet authenticates; a line per success would be
 	// most of the log.
 	opts := []grpcauth.ValidatorOption{grpcauth.WithSuccessLogLevel(slog.LevelDebug)}
@@ -36,7 +63,7 @@ func newValidator(cfg *config) (*grpcauth.Validator, error) {
 		opts = append(opts, grpcauth.WithCacheSize(cfg.tokenCacheSize))
 	}
 
-	return auth.NewTokenReviewValidator("", cfg.audience, cfg.tokenReviewQPS, cfg.tokenReviewBurst, opts...)
+	return auth.NewTokenReviewValidator("", audience, cfg.tokenReviewQPS, cfg.tokenReviewBurst, opts...)
 }
 
 // newAuthInterceptor builds caller authentication for the deployment role
@@ -44,17 +71,26 @@ func newValidator(cfg *config) (*grpcauth.Validator, error) {
 // without a local node: every caller must present a pod-bound token, its
 // events are pinned to the node the token claims, the listed cross-node
 // publishers may name any node, and only the allowed publishers may call at
-// all. The interceptor validates both lists: a malformed username, or a
-// cross-node entry missing from the allowlist, refuses to start.
-func newAuthInterceptor(cfg *config, validator auth.TokenValidator) (grpc.UnaryServerInterceptor, error) {
+// all. AuthMode audit and AuthFailOpenOnUnavailable are socket settings: with
+// no local node to fall back on the deployment role always enforces. The
+// interceptor validates both lists: a malformed username, or a cross-node
+// entry missing from the allowlist, refuses to start.
+func newAuthInterceptor(
+	ctx context.Context, settings auth.Settings, validator auth.TokenValidator,
+) (grpc.UnaryServerInterceptor, error) {
+	if settings.Mode == auth.ModeAudit || settings.FailOpenOnUnavailable {
+		slog.WarnContext(ctx, "AuthMode audit and AuthFailOpenOnUnavailable apply to the node-local role only; "+
+			"the deployment platform connector enforces node binding")
+	}
+
 	interceptor, err := auth.NewNodeBindingInterceptor(auth.Config{
 		Validator:                validator,
-		AllowedServiceAccounts:   cfg.allowedPublishers,
-		CrossNodeServiceAccounts: cfg.crossNodePublishers,
+		AllowedServiceAccounts:   settings.AllowedServiceAccounts,
+		CrossNodeServiceAccounts: settings.CrossNodeServiceAccounts,
 		Mode:                     auth.ModeEnforce,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("ALLOWED_PUBLISHERS or CROSS_NODE_PUBLISHERS: %w", err)
+		return nil, fmt.Errorf("AuthAllowedServiceAccounts or AuthCrossNodeServiceAccounts: %w", err)
 	}
 
 	return interceptor, nil

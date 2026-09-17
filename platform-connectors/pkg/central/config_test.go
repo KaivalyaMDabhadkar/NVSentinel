@@ -29,8 +29,6 @@ const (
 // setRequiredEnv sets the minimum environment a config load needs.
 func setRequiredEnv(t *testing.T) {
 	t.Helper()
-	t.Setenv("AUTH_AUDIENCE", "platform-connector-deployment.nvsentinel.nvidia.com")
-	t.Setenv("ALLOWED_PUBLISHERS", testPublisher)
 	t.Setenv("TLS_INSECURE_DEVELOPMENT_MODE", "true")
 }
 
@@ -42,8 +40,6 @@ func TestLoadConfigDefaults(t *testing.T) {
 
 	require.Equal(t, ":50051", cfg.listenAddr)
 	require.Equal(t, 2112, cfg.metricsPort)
-	require.Equal(t, []string{testPublisher}, cfg.allowedPublishers)
-	require.Empty(t, cfg.crossNodePublishers)
 	require.Equal(t, 10*time.Minute, cfg.maxConnAge)
 	require.Equal(t, 5*time.Minute, cfg.maxConnIdle)
 	require.Equal(t, 10*time.Second, cfg.conditionUpdateTimeout)
@@ -62,8 +58,6 @@ func TestLoadConfigDefaults(t *testing.T) {
 func TestLoadConfigOverrides(t *testing.T) {
 	setRequiredEnv(t)
 	t.Setenv("LISTEN_ADDR", ":9999")
-	t.Setenv("ALLOWED_PUBLISHERS", testPublisher+", "+testCrossNode)
-	t.Setenv("CROSS_NODE_PUBLISHERS", testCrossNode)
 	t.Setenv("MAX_CONNECTION_AGE", "1m")
 	t.Setenv("MAX_CONNECTION_IDLE", "30s")
 	t.Setenv("CONDITION_UPDATE_TIMEOUT", "3s")
@@ -88,8 +82,6 @@ func TestLoadConfigOverrides(t *testing.T) {
 	require.Equal(t, 4096, cfg.grpcWriteBufferBytes)
 
 	require.Equal(t, ":9999", cfg.listenAddr)
-	require.Equal(t, []string{testPublisher, testCrossNode}, cfg.allowedPublishers, "split and trimmed, in order")
-	require.Equal(t, []string{testCrossNode}, cfg.crossNodePublishers)
 	require.Equal(t, time.Minute, cfg.maxConnAge)
 	require.Equal(t, 30*time.Second, cfg.maxConnIdle)
 	require.Equal(t, 3*time.Second, cfg.conditionUpdateTimeout)
@@ -105,9 +97,6 @@ func TestLoadConfigRejections(t *testing.T) {
 		mutate  func(t *testing.T)
 		wantErr string
 	}{
-		{"missing audience", func(t *testing.T) { t.Setenv("AUTH_AUDIENCE", "") }, "AUTH_AUDIENCE is required"},
-		{"missing publishers", func(t *testing.T) { t.Setenv("ALLOWED_PUBLISHERS", "") }, "ALLOWED_PUBLISHERS is required"},
-		{"blank publishers", func(t *testing.T) { t.Setenv("ALLOWED_PUBLISHERS", " , ") }, "ALLOWED_PUBLISHERS is required"},
 		{
 			"plaintext without insecure development mode",
 			func(t *testing.T) { t.Setenv("TLS_INSECURE_DEVELOPMENT_MODE", "") },

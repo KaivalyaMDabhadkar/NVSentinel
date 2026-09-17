@@ -90,7 +90,7 @@ func bearerContext(token string) context.Context {
 }
 
 func TestAuthInterceptor(t *testing.T) {
-	cfg := &config{allowedPublishers: []string{testPublisher}}
+	settings := auth.Settings{Enabled: true, Audience: testAudience, AllowedServiceAccounts: []string{testPublisher}}
 
 	unaryInfo := &grpc.UnaryServerInfo{FullMethod: "/PlatformConnector/HealthEventOccurredV1"}
 
@@ -107,17 +107,17 @@ func TestAuthInterceptor(t *testing.T) {
 	}
 
 	// build wires the deployment configuration into the shared interceptor.
-	build := func(t *testing.T, cfg *config, v *grpcauth.Validator) grpc.UnaryServerInterceptor {
+	build := func(t *testing.T, settings auth.Settings, v *grpcauth.Validator) grpc.UnaryServerInterceptor {
 		t.Helper()
 
-		interceptor, err := newAuthInterceptor(cfg, v)
+		interceptor, err := newAuthInterceptor(context.Background(), settings, v)
 		require.NoError(t, err)
 
 		return interceptor
 	}
 
 	t.Run("missing authorization metadata is Unauthenticated", func(t *testing.T) {
-		interceptor := build(t, cfg,
+		interceptor := build(t, settings,
 			validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a"))))
 
 		_, err := interceptor(context.Background(), batchNaming("node-a"), unaryInfo, unreachableHandler(t))
@@ -126,7 +126,7 @@ func TestAuthInterceptor(t *testing.T) {
 	})
 
 	t.Run("malformed authorization metadata is Unauthenticated", func(t *testing.T) {
-		interceptor := build(t, cfg,
+		interceptor := build(t, settings,
 			validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a"))))
 
 		ctx := metadata.NewIncomingContext(context.Background(),
@@ -138,7 +138,7 @@ func TestAuthInterceptor(t *testing.T) {
 	})
 
 	t.Run("a token without a pod binding is PermissionDenied", func(t *testing.T) {
-		interceptor := build(t, cfg, validatorReturning(t, authenticatedAs(testPublisher, nil)))
+		interceptor := build(t, settings, validatorReturning(t, authenticatedAs(testPublisher, nil)))
 
 		_, err := interceptor(bearerContext("tok-unbound"), batchNaming("node-a"), unaryInfo, unreachableHandler(t))
 		require.Error(t, err)
@@ -147,7 +147,7 @@ func TestAuthInterceptor(t *testing.T) {
 	})
 
 	t.Run("an authenticated identity off the allowlist is PermissionDenied", func(t *testing.T) {
-		interceptor := build(t, cfg,
+		interceptor := build(t, settings,
 			validatorReturning(t, authenticatedAs(
 				"system:serviceaccount:nvsentinel:not-a-publisher", podBoundExtras("node-a"))))
 
@@ -158,7 +158,7 @@ func TestAuthInterceptor(t *testing.T) {
 	})
 
 	t.Run("a batch naming another node is PermissionDenied", func(t *testing.T) {
-		interceptor := build(t, cfg,
+		interceptor := build(t, settings,
 			validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a"))))
 
 		_, err := interceptor(bearerContext("tok-scope"), batchNaming("node-b"), unaryInfo, unreachableHandler(t))
@@ -167,7 +167,7 @@ func TestAuthInterceptor(t *testing.T) {
 	})
 
 	t.Run("happy path reaches the handler with the caller identity", func(t *testing.T) {
-		interceptor := build(t, cfg,
+		interceptor := build(t, settings,
 			validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a"))))
 
 		var got *grpcauth.Identity
@@ -188,13 +188,15 @@ func TestAuthInterceptor(t *testing.T) {
 		require.Equal(t, "node-a", got.NodeName)
 	})
 
-	crossCfg := &config{
-		allowedPublishers:   []string{testPublisher, testCrossNode},
-		crossNodePublishers: []string{testCrossNode},
+	crossSettings := auth.Settings{
+		Enabled:                  true,
+		Audience:                 testAudience,
+		AllowedServiceAccounts:   []string{testPublisher, testCrossNode},
+		CrossNodeServiceAccounts: []string{testCrossNode},
 	}
 
 	t.Run("a cross-node publisher naming other nodes reaches the handler", func(t *testing.T) {
-		interceptor := build(t, crossCfg,
+		interceptor := build(t, crossSettings,
 			validatorReturning(t, authenticatedAs(testCrossNode, podBoundExtras("system-node"))))
 
 		var got *grpcauth.Identity
@@ -213,7 +215,7 @@ func TestAuthInterceptor(t *testing.T) {
 	})
 
 	t.Run("a cross-node publisher whose token has no node claim is PermissionDenied", func(t *testing.T) {
-		interceptor := build(t, crossCfg,
+		interceptor := build(t, crossSettings,
 			validatorReturning(t, authenticatedAs(testCrossNode, podBoundExtras(""))))
 
 		_, err := interceptor(bearerContext("tok-cross-unbound"), batchNaming("node-a"), unaryInfo, unreachableHandler(t))
@@ -222,7 +224,7 @@ func TestAuthInterceptor(t *testing.T) {
 	})
 
 	t.Run("the allowlist still gates non-HealthEvents requests", func(t *testing.T) {
-		interceptor := build(t, cfg,
+		interceptor := build(t, settings,
 			validatorReturning(t, authenticatedAs(
 				"system:serviceaccount:nvsentinel:not-a-publisher", podBoundExtras("node-a"))))
 
@@ -230,4 +232,50 @@ func TestAuthInterceptor(t *testing.T) {
 		require.Error(t, err)
 		require.Equal(t, codes.PermissionDenied, status.Code(err))
 	})
+}
+
+// TestDeploymentAuthSettings: the deployment role reads the same config.json
+// keys as the DaemonSet and refuses to start without node binding or without
+// an allowlist, since it has no local node to fall back on.
+func TestDeploymentAuthSettings(t *testing.T) {
+	_, err := deploymentAuthSettings(map[string]any{"enableNodeBindingAuth": "false"})
+	require.ErrorContains(t, err, "enableNodeBindingAuth must be true")
+
+	_, err = deploymentAuthSettings(map[string]any{
+		"enableNodeBindingAuth": "true", "AuthAudience": testAudience, "AuthCrossNodeServiceAccounts": []any{},
+	})
+	require.ErrorContains(t, err, "AuthAllowedServiceAccounts must list the publishers")
+
+	_, err = deploymentAuthSettings(map[string]any{"enableNodeBindingAuth": "maybe"})
+	require.ErrorContains(t, err, "node-binding auth settings: enableNodeBindingAuth")
+
+	settings, err := deploymentAuthSettings(map[string]any{
+		"enableNodeBindingAuth":        "true",
+		"AuthAudience":                 testAudience,
+		"AuthCrossNodeServiceAccounts": []any{testCrossNode},
+		"AuthAllowedServiceAccounts":   []any{testPublisher, testCrossNode},
+	})
+	require.NoError(t, err)
+	require.Equal(t, testAudience, settings.Audience)
+	require.Equal(t, []string{testPublisher, testCrossNode}, settings.AllowedServiceAccounts)
+	require.Equal(t, []string{testCrossNode}, settings.CrossNodeServiceAccounts)
+}
+
+// TestNewAuthInterceptor_SocketOnlySettingsStillEnforce: audit mode and
+// fail-open are settings of the socket role; the deployment role built from
+// the same config.json still rejects an identity off the allowlist.
+func TestNewAuthInterceptor_SocketOnlySettingsStillEnforce(t *testing.T) {
+	interceptor, err := newAuthInterceptor(context.Background(), auth.Settings{
+		Enabled:                true,
+		Audience:               testAudience,
+		AllowedServiceAccounts: []string{testPublisher},
+		Mode:                   auth.ModeAudit,
+		FailOpenOnUnavailable:  true,
+	}, validatorReturning(t, authenticatedAs("system:serviceaccount:nvsentinel:not-a-publisher", podBoundExtras("node-a"))))
+	require.NoError(t, err)
+
+	_, err = interceptor(bearerContext("tok-audit"), batchNaming("node-a"),
+		&grpc.UnaryServerInfo{FullMethod: "/PlatformConnector/HealthEventOccurredV1"},
+		func(context.Context, interface{}) (interface{}, error) { return &empty.Empty{}, nil })
+	require.Equal(t, codes.PermissionDenied, status.Code(err))
 }

@@ -33,6 +33,8 @@ import (
 
 	"github.com/nvidia/nvsentinel/commons/pkg/healthpub"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/auth"
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/pipeline"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/server"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
@@ -164,7 +166,8 @@ func (r *recordingConnector) lastBatch() *pb.HealthEvents {
 // the caller's pod UID and pinned to its node.
 func TestInterceptorChain_AsWired(t *testing.T) {
 	validator := validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a")))
-	authInterceptor, err := newAuthInterceptor(&config{allowedPublishers: []string{testPublisher}}, validator)
+	authInterceptor, err := newAuthInterceptor(context.Background(),
+		auth.Settings{Enabled: true, Audience: testAudience, AllowedServiceAccounts: []string{testPublisher}}, validator)
 	require.NoError(t, err)
 
 	ready := &readiness{}
@@ -219,4 +222,26 @@ func TestInterceptorChain_AsWired(t *testing.T) {
 	require.Equal(t, "pod-uid-1#batch-1#0", got.Events[0].Metadata[datastore.HealthEventIdempotencyKeyMetadataField])
 	require.Equal(t, "pod-uid-1#batch-1#1", got.Events[1].Metadata[datastore.HealthEventIdempotencyKeyMetadataField])
 	require.Equal(t, "node-a", got.Events[1].NodeName, "a blank node name is pinned to the token's node")
+}
+
+// failingConnector is a set member whose every batch fails.
+type failingConnector struct{}
+
+func (failingConnector) ProcessBatch(context.Context, *pb.HealthEvents) error {
+	return errors.New("node update failed")
+}
+
+// TestMember_BestEffortOnlyNextToAStore: with a store connector the other
+// members are best effort, so their failure never fails a stored batch;
+// without one a member's failure is the reply, so the caller retries.
+func TestMember_BestEffortOnlyNextToAStore(t *testing.T) {
+	cfg := &config{conditionUpdateTimeout: time.Second}
+	batch := &pb.HealthEvents{}
+
+	withStore := &components{cfg: cfg, store: &store.DatabaseStoreConnector{}}
+	require.NoError(t, withStore.member("kubernetes", failingConnector{}).ProcessBatch(context.Background(), batch))
+
+	withoutStore := &components{cfg: cfg}
+	require.EqualError(t, withoutStore.member("kubernetes", failingConnector{}).ProcessBatch(context.Background(), batch),
+		"node update failed")
 }

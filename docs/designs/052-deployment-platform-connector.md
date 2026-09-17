@@ -160,7 +160,7 @@ flowchart LR
 
 ### Authentication
 
-Monitors authenticate exactly as they do on the socket today (ADR-030): a projected ServiceAccount token on every request, checked through TokenReview, with the same cross-node allowlist for the four components that report about other nodes (csp-health-monitor, kubernetes-object-monitor, slurm-drain-monitor, health-events-analyzer). The check moves to the central service under its own audience, so the event path still has exactly one token validation. Three things change:
+Monitors authenticate exactly as they do on the socket today (ADR-030): a projected ServiceAccount token on every request, checked through TokenReview, with the same cross-node allowlist for the four components that report about other nodes (csp-health-monitor, kubernetes-object-monitor, slurm-drain-monitor, health-events-analyzer). The check moves to the central service under the same audience, so a monitor keeps its token when it switches over and the event path still has exactly one token validation. Three things change:
 
 - Every caller must present a token. The socket accepted callers with no credential and filled in its own node name for them. Over the network there is no local node to fall back on, so a batch without a pod-bound token is rejected.
 - Node scope comes from the token instead of the connector. The socket checked that a token's node claim matched the node it was running on. The central service has no node of its own, so it pins each batch to the node named in the caller's token.
@@ -239,7 +239,6 @@ global:
       mode: required   # cert-manager issued certificate; the only alternative is
                        # the explicitly named insecureDevelopmentMode
     auth:
-      audience: "platform-connector-deployment.nvsentinel.nvidia.com"
       tokenExpirationSeconds: 3600
 
 platformConnector:

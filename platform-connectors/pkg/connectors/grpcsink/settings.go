@@ -14,7 +14,11 @@
 
 package grpcsink
 
-import "errors"
+import (
+	"errors"
+
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/configfile"
+)
 
 // Settings are the connector's values from the shared config.json.
 type Settings struct {
@@ -30,12 +34,19 @@ type Settings struct {
 // retry count is not here: only the node-local role's queue loop retries, so
 // it reads GRPCSinkConnectorMaxRetries itself.
 func SettingsFromConfig(raw map[string]any) (Settings, error) {
-	target, _ := raw["GRPCSinkTarget"].(string)
+	target, err := configfile.String(raw, "GRPCSinkTarget")
+	if err != nil {
+		return Settings{}, err
+	}
+
 	if target == "" {
 		return Settings{}, errors.New("GRPCSinkTarget not configured or empty")
 	}
 
-	tokenPath, _ := raw["GRPCSinkTokenPath"].(string)
+	tokenPath, err := configfile.String(raw, "GRPCSinkTokenPath")
+	if err != nil {
+		return Settings{}, err
+	}
 
 	return Settings{Target: target, TokenPath: tokenPath}, nil
 }

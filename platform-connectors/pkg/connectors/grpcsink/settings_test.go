@@ -34,4 +34,10 @@ func TestSettingsFromConfig(t *testing.T) {
 
 	_, err = SettingsFromConfig(map[string]any{})
 	require.ErrorContains(t, err, "GRPCSinkTarget")
+
+	_, err = SettingsFromConfig(map[string]any{"GRPCSinkTarget": "sink:9000", "GRPCSinkTokenPath": 1})
+	require.ErrorContains(t, err, "GRPCSinkTokenPath", "a present value of the wrong type is refused, not read as no token")
+
+	_, err = SettingsFromConfig(map[string]any{"GRPCSinkTarget": true})
+	require.ErrorContains(t, err, "GRPCSinkTarget")
 }

@@ -53,10 +53,6 @@ import (
 	_ "github.com/nvidia/nvsentinel/platform-connectors/pkg/transformers/overrides"
 )
 
-const (
-	True = "true"
-)
-
 var (
 	// These variables will be populated during the build process
 	version = "dev"
@@ -129,7 +125,7 @@ func initializeK8sConnector(
 
 	settings, err := k8sconnector.SettingsFromConfig(config)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("k8s connector settings: %w", err)
 	}
 
 	k8sConnector, _, err := k8sconnector.InitializeK8sConnector(
@@ -155,7 +151,7 @@ func initializeDatabaseStoreConnector(
 
 	maxRetries, err := configfile.Int64(config, "StoreConnectorMaxRetries")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("store connector settings: %w", err)
 	}
 
 	storeConnector, err := store.InitializeDatabaseStoreConnector(
@@ -238,103 +234,22 @@ const (
 	tokenReviewBurst = 100
 )
 
-// stringSliceFromConfig reads a JSON array of strings out of the ConfigMap.
-//
-// A missing key and an explicit null are errors, not empty lists. Silently
-// reading either as "no cross-node publishers" would start the connector in a
-// configuration where every cluster-scoped monitor is pinned to one node and
-// its events rejected — a failure that surfaces far from its cause. Only an
-// explicit [] says that on purpose.
-func stringSliceFromConfig(config map[string]any, key string) ([]string, error) {
-	raw, present := config[key]
-	if !present {
-		return nil, fmt.Errorf("%s is not set: it must be a list of canonical "+
-			"ServiceAccount usernames, or an explicit empty list to declare that no "+
-			"publisher may name other nodes", key)
-	}
-
-	if raw == nil {
-		return nil, fmt.Errorf("%s is null: use an explicit empty list to declare "+
-			"that no publisher may name other nodes", key)
-	}
-
-	items, ok := raw.([]any)
-	if !ok {
-		return nil, fmt.Errorf("%s must be a list of strings, got %T", key, raw)
-	}
-
-	result := make([]string, 0, len(items))
-
-	for _, item := range items {
-		s, ok := item.(string)
-		if !ok {
-			return nil, fmt.Errorf("%s must be a list of strings, found element of type %T", key, item)
-		}
-
-		result = append(result, s)
-	}
-
-	return result, nil
-}
-
-// nodeBindingEnabled reports whether node binding is on.
-//
-// The flag must be present and must be exactly true or false. It is not
-// defaulted in either direction: guessing "on" would silently enforce against
-// a config that never asked for it, and guessing "off" would silently drop the
-// check that keeps a publisher on one node from reporting faults about
-// another. A ConfigMap that predates the flag is missing the audience and
-// allowlist too, so it cannot work either way — saying so plainly is more
-// useful than inferring an answer.
-//
-//	true / "true"     -> enabled
-//	false / "false"   -> disabled
-//	absent or other   -> refuse to start
-//
-// Values arrive as JSON, where the chart quotes them; an unquoted bool from a
-// hand-edited ConfigMap is accepted too.
-func nodeBindingEnabled(config map[string]any) (bool, error) {
-	const key = "enableNodeBindingAuth"
-
-	raw, present := config[key]
-	if !present {
-		return false, fmt.Errorf(
-			"%s is not set: it must be true or false. A ConfigMap without it "+
-				"predates this platform-connector version and is missing AuthAudience and "+
-				"AuthCrossNodeServiceAccounts as well; upgrade the chart rather than "+
-				"relying on a default", key)
-	}
-
-	switch v := raw.(type) {
-	case bool:
-		return v, nil
-	case string:
-		switch v {
-		case True:
-			return true, nil
-		case "false":
-			return false, nil
-		}
-	}
-
-	return false, fmt.Errorf("%s must be true or false, got %#v", key, raw)
-}
-
 // initializeAuthInterceptor builds the node-binding interceptor that keeps a
-// publisher on one node from submitting health events naming another node. It
-// returns nil when node binding is explicitly disabled, in which case any
-// caller may name any node; that is not a supported production configuration.
+// publisher on one node from submitting health events naming another node,
+// from the settings the shared config.json carries. It returns nil when node
+// binding is explicitly disabled, in which case any caller may name any node;
+// that is not a supported production configuration.
 func initializeAuthInterceptor(
 	ctx context.Context,
 	config map[string]any,
 	kubeconfigPath string,
 ) (grpc.UnaryServerInterceptor, error) {
-	enabled, err := nodeBindingEnabled(config)
+	settings, err := auth.SettingsFromConfig(config)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("node-binding auth settings: %w", err)
 	}
 
-	if !enabled {
+	if !settings.Enabled {
 		slog.WarnContext(ctx, "Node-binding authentication is DISABLED. Any caller able to reach the "+
 			"platform-connector socket may submit health events naming any node in the cluster.")
 
@@ -346,94 +261,26 @@ func initializeAuthInterceptor(
 		return nil, fmt.Errorf("NODE_NAME environment variable is required when node-binding auth is enabled")
 	}
 
-	crossNodeSAs, err := stringSliceFromConfig(config, "AuthCrossNodeServiceAccounts")
+	validator, err := auth.NewTokenReviewValidator(kubeconfigPath, settings.Audience, tokenReviewQPS, tokenReviewBurst)
 	if err != nil {
 		return nil, err
 	}
 
-	// Every monitor may present a token, not only the cross-node ones, so the
-	// audience is required whenever node binding is on: without it no token can
-	// be verified and the node claims this check rests on are unreadable.
-	audience, _ := config["AuthAudience"].(string)
-	if audience == "" {
-		return nil, fmt.Errorf("AuthAudience must be set when node-binding auth is enabled")
-	}
-
-	validator, err := auth.NewTokenReviewValidator(kubeconfigPath, audience, tokenReviewQPS, tokenReviewBurst)
-	if err != nil {
-		return nil, err
-	}
-
-	mode, err := authMode(config)
-	if err != nil {
-		return nil, fmt.Errorf("parse AuthMode: %w", err)
-	}
-
-	failOpenOnUnavailable, err := boolFromConfig(config, "AuthFailOpenOnUnavailable", false)
-	if err != nil {
-		return nil, fmt.Errorf("parse AuthFailOpenOnUnavailable: %w", err)
-	}
-
+	// AuthAllowedServiceAccounts is not applied here: reaching the socket
+	// already means running on the node, so every authenticated identity may
+	// publish, as before. The deployment platform connector applies it.
 	interceptor, err := auth.NewNodeBindingInterceptor(auth.Config{
 		NodeName:                 nodeName,
 		Validator:                validator,
-		CrossNodeServiceAccounts: crossNodeSAs,
-		Mode:                     mode,
-		FailOpenOnUnavailable:    failOpenOnUnavailable,
+		CrossNodeServiceAccounts: settings.CrossNodeServiceAccounts,
+		Mode:                     settings.Mode,
+		FailOpenOnUnavailable:    settings.FailOpenOnUnavailable,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to build node-binding interceptor: %w", err)
 	}
 
 	return interceptor, nil
-}
-
-// authMode reads the node-binding enforcement mode from config. Absent means
-// auth.ModeEnforce, so that a ConfigMap that predates this setting keeps
-// today's behavior rather than silently switching to audit-only.
-func authMode(config map[string]any) (auth.Mode, error) {
-	const key = "AuthMode"
-
-	raw, present := config[key]
-	if !present {
-		return auth.ModeEnforce, nil
-	}
-
-	v, ok := raw.(string)
-	if !ok {
-		return "", fmt.Errorf("%s must be a string, got %#v", key, raw)
-	}
-
-	switch auth.Mode(v) {
-	case auth.ModeEnforce, auth.ModeAudit:
-		return auth.Mode(v), nil
-	default:
-		return "", fmt.Errorf("%s must be %q or %q, got %q", key, auth.ModeEnforce, auth.ModeAudit, v)
-	}
-}
-
-// boolFromConfig reads a strict boolean config value, defaulting when absent.
-// Values arrive as JSON, where the chart quotes them; an unquoted bool from a
-// hand-edited ConfigMap is accepted too.
-func boolFromConfig(config map[string]any, key string, def bool) (bool, error) {
-	raw, present := config[key]
-	if !present {
-		return def, nil
-	}
-
-	switch v := raw.(type) {
-	case bool:
-		return v, nil
-	case string:
-		switch v {
-		case True:
-			return true, nil
-		case "false":
-			return false, nil
-		}
-	}
-
-	return false, fmt.Errorf("%s must be true or false, got %#v", key, raw)
 }
 
 // initializeGRPCSinkConnector starts the gRPC sink connector and returns it
@@ -446,13 +293,13 @@ func initializeGRPCSinkConnector(
 
 	settings, err := grpcsink.SettingsFromConfig(config)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("gRPC sink connector settings: %w", err)
 	}
 
 	// Only the queue loop retries, so the retry count is this role's alone.
 	maxRetries, err := configfile.Int64(config, "GRPCSinkConnectorMaxRetries")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("gRPC sink connector settings: %w", err)
 	}
 
 	connector, err := grpcsink.InitializeGRPCSinkConnector(

@@ -17,8 +17,6 @@ package central
 import (
 	"fmt"
 	"os"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/nvidia/nvsentinel/commons/pkg/envutil"
@@ -41,20 +39,12 @@ const (
 )
 
 type config struct {
-	listenAddr  string
-	metricsPort int
-	audience    string
-	// allowedPublishers is every identity that may publish health events.
-	// Every batch is pinned to the caller token's node claim unless the
-	// identity is also on crossNodePublishers. Both lists are canonical
-	// ServiceAccount usernames as the environment gave them; the node-binding
-	// interceptor validates them when it is built.
-	allowedPublishers   []string
-	crossNodePublishers []string
-	certMountPath       string
-	tlsCertDir          string
-	maxConnAge          time.Duration
-	maxConnIdle         time.Duration
+	listenAddr    string
+	metricsPort   int
+	certMountPath string
+	tlsCertDir    string
+	maxConnAge    time.Duration
+	maxConnIdle   time.Duration
 	// conditionUpdateTimeout bounds the node condition update (and the
 	// Kubernetes Event write) of one request; the write alone decides the
 	// reply, so this only bounds how long a slow API server can delay it.
@@ -80,38 +70,10 @@ type config struct {
 	configPath           string
 }
 
-// parseIdentityList splits a comma-separated environment value into its
-// non-empty, trimmed entries.
-func parseIdentityList(raw string) []string {
-	var out []string
-
-	for _, w := range strings.Split(raw, ",") {
-		if w = strings.TrimSpace(w); w != "" {
-			out = append(out, w)
-		}
-	}
-
-	return out
-}
-
-func envInt(key string, def int) (int, error) {
-	raw := os.Getenv(key)
-	if raw == "" {
-		return def, nil
-	}
-
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", key, err)
-	}
-
-	return v, nil
-}
-
-// envPositiveInt is envInt for values where zero or a negative number would
-// make the server useless.
+// envPositiveInt reads an integer whose zero or negative value would make the
+// server useless.
 func envPositiveInt(key string, def int) (int, error) {
-	v, err := envInt(key, def)
+	v, err := envutil.ParseEnvInt(key, def)
 	if err != nil {
 		return 0, err
 	}
@@ -123,31 +85,17 @@ func envPositiveInt(key string, def int) (int, error) {
 	return v, nil
 }
 
-// envFloat reads a floating point value, as the shared config.json expresses
-// the Kubernetes client QPS.
-func envFloat(key string, def float64) (float64, error) {
-	raw := os.Getenv(key)
-	if raw == "" {
-		return def, nil
-	}
-
-	v, err := strconv.ParseFloat(raw, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", key, err)
-	}
-
-	return v, nil
-}
-
+// envPositiveDuration reads a duration whose zero or negative value would
+// make the server useless. Unset keeps the default, which may be zero where
+// zero means "keep the shared config.json value".
 func envPositiveDuration(key string, def time.Duration) (time.Duration, error) {
-	raw := os.Getenv(key)
-	if raw == "" {
+	if os.Getenv(key) == "" {
 		return def, nil
 	}
 
-	v, err := time.ParseDuration(raw)
+	v, err := envutil.ParseEnvDuration(key, def)
 	if err != nil {
-		return 0, fmt.Errorf("invalid %s: %w", key, err)
+		return 0, err
 	}
 
 	if v <= 0 {
@@ -170,11 +118,7 @@ func loadConfigFromEnv() (*config, error) {
 
 	var err error
 
-	if cfg.metricsPort, err = envInt("METRICS_PORT", defaultMetricsPort); err != nil {
-		return nil, err
-	}
-
-	if err = loadPublisherAuthEnv(cfg); err != nil {
+	if cfg.metricsPort, err = envutil.ParseEnvInt("METRICS_PORT", defaultMetricsPort); err != nil {
 		return nil, err
 	}
 
@@ -207,31 +151,12 @@ func datastoreCertMountPath() string {
 	return os.Getenv("MONGODB_CLIENT_CERT_MOUNT_PATH")
 }
 
-// loadPublisherAuthEnv reads the token audience and the two publisher lists.
-func loadPublisherAuthEnv(cfg *config) error {
-	cfg.audience = os.Getenv("AUTH_AUDIENCE")
-	if cfg.audience == "" {
-		return fmt.Errorf("AUTH_AUDIENCE is required")
-	}
-
-	cfg.allowedPublishers = parseIdentityList(os.Getenv("ALLOWED_PUBLISHERS"))
-	cfg.crossNodePublishers = parseIdentityList(os.Getenv("CROSS_NODE_PUBLISHERS"))
-
-	// Without a local node an empty allowlist would mean "every authenticated
-	// identity may call"; the deployment requires the publishers to be named.
-	if len(cfg.allowedPublishers) == 0 {
-		return fmt.Errorf("ALLOWED_PUBLISHERS is required (comma-separated ServiceAccount usernames)")
-	}
-
-	return nil
-}
-
 // loadTokenReviewEnv reads the TokenReview client rate limit and the verdict
 // cache size.
 func loadTokenReviewEnv(cfg *config) error {
 	var err error
 
-	if cfg.tokenCacheSize, err = envInt("TOKEN_CACHE_SIZE", 0); err != nil {
+	if cfg.tokenCacheSize, err = envutil.ParseEnvInt("TOKEN_CACHE_SIZE", 0); err != nil {
 		return err
 	}
 
@@ -256,18 +181,18 @@ func loadTokenReviewEnv(cfg *config) error {
 // loadFleetSizingEnv reads the overrides for values the shared config.json
 // sizes for one node. Unset (zero) keeps the config.json value.
 func loadFleetSizingEnv(cfg *config) error {
-	qps, err := envFloat("K8S_CLIENT_QPS", 0)
+	qps, err := envutil.ParseEnvFloat64("K8S_CLIENT_QPS", 0)
 	if err != nil {
 		return err
 	}
 
 	cfg.k8sClientQPS = float32(qps)
 
-	if cfg.k8sClientBurst, err = envInt("K8S_CLIENT_BURST", 0); err != nil {
+	if cfg.k8sClientBurst, err = envutil.ParseEnvInt("K8S_CLIENT_BURST", 0); err != nil {
 		return err
 	}
 
-	if cfg.nodeMetadataCacheSize, err = envInt("NODE_METADATA_CACHE_SIZE", 0); err != nil {
+	if cfg.nodeMetadataCacheSize, err = envutil.ParseEnvInt("NODE_METADATA_CACHE_SIZE", 0); err != nil {
 		return err
 	}
 
@@ -313,11 +238,11 @@ func loadTuningEnv(cfg *config) error {
 		return err
 	}
 
-	if cfg.grpcReadBufferBytes, err = envInt("GRPC_READ_BUFFER_BYTES", 0); err != nil {
+	if cfg.grpcReadBufferBytes, err = envutil.ParseEnvInt("GRPC_READ_BUFFER_BYTES", 0); err != nil {
 		return err
 	}
 
-	if cfg.grpcWriteBufferBytes, err = envInt("GRPC_WRITE_BUFFER_BYTES", 0); err != nil {
+	if cfg.grpcWriteBufferBytes, err = envutil.ParseEnvInt("GRPC_WRITE_BUFFER_BYTES", 0); err != nil {
 		return err
 	}
 

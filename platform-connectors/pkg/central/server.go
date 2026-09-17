@@ -24,9 +24,10 @@
 //   - callers authenticate with projected ServiceAccount tokens (TokenReview)
 //     and every batch is pinned to the caller token's node claim;
 //   - there is no queue: the handler hands the batch to the connectors
-//     themselves instead of to their ring buffers. The datastore write
-//     decides the reply; node conditions and the gRPC sink run alongside it,
-//     best effort inside a bounded wait;
+//     themselves instead of to their ring buffers. With the store connector
+//     enabled its write decides the reply and node conditions and the gRPC
+//     sink run alongside it, best effort inside a bounded wait; without it
+//     every enabled connector's result counts;
 //   - every batch carries an idempotency key, so a resent batch is never
 //     stored twice;
 //   - node conditions are updated, and Kubernetes Events written, only when
@@ -250,33 +251,42 @@ type components struct {
 	stopIndexLoop context.CancelFunc
 }
 
-// initComponents builds the store connector, the other connectors, the
-// pipeline and the request handler from the environment and the shared
-// config.json, read with the same code as the DaemonSet role. The connectors
-// go into one set without queues: the store's result is the reply, and every
-// other connector is best effort inside the condition update timeout, so a
-// slow node update or sink never fails a batch that is safely stored.
-func initComponents(ctx context.Context, cfg *config) (*components, error) {
+// initComponents builds the connectors config.json enables, the pipeline and
+// the request handler from the environment and the shared config.json, read
+// with the same code as the DaemonSet role, into one set without queues. With
+// the store connector enabled its write is the reply and every other member
+// is best effort inside the condition update timeout, so a slow node update
+// or sink never fails a batch that is safely stored. Without it there is
+// nothing to protect: every member's result counts, a failure is returned and
+// the caller retries, and the replica is ready at start since there is no
+// index to verify.
+func initComponents(ctx context.Context, cfg *config, raw map[string]any) (*components, error) {
 	c := &components{cfg: cfg, ready: &readiness{}}
 
-	storeConnector, err := store.InitializeDatabaseStoreConnector(ctx, nil, cfg.certMountPath, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize store connector: %w", err)
-	}
+	var set connectors.Set
 
-	c.store = storeConnector
+	if configfile.Bool(raw, "enableMongoDBStorePlatformConnector") ||
+		configfile.Bool(raw, "enablePostgresDBStorePlatformConnector") {
+		storeConnector, err := store.InitializeDatabaseStoreConnector(ctx, nil, cfg.certMountPath, 0)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize store connector: %w", err)
+		}
 
-	raw, err := configfile.Load(cfg.configPath)
-	if err != nil {
-		return nil, err
+		c.store = storeConnector
+		set = append(set, storeConnector)
+	} else {
+		c.ready.indexVerified.Store(true)
+
+		slog.WarnContext(ctx, "No store connector enabled: batches are not stored, every enabled connector's "+
+			"result decides the reply, resent batches are not deduplicated and the replica is ready at start")
 	}
 
 	k8sSettings, err := fleetK8sSettings(cfg, raw)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("k8s connector settings: %w", err)
 	}
 
-	set, err := c.appendOptionalConnectors(ctx, connectors.Set{storeConnector}, raw, k8sSettings)
+	set, err = c.appendOptionalConnectors(ctx, set, raw, k8sSettings)
 	if err != nil {
 		return nil, err
 	}
@@ -320,7 +330,8 @@ func fleetK8sSettings(cfg *config, raw map[string]any) (k8sconnector.Settings, e
 // appendOptionalConnectors adds the connectors config.json enables to set,
 // built without queues: the k8s connector updates node conditions and writes
 // Events inside the request, on change, and the gRPC sink is called once per
-// batch, both best effort; the Prometheus connector counts every batch.
+// batch, both run as member describes; the Prometheus connector counts every
+// batch.
 func (c *components) appendOptionalConnectors(
 	ctx context.Context, set connectors.Set, raw map[string]any, k8sSettings k8sconnector.Settings,
 ) (connectors.Set, error) {
@@ -331,7 +342,7 @@ func (c *components) appendOptionalConnectors(
 			return nil, fmt.Errorf("failed to initialize k8s connector: %w", err)
 		}
 
-		set = append(set, connectors.BestEffort("kubernetes", connector, c.cfg.conditionUpdateTimeout))
+		set = append(set, c.member("kubernetes", connector))
 
 		slog.InfoContext(ctx, "k8s connector enabled: node conditions and Events are written inside requests, on change")
 	}
@@ -339,16 +350,17 @@ func (c *components) appendOptionalConnectors(
 	if configfile.Bool(raw, "enableGRPCSinkConnector") {
 		sink, err := grpcsink.SettingsFromConfig(raw)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("gRPC sink connector settings: %w", err)
 		}
 
-		// No queue, so no retry loop: BestEffort logs and counts a failure.
+		// No queue, so no retry loop: next to a store the failure is logged
+		// and counted, without one it is returned and the caller retries.
 		c.sink, err = grpcsink.InitializeGRPCSinkConnector(nil, sink.Target, 0, sink.TokenPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize gRPC sink connector: %w", err)
 		}
 
-		set = append(set, connectors.BestEffort("grpcsink", c.sink, c.cfg.conditionUpdateTimeout))
+		set = append(set, c.member("grpcsink", c.sink))
 
 		slog.InfoContext(ctx, "gRPC sink connector enabled", "target", sink.Target)
 	}
@@ -367,6 +379,18 @@ func (c *components) appendOptionalConnectors(
 	return set, nil
 }
 
+// member returns how the set runs an optional connector: best effort next to
+// a store connector, whose write is the reply, so a slow node update or sink
+// never fails a stored batch; as it is without one, so its failure is
+// returned and the caller retries, since nothing else would.
+func (c *components) member(name string, connector connectors.Connector) connectors.Connector {
+	if c.store == nil {
+		return connector
+	}
+
+	return connectors.BestEffort(name, connector, c.cfg.conditionUpdateTimeout)
+}
+
 // Run is the deployment platform connector: the platform connector binary
 // enters it with PC_MODE=deployment once main has set up logging, the audit
 // logger and tracing under AppName.
@@ -379,27 +403,39 @@ func Run() error {
 		return err
 	}
 
-	slog.InfoContext(ctx, "Deployment platform connector configured",
-		"listenAddr", cfg.listenAddr, "audience", cfg.audience, "conditionUpdateTimeout", cfg.conditionUpdateTimeout)
+	raw, err := configfile.Load(cfg.configPath)
+	if err != nil {
+		return err
+	}
 
-	c, err := initComponents(ctx, cfg)
+	authSettings, err := deploymentAuthSettings(raw)
+	if err != nil {
+		return err
+	}
+
+	slog.InfoContext(ctx, "Deployment platform connector configured", "listenAddr", cfg.listenAddr,
+		"audience", authSettings.Audience, "conditionUpdateTimeout", cfg.conditionUpdateTimeout)
+
+	c, err := initComponents(ctx, cfg, raw)
 	if err != nil {
 		return err
 	}
 
 	defer c.pipeline.Close()
 
-	indexCtx, stopIndexLoop := context.WithCancel(ctx)
-	c.stopIndexLoop = stopIndexLoop
+	if c.store != nil {
+		indexCtx, stopIndexLoop := context.WithCancel(ctx)
+		c.stopIndexLoop = stopIndexLoop
 
-	go verifyIndexLoop(indexCtx, c.store, c.ready, indexVerifyInterval, indexRecheckInterval, indexVerifyTimeout)
+		go verifyIndexLoop(indexCtx, c.store, c.ready, indexVerifyInterval, indexRecheckInterval, indexVerifyTimeout)
+	}
 
-	callerValidator, err := newValidator(cfg)
+	callerValidator, err := newValidator(cfg, authSettings.Audience)
 	if err != nil {
 		return fmt.Errorf("failed to build caller token validator: %w", err)
 	}
 
-	authInterceptor, err := newAuthInterceptor(cfg, callerValidator)
+	authInterceptor, err := newAuthInterceptor(ctx, authSettings, callerValidator)
 	if err != nil {
 		return err
 	}
@@ -534,11 +570,13 @@ func shutdown(ctx context.Context, c *components) {
 		}
 	}
 
-	disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer disconnectCancel()
+	if c.store != nil {
+		disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer disconnectCancel()
 
-	if err := c.store.Disconnect(disconnectCtx); err != nil {
-		slog.WarnContext(ctx, "Error disconnecting store connector", "error", err)
+		if err := c.store.Disconnect(disconnectCtx); err != nil {
+			slog.WarnContext(ctx, "Error disconnecting store connector", "error", err)
+		}
 	}
 
 	tracingCtx, tracingCancel := context.WithTimeout(context.Background(), 5*time.Second)

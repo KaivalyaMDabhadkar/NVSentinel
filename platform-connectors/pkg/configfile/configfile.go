@@ -21,7 +21,9 @@ package configfile
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 )
 
@@ -41,6 +43,16 @@ func Load(path string) (map[string]any, error) {
 		return nil, fmt.Errorf("failed to unmarshal config %s: %w", path, err)
 	}
 
+	// The file is one JSON object; anything after it is a mistake that a
+	// plain Unmarshal would have refused too.
+	if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, fmt.Errorf("failed to unmarshal config %s: more than one JSON value", path)
+		}
+
+		return nil, fmt.Errorf("failed to unmarshal config %s: content after the JSON object: %w", path, err)
+	}
+
 	return result, nil
 }
 
@@ -55,6 +67,22 @@ func Bool(m map[string]any, key string) bool {
 	default:
 		return false
 	}
+}
+
+// String reads an optional string: an absent key or null is "", a present
+// value must be a string.
+func String(m map[string]any, key string) (string, error) {
+	v, ok := m[key]
+	if !ok || v == nil {
+		return "", nil
+	}
+
+	str, isString := v.(string)
+	if !isString {
+		return "", fmt.Errorf("config key %q must be a string (got %T)", key, v)
+	}
+
+	return str, nil
 }
 
 // Int64 reads a required whole number.
