@@ -41,6 +41,7 @@ import (
 	"github.com/nvidia/nvsentinel/commons/pkg/tracing"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/auth"
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/central"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/grpcsink"
 	k8sconnector "github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/kubernetes"
@@ -67,6 +68,19 @@ var (
 )
 
 func main() {
+	// The central deployment platform connector role is a mode of this
+	// binary (one image, mode-selected).
+	switch mode := os.Getenv("PC_MODE"); mode {
+	case "deployment":
+		central.Main(version)
+		return
+	case "":
+		// The node-local role below.
+	default:
+		fmt.Fprintf(os.Stderr, "unknown PC_MODE %q: use \"deployment\" or leave it unset for the node-local role\n", mode)
+		os.Exit(1)
+	}
+
 	logger.SetDefaultStructuredLoggerWithTraceCorrelation("platform-connectors", version)
 	setControllerRuntimeLogger()
 

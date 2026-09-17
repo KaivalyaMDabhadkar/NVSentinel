@@ -182,6 +182,10 @@ cluster already uses.
 | `node_claim_mismatch` | The token was issued on another node. |
 | `unbound_cross_node_token` | An allowlisted caller presented a token bound to no pod. |
 | `cross_node_claim_absent` | Pod-bound, but the pod was never scheduled. |
+| `token_missing` | Deployment platform connector only: the caller presented no token. There is no local node to pin a tokenless caller to. |
+| `unbound_token` | Deployment platform connector only: the token is bound to no pod. |
+| `node_claim_absent` | Deployment platform connector only: the token is bound to a pod that never scheduled, so there is no node to pin its events to. |
+| `identity_not_allowed` | Deployment platform connector only: the identity is not in `ALLOWED_PUBLISHERS`. |
 | `missing_node_name` | An event carried no node name and none could be stamped. |
 | `token_invalid` | TokenReview rejected the token. |
 | `malformed_credentials` | The authorization header was duplicated, or did not use the Bearer scheme. A *completely absent* header is not a violation — that caller is accepted and pinned to the connector's node. |
