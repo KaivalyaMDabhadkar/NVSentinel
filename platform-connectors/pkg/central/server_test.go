@@ -167,7 +167,7 @@ func (r *recordingConnector) lastBatch() *pb.HealthEvents {
 func TestInterceptorChain_AsWired(t *testing.T) {
 	validator := validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a")))
 	authInterceptor, err := newAuthInterceptor(context.Background(),
-		auth.Settings{Enabled: true, Audience: testAudience, AllowedServiceAccounts: []string{testPublisher}}, validator)
+		auth.Settings{Enabled: true, Audience: testAudience}, validator)
 	require.NoError(t, err)
 
 	ready := &readiness{}
@@ -244,4 +244,17 @@ func TestMember_BestEffortOnlyNextToAStore(t *testing.T) {
 	withoutStore := &components{cfg: cfg}
 	require.EqualError(t, withoutStore.member("kubernetes", failingConnector{}).ProcessBatch(context.Background(), batch),
 		"node update failed")
+}
+
+// TestNewReadiness_NoStoreIsReadyAtStart: with a store connector a replica is
+// unready and refuses writes until the index loop verifies the index; without
+// one there is no index, so it is ready and accepts writes from the start.
+func TestNewReadiness_NoStoreIsReadyAtStart(t *testing.T) {
+	withStore := newReadiness(true)
+	require.False(t, withStore.writesAllowed())
+	require.ErrorContains(t, withStore.Ready(context.Background()), "not verified")
+
+	withoutStore := newReadiness(false)
+	require.True(t, withoutStore.writesAllowed())
+	require.NoError(t, withoutStore.Ready(context.Background()))
 }

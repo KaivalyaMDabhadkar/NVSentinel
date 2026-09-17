@@ -63,9 +63,8 @@
 // and uses the same interceptor with no local node (Config.NodeName empty).
 // Everything above holds, with the node the caller's token claims in place of
 // the connector's own: there is no socket to vouch for where a caller runs,
-// so every caller must present a token bound to a scheduled pod, its events
-// are pinned to that pod's node, and, since anything on the network can reach
-// the listener, only the allowlisted publishers may call at all.
+// so every caller must present a token bound to a scheduled pod and its
+// events are pinned to that pod's node.
 package auth
 
 import (
@@ -119,12 +118,11 @@ const (
 	reasonCrossNodeClaimAbsent = "cross_node_claim_absent"
 	// The reasons below only occur without a local node (the deployment
 	// platform connector), where the token is the only evidence of where a
-	// caller runs: no token at all, a token bound to no pod, a token bound to
-	// a pod that never scheduled, and an identity not on the allowlist.
+	// caller runs: no token at all, a token bound to no pod, and a token
+	// bound to a pod that never scheduled.
 	reasonTokenMissing    = "token_missing"
 	reasonUnboundToken    = "unbound_token"
 	reasonNodeClaimAbsent = "node_claim_absent"
-	reasonNotAllowed      = "identity_not_allowed"
 	// The reasons below distinguish "we could not reach a verdict" from
 	// "the caller's credential was rejected". Both fail the request, but only
 	// the latter says anything about the caller: an API server outage would
@@ -229,16 +227,6 @@ type Config struct {
 	// which is the same treatment an anonymous caller gets.
 	CrossNodeServiceAccounts []string
 
-	// AllowedServiceAccounts, when set, lists the canonical usernames that may
-	// call at all; any other identity is rejected before its batch is looked
-	// at, and every cross-node account must be listed here too. Empty means
-	// every authenticated identity may call, the node-local connector's
-	// setting, where reaching the socket already means running on the node.
-	// The list applies to authenticated callers: on a connector with a local
-	// node a tokenless caller has no identity to check and is pinned to that
-	// node as before.
-	AllowedServiceAccounts []string
-
 	// Mode selects whether a violation rejects the request (ModeEnforce) or
 	// only records it (ModeAudit). Defaults to ModeEnforce when empty.
 	Mode Mode
@@ -257,11 +245,9 @@ type Config struct {
 }
 
 type nodeBinder struct {
-	nodeName  string
-	validator TokenValidator
-	crossNode map[string]struct{}
-	// allowed is nil when every authenticated identity may call.
-	allowed               map[string]struct{}
+	nodeName              string
+	validator             TokenValidator
+	crossNode             map[string]struct{}
 	mode                  Mode
 	failOpenOnUnavailable bool
 }
@@ -292,7 +278,7 @@ func CallerFromContext(ctx context.Context) *grpcauth.Identity {
 // the package's node-binding rule on HealthEvents payloads. Requests carrying
 // any other message type pass through untouched.
 func NewNodeBindingInterceptor(cfg Config) (grpc.UnaryServerInterceptor, error) {
-	crossNode, allowed, mode, err := validateConfig(cfg)
+	crossNode, mode, err := validateConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -301,30 +287,27 @@ func NewNodeBindingInterceptor(cfg Config) (grpc.UnaryServerInterceptor, error) 
 		nodeName:              cfg.NodeName,
 		validator:             cfg.Validator,
 		crossNode:             crossNode,
-		allowed:               allowed,
 		mode:                  mode,
 		failOpenOnUnavailable: cfg.FailOpenOnUnavailable,
 	}
 
 	slog.Info("platform-connector node binding enabled",
-		"nodeName", b.nodeName, "tokenRequired", b.noLocalNode(),
-		"allowedServiceAccounts", len(allowed), "crossNodeServiceAccounts", len(crossNode),
+		"nodeName", b.nodeName, "tokenRequired", b.noLocalNode(), "crossNodeServiceAccounts", len(crossNode),
 		"mode", b.mode, "failOpenOnUnavailable", b.failOpenOnUnavailable)
 
 	return b.intercept, nil
 }
 
-// validateConfig checks cfg and returns the cross-node and allowed username
-// sets; the allowed set is nil when every identity may call.
+// validateConfig checks cfg and returns the cross-node username set.
 //
-// Allowlist entries must already be canonical usernames. The namespace is not
+// Entries must already be canonical usernames. The namespace is not
 // filled in here on the caller's behalf: an entry that silently became
 // "system:serviceaccount:default:x" because a namespace was assumed would grant
 // cross-node reach to an account nobody meant to name, so a malformed entry
 // stops the process instead.
-func validateConfig(cfg Config) (crossNode, allowed map[string]struct{}, mode Mode, err error) {
+func validateConfig(cfg Config) (crossNode map[string]struct{}, mode Mode, err error) {
 	if cfg.Validator == nil {
-		return nil, nil, "", fmt.Errorf("a token validator is required for node-binding enforcement")
+		return nil, "", fmt.Errorf("a token validator is required for node-binding enforcement")
 	}
 
 	mode = cfg.Mode
@@ -333,22 +316,18 @@ func validateConfig(cfg Config) (crossNode, allowed map[string]struct{}, mode Mo
 	}
 
 	if mode != ModeEnforce && mode != ModeAudit {
-		return nil, nil, "", fmt.Errorf("node-binding mode must be %q or %q, got %q", ModeEnforce, ModeAudit, cfg.Mode)
+		return nil, "", fmt.Errorf("node-binding mode must be %q or %q, got %q", ModeEnforce, ModeAudit, cfg.Mode)
 	}
 
 	if err = validateNoLocalNode(cfg, mode); err != nil {
-		return nil, nil, "", err
+		return nil, "", err
 	}
 
-	if allowed, err = allowedSet(cfg.AllowedServiceAccounts); err != nil {
-		return nil, nil, "", err
+	if crossNode, err = crossNodeSet(cfg.CrossNodeServiceAccounts); err != nil {
+		return nil, "", err
 	}
 
-	if crossNode, err = crossNodeSet(cfg.CrossNodeServiceAccounts, allowed); err != nil {
-		return nil, nil, "", err
-	}
-
-	return crossNode, allowed, mode, nil
+	return crossNode, mode, nil
 }
 
 // validateNoLocalNode refuses the settings that only make sense with a local
@@ -373,37 +352,13 @@ func validateNoLocalNode(cfg Config, mode Mode) error {
 	return nil
 }
 
-// allowedSet builds the allowlist, nil when there is none.
-func allowedSet(usernames []string) (map[string]struct{}, error) {
-	if len(usernames) == 0 {
-		return nil, nil
-	}
-
-	allowed := make(map[string]struct{}, len(usernames))
-
-	for _, sa := range usernames {
-		if err := grpcauth.ValidateServiceAccountUsername(sa); err != nil {
-			return nil, fmt.Errorf("allowed service account %w", err)
-		}
-
-		allowed[sa] = struct{}{}
-	}
-
-	return allowed, nil
-}
-
-// crossNodeSet builds the cross-node set; with an allowlist, every entry
-// must be on it, since an account that may not call cannot name other nodes.
-func crossNodeSet(usernames []string, allowed map[string]struct{}) (map[string]struct{}, error) {
+// crossNodeSet builds the cross-node set.
+func crossNodeSet(usernames []string) (map[string]struct{}, error) {
 	crossNode := make(map[string]struct{}, len(usernames))
 
 	for _, sa := range usernames {
 		if err := validateServiceAccountUsername(sa); err != nil {
 			return nil, err
-		}
-
-		if _, ok := allowed[sa]; allowed != nil && !ok {
-			return nil, fmt.Errorf("cross-node service account %q is not among the allowed service accounts", sa)
 		}
 
 		crossNode[sa] = struct{}{}
@@ -454,9 +409,8 @@ func (b *nodeBinder) intercept(
 	}
 
 	if !isBatch {
-		// Without a local node every request is authenticated and checked
-		// against the allowlist; a request that is not a batch has nothing
-		// left to bind.
+		// Without a local node every request is authenticated; a request
+		// that is not a batch has nothing left to bind.
 		return handler(ctx, req)
 	}
 
@@ -593,12 +547,8 @@ func (b *nodeBinder) resolveScope(ctx context.Context) (scope, *grpcauth.Identit
 }
 
 // scopeForIdentity decides what an authenticated caller may name: the
-// allowlist, the token's provenance, then cross-node or node-local scope.
+// token's provenance, then cross-node or node-local scope.
 func (b *nodeBinder) scopeForIdentity(ctx context.Context, identity *grpcauth.Identity) (scope, error) {
-	if err := b.requireAllowed(ctx, identity); err != nil {
-		return scopeNodeLocal, err
-	}
-
 	// Provenance first: a replayed token is refused whatever its holder is
 	// entitled to say.
 	if err := b.verifyNodeClaim(ctx, identity); err != nil {
@@ -632,23 +582,6 @@ func (b *nodeBinder) scopeForIdentity(ctx context.Context, identity *grpcauth.Id
 		"user", identity.Username, "pod", identity.PodName, "nodeName", b.scopeNode(identity))
 
 	return scopeNodeLocal, nil
-}
-
-// requireAllowed rejects an identity not on the allowlist, when there is one.
-func (b *nodeBinder) requireAllowed(ctx context.Context, identity *grpcauth.Identity) error {
-	if b.allowed == nil {
-		return nil
-	}
-
-	if _, ok := b.allowed[identity.Username]; ok {
-		return nil
-	}
-
-	b.recordViolation(reasonNotAllowed)
-	slog.WarnContext(ctx, "Rejecting caller not on the publisher allowlist",
-		"user", identity.Username, "pod", identity.PodName)
-
-	return status.Errorf(codes.PermissionDenied, "identity %q is not an allowed publisher", identity.Username)
 }
 
 // verifyNodeClaim answers the provenance question: was this token presented on

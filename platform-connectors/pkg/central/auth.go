@@ -27,11 +27,9 @@ import (
 )
 
 // deploymentAuthSettings reads the node-binding settings from the shared
-// config.json and checks the two the deployment role cannot do without: node
+// config.json and checks the one the deployment role cannot do without: node
 // binding must be on, since every caller must present a token and there is no
-// local node to pin a tokenless caller to, and the allowlist must name the
-// publishers, since without a local node an empty allowlist would admit every
-// authenticated identity in the cluster.
+// local node to pin a tokenless caller to.
 func deploymentAuthSettings(raw map[string]any) (auth.Settings, error) {
 	settings, err := auth.SettingsFromConfig(raw)
 	if err != nil {
@@ -41,11 +39,6 @@ func deploymentAuthSettings(raw map[string]any) (auth.Settings, error) {
 	if !settings.Enabled {
 		return auth.Settings{}, errors.New("enableNodeBindingAuth must be true for the deployment platform " +
 			"connector: every caller presents a token (set global.platformConnectorAuth.enabled)")
-	}
-
-	if len(settings.AllowedServiceAccounts) == 0 {
-		return auth.Settings{}, errors.New("AuthAllowedServiceAccounts must list the publishers for the deployment " +
-			"platform connector: without a local node an empty allowlist would admit every authenticated identity")
 	}
 
 	return settings, nil
@@ -69,12 +62,11 @@ func newValidator(cfg *config, audience string) (*grpcauth.Validator, error) {
 // newAuthInterceptor builds caller authentication for the deployment role
 // from the node-binding interceptor the DaemonSet uses, in its configuration
 // without a local node: every caller must present a pod-bound token, its
-// events are pinned to the node the token claims, the listed cross-node
-// publishers may name any node, and only the allowed publishers may call at
-// all. AuthMode audit and AuthFailOpenOnUnavailable are socket settings: with
-// no local node to fall back on the deployment role always enforces. The
-// interceptor validates both lists: a malformed username, or a cross-node
-// entry missing from the allowlist, refuses to start.
+// events are pinned to the node the token claims, and the listed cross-node
+// publishers may name any node. AuthMode audit and AuthFailOpenOnUnavailable
+// are socket settings: with no local node to fall back on the deployment role
+// always enforces. The interceptor validates the cross-node list: a malformed
+// username refuses to start.
 func newAuthInterceptor(
 	ctx context.Context, settings auth.Settings, validator auth.TokenValidator,
 ) (grpc.UnaryServerInterceptor, error) {
@@ -85,12 +77,11 @@ func newAuthInterceptor(
 
 	interceptor, err := auth.NewNodeBindingInterceptor(auth.Config{
 		Validator:                validator,
-		AllowedServiceAccounts:   settings.AllowedServiceAccounts,
 		CrossNodeServiceAccounts: settings.CrossNodeServiceAccounts,
 		Mode:                     auth.ModeEnforce,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("AuthAllowedServiceAccounts or AuthCrossNodeServiceAccounts: %w", err)
+		return nil, fmt.Errorf("AuthCrossNodeServiceAccounts: %w", err)
 	}
 
 	return interceptor, nil

@@ -1092,7 +1092,7 @@ func fleetValidator() *stubValidator {
 			"tok-unbound":  fleetPublisherSA,
 			"tok-no-node":  fleetPublisherSA,
 		},
-		nodeClaims:  map[string]string{"tok-a": fleetNodeA, "tok-cross": "system-node-1"},
+		nodeClaims:  map[string]string{"tok-a": fleetNodeA, "tok-cross": "system-node-1", "tok-unlisted": fleetNodeA},
 		unbound:     map[string]bool{"tok-unbound": true},
 		noNodeClaim: map[string]bool{"tok-no-node": true},
 	}
@@ -1101,7 +1101,6 @@ func fleetValidator() *stubValidator {
 func fleetConfig(v TokenValidator) Config {
 	return Config{
 		Validator:                v,
-		AllowedServiceAccounts:   []string{fleetPublisherSA, crossSA},
 		CrossNodeServiceAccounts: []string{crossSA},
 	}
 }
@@ -1208,23 +1207,27 @@ func TestFleet_CrossNodePublisherMayNameAnyNodeButMustNameOne(t *testing.T) {
 	assert.Equal(t, codes.InvalidArgument, status.Code(err))
 }
 
-// TestFleet_AllowlistGatesEveryRequest: an authenticated identity that is
-// not listed is rejected, for a batch and for any other request; a listed
-// one reaches the handler with any request.
-func TestFleet_AllowlistGatesEveryRequest(t *testing.T) {
-	before := violations(reasonNotAllowed)
+// TestFleet_AnyPodBoundIdentityIsScopedToItsNode: there is no publisher
+// allowlist. An identity the chart never heard of is accepted for the node its
+// token was issued on, and refused for any other node, exactly like a bundled
+// monitor; a request that is not a batch still needs a token.
+func TestFleet_AnyPodBoundIdentityIsScopedToItsNode(t *testing.T) {
+	in := events(fleetNodeA)
 
-	_, err := runFleet(t, fleetConfig(fleetValidator()), ctxWithAuth("Bearer tok-unlisted"), events(ownNode))
-	assert.Equal(t, codes.PermissionDenied, status.Code(err))
-	assert.Contains(t, status.Convert(err).Message(), "not an allowed publisher")
-
-	_, err = runFleet(t, fleetConfig(fleetValidator()), ctxWithAuth("Bearer tok-unlisted"), &emptypb.Empty{})
-	assert.Equal(t, codes.PermissionDenied, status.Code(err))
-	assert.Equal(t, before+2, violations(reasonNotAllowed))
-
-	handlerCtx, err := runFleet(t, fleetConfig(fleetValidator()), ctxWithAuth("Bearer tok-a"), &emptypb.Empty{})
+	handlerCtx, err := runFleet(t, fleetConfig(fleetValidator()), ctxWithAuth("Bearer tok-unlisted"), in)
 	require.NoError(t, err)
-	require.NotNil(t, handlerCtx, "a listed identity reaches the handler with a request that is not a batch")
+	require.NotNil(t, handlerCtx)
+	assert.Equal(t, unlistedSA, CallerFromContext(handlerCtx).Username)
+
+	_, err = runFleet(t, fleetConfig(fleetValidator()), ctxWithAuth("Bearer tok-unlisted"), events(fleetNodeB))
+	assert.Equal(t, codes.PermissionDenied, status.Code(err))
+
+	handlerCtx, err = runFleet(t, fleetConfig(fleetValidator()), ctxWithAuth("Bearer tok-unlisted"), &emptypb.Empty{})
+	require.NoError(t, err)
+	require.NotNil(t, handlerCtx, "an authenticated identity reaches the handler with a request that is not a batch")
+
+	_, err = runFleet(t, fleetConfig(fleetValidator()), context.Background(), &emptypb.Empty{})
+	assert.Equal(t, codes.Unauthenticated, status.Code(err), "a request that is not a batch still needs a token")
 }
 
 // TestFleet_HandlerSeesTheCaller: the handler reads the authenticated caller
@@ -1268,7 +1271,7 @@ func TestNodeLocal_HandlerSeesTheCallerWhenThereIsOne(t *testing.T) {
 }
 
 // TestFleet_ConfigValidation: the settings that only make sense with a local
-// node, and an allowlist that leaves a cross-node account out, are refused.
+// node are refused without one.
 func TestFleet_ConfigValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -1281,19 +1284,10 @@ func TestFleet_ConfigValidation(t *testing.T) {
 			wantErr: "needs a local node",
 		},
 		{
-			name: "cross-node account must be allowed",
+			name: "cross-node entry must be canonical",
 			cfg: Config{
 				Validator:                &stubValidator{},
-				AllowedServiceAccounts:   []string{fleetPublisherSA},
-				CrossNodeServiceAccounts: []string{crossSA},
-			},
-			wantErr: "not among the allowed service accounts",
-		},
-		{
-			name: "allowed entry must be canonical",
-			cfg: Config{
-				Validator:              &stubValidator{},
-				AllowedServiceAccounts: []string{"gpu-health-monitor"},
+				CrossNodeServiceAccounts: []string{"gpu-health-monitor"},
 			},
 			wantErr: "not a canonical Kubernetes username",
 		},
@@ -1312,7 +1306,7 @@ func TestFleet_ConfigValidation(t *testing.T) {
 		})
 	}
 
-	t.Run("no local node and no allowlist is a valid configuration", func(t *testing.T) {
+	t.Run("no local node is a valid configuration", func(t *testing.T) {
 		_, err := NewNodeBindingInterceptor(Config{Validator: &stubValidator{}})
 		require.NoError(t, err)
 	})
@@ -1329,7 +1323,7 @@ func TestFleet_ExistingRequestsKeepTheirCodes(t *testing.T) {
 	}{
 		{"no token", context.Background(), events(fleetNodeA), codes.Unauthenticated},
 		{"unknown token", ctxWithAuth("Bearer tok-nobody"), events(fleetNodeA), codes.Unauthenticated},
-		{"unlisted identity", ctxWithAuth("Bearer tok-unlisted"), events(fleetNodeA), codes.PermissionDenied},
+		{"another identity, own node", ctxWithAuth("Bearer tok-unlisted"), events(fleetNodeA), codes.OK},
 		{"other node", ctxWithAuth("Bearer tok-a"), events(fleetNodeB), codes.PermissionDenied},
 		{"cross-node blank name", ctxWithAuth("Bearer tok-cross"), events(""), codes.InvalidArgument},
 		{"own node", ctxWithAuth("Bearer tok-a"), events(fleetNodeA), codes.OK},

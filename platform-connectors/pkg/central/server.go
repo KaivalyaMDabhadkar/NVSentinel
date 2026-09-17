@@ -107,6 +107,19 @@ type readiness struct {
 	shuttingDown  atomic.Bool
 }
 
+// newReadiness is the state a replica starts in: with a store connector the
+// index is unverified until verifyIndexLoop confirms it, so no batch is
+// acknowledged before the datastore can suppress its duplicates; without one
+// there is no index to check and the replica is ready at start.
+func newReadiness(storeEnabled bool) *readiness {
+	r := &readiness{}
+	if !storeEnabled {
+		r.indexVerified.Store(true)
+	}
+
+	return r
+}
+
 // writesAllowed reports whether a batch may be written: the index is verified.
 func (r *readiness) writesAllowed() bool {
 	return r.indexVerified.Load()
@@ -261,12 +274,14 @@ type components struct {
 // the caller retries, and the replica is ready at start since there is no
 // index to verify.
 func initComponents(ctx context.Context, cfg *config, raw map[string]any) (*components, error) {
-	c := &components{cfg: cfg, ready: &readiness{}}
+	storeEnabled := configfile.Bool(raw, "enableMongoDBStorePlatformConnector") ||
+		configfile.Bool(raw, "enablePostgresDBStorePlatformConnector")
+
+	c := &components{cfg: cfg, ready: newReadiness(storeEnabled)}
 
 	var set connectors.Set
 
-	if configfile.Bool(raw, "enableMongoDBStorePlatformConnector") ||
-		configfile.Bool(raw, "enablePostgresDBStorePlatformConnector") {
+	if storeEnabled {
 		storeConnector, err := store.InitializeDatabaseStoreConnector(ctx, nil, cfg.certMountPath, 0)
 		if err != nil {
 			return nil, fmt.Errorf("failed to initialize store connector: %w", err)
@@ -275,8 +290,6 @@ func initComponents(ctx context.Context, cfg *config, raw map[string]any) (*comp
 		c.store = storeConnector
 		set = append(set, storeConnector)
 	} else {
-		c.ready.indexVerified.Store(true)
-
 		slog.WarnContext(ctx, "No store connector enabled: batches are not stored, every enabled connector's "+
 			"result decides the reply, resent batches are not deduplicated and the replica is ready at start")
 	}

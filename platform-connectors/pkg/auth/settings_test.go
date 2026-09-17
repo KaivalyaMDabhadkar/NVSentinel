@@ -46,14 +46,12 @@ func TestSettingsFromConfig(t *testing.T) {
 
 	full, err := SettingsFromConfig(configFromJSON(t, `{"enableNodeBindingAuth":"true","AuthAudience":"aud",`+
 		`"AuthCrossNodeServiceAccounts":["system:serviceaccount:nvsentinel:health-events-analyzer"],`+
-		`"AuthAllowedServiceAccounts":["system:serviceaccount:nvsentinel:gpu-health-monitor"],`+
 		`"AuthMode":"audit","AuthFailOpenOnUnavailable":"true"}`))
 	require.NoError(t, err)
 	assert.Equal(t, Settings{
 		Enabled:                  true,
 		Audience:                 "aud",
 		CrossNodeServiceAccounts: []string{"system:serviceaccount:nvsentinel:health-events-analyzer"},
-		AllowedServiceAccounts:   []string{"system:serviceaccount:nvsentinel:gpu-health-monitor"},
 		Mode:                     ModeAudit,
 		FailOpenOnUnavailable:    true,
 	}, full)
@@ -61,13 +59,11 @@ func TestSettingsFromConfig(t *testing.T) {
 	minimal, err := SettingsFromConfig(configFromJSON(t, `{"enableNodeBindingAuth":true,"AuthAudience":"aud","AuthCrossNodeServiceAccounts":[]}`))
 	require.NoError(t, err)
 	assert.Equal(t, ModeEnforce, minimal.Mode, "absent mode enforces")
-	assert.Nil(t, minimal.AllowedServiceAccounts, "an absent allowlist is none, for the socket")
 	assert.Empty(t, minimal.CrossNodeServiceAccounts)
 
 	for name, raw := range map[string]string{
 		"AuthAudience":                 `{"enableNodeBindingAuth":"true","AuthCrossNodeServiceAccounts":[]}`,
 		"AuthCrossNodeServiceAccounts": `{"enableNodeBindingAuth":"true","AuthAudience":"aud"}`,
-		"AuthAllowedServiceAccounts":   `{"enableNodeBindingAuth":"true","AuthAudience":"aud","AuthCrossNodeServiceAccounts":[],"AuthAllowedServiceAccounts":null}`,
 		"AuthMode":                     `{"enableNodeBindingAuth":"true","AuthAudience":"aud","AuthCrossNodeServiceAccounts":[],"AuthMode":"warn"}`,
 		"enableNodeBindingAuth":        `{"AuthAudience":"aud","AuthCrossNodeServiceAccounts":[]}`,
 	} {

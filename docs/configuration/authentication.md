@@ -185,7 +185,6 @@ cluster already uses.
 | `token_missing` | Deployment platform connector only: the caller presented no token. There is no local node to pin a tokenless caller to. |
 | `unbound_token` | Deployment platform connector only: the token is bound to no pod. |
 | `node_claim_absent` | Deployment platform connector only: the token is bound to a pod that never scheduled, so there is no node to pin its events to. |
-| `identity_not_allowed` | Deployment platform connector only: the identity is not in `AuthAllowedServiceAccounts`. |
 | `missing_node_name` | An event carried no node name and none could be stamped. |
 | `token_invalid` | TokenReview rejected the token. |
 | `malformed_credentials` | The authorization header was duplicated, or did not use the Bearer scheme. A *completely absent* header is not a violation — that caller is accepted and pinned to the connector's node. |
@@ -211,25 +210,13 @@ old chart does not write it.
 The deployment platform connector reads the same node-binding settings as the
 DaemonSet, from the same `config.json`: `enableNodeBindingAuth`, `AuthAudience`
 and `AuthCrossNodeServiceAccounts` mean exactly what they mean above, and node
-binding must be enabled for it (the chart refuses to render it otherwise). Two
-things differ because it has no local node:
-
-- **Every caller must present a token**, bound to a running pod on a scheduled
-  node. The node named in that token is the node the caller may report on;
-  the cross-node list is the only way to name other nodes. `AuthMode: audit`
-  and `AuthFailOpenOnUnavailable` are socket settings: with no node to fall
-  back on, the deployment platform connector always enforces, and logs a
-  warning when either is set.
-- **Only listed identities may publish at all.** `AuthAllowedServiceAccounts`
-  names them; any other authenticated identity is rejected as
-  `identity_not_allowed`. The chart writes every bundled publisher's
-  ServiceAccount, derived from the release namespace, whether or not that
-  monitor is enabled, so enabling a monitor never changes the ConfigMap or
-  rolls the replicas; an unused entry names an account that does not exist
-  and admits nobody. The cross-node identities, including the
-  `platformConnector.deployment.auth.crossNodePublishers` override, are folded
-  in. The DaemonSet ignores this key: reaching its socket already means
-  running on the node.
+binding must be enabled for it (the chart refuses to render it otherwise). One
+thing differs because it has no local node: **every caller must present a
+token**, bound to a running pod on a scheduled node. The node named in that
+token is the node the caller may report on; the cross-node list is the only
+way to name other nodes. `AuthMode: audit` and `AuthFailOpenOnUnavailable` are
+socket settings: with no node to fall back on, the deployment platform
+connector always enforces, and logs a warning when either is set.
 
 A monitor that publishes to the deployment platform connector
 (`publishTo: deployment`) mounts a second projected token at

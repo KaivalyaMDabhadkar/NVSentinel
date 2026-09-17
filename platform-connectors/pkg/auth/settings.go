@@ -28,11 +28,6 @@ type Settings struct {
 	// CrossNodeServiceAccounts is AuthCrossNodeServiceAccounts: the
 	// identities that may name nodes other than their own.
 	CrossNodeServiceAccounts []string
-	// AllowedServiceAccounts is AuthAllowedServiceAccounts: the identities
-	// that may publish at all. The deployment platform connector requires
-	// it; the node-local role does not apply it, since reaching its socket
-	// already means running on the node.
-	AllowedServiceAccounts []string
 	// Mode is AuthMode, ModeEnforce when absent.
 	Mode Mode
 	// FailOpenOnUnavailable is AuthFailOpenOnUnavailable, false when absent.
@@ -79,12 +74,6 @@ func SettingsFromConfig(raw map[string]any) (Settings, error) {
 
 	if settings.FailOpenOnUnavailable, err = boolFromConfig(raw, "AuthFailOpenOnUnavailable", false); err != nil {
 		return Settings{}, fmt.Errorf("parse AuthFailOpenOnUnavailable: %w", err)
-	}
-
-	if _, present := raw["AuthAllowedServiceAccounts"]; present {
-		if settings.AllowedServiceAccounts, err = stringSliceFromConfig(raw, "AuthAllowedServiceAccounts"); err != nil {
-			return Settings{}, err
-		}
 	}
 
 	return settings, nil

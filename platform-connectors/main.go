@@ -266,9 +266,6 @@ func initializeAuthInterceptor(
 		return nil, err
 	}
 
-	// AuthAllowedServiceAccounts is not applied here: reaching the socket
-	// already means running on the node, so every authenticated identity may
-	// publish, as before. The deployment platform connector applies it.
 	interceptor, err := auth.NewNodeBindingInterceptor(auth.Config{
 		NodeName:                 nodeName,
 		Validator:                validator,
