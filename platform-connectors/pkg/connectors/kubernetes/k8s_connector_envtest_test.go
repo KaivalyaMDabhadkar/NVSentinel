@@ -780,6 +780,71 @@ func TestK8sConnector_WithEnvtest_SpecialCharactersInMessage(t *testing.T) {
 	assert.True(t, conditionFound, "node condition with special characters was not created")
 }
 
+// TestK8sConnector_WithEnvtest_SharedEntityIsNotTheSameFault: two SXID faults
+// on the same NVSwitch (same error code, same switch PCI address) that hit
+// different GPUs and links are different faults, so both stay in the
+// condition; a repeat of either with other diagnostic text still changes
+// nothing.
+func TestK8sConnector_WithEnvtest_SharedEntityIsNotTheSameFault(t *testing.T) {
+	ctx := context.Background()
+	testEnv, cli := setupEnvtest(t)
+	defer testEnv.Stop()
+
+	_, err := cli.CoreV1().Nodes().Create(ctx, &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "sxid-node"}}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	connector := NewK8sConnector(cli, nil, stopCh, ctx, defaultConnectorConfig)
+
+	sxid := func(gpu, link int, text string) []*protos.HealthEvent {
+		return []*protos.HealthEvent{{
+			CheckName: "SysLogsSXIDError",
+			IsHealthy: false,
+			Message:   text,
+			EntitiesImpacted: []*protos.Entity{
+				{EntityType: "NVSWITCH", EntityValue: "0"},
+				{EntityType: "PCI", EntityValue: "0000:c4:00.0"},
+				{EntityType: "NVLINK", EntityValue: fmt.Sprintf("%d", link)},
+				{EntityType: "GPU", EntityValue: fmt.Sprintf("%d", gpu)},
+			},
+			ErrorCode:          []string{"12028"},
+			IsFatal:            true,
+			GeneratedTimestamp: timestamppb.New(time.Now()),
+			RecommendedAction:  protos.RecommendedAction_CONTACT_SUPPORT,
+			NodeName:           "sxid-node",
+		}}
+	}
+	message := func() string {
+		t.Helper()
+
+		node, err := cli.CoreV1().Nodes().Get(ctx, "sxid-node", metav1.GetOptions{})
+		require.NoError(t, err)
+
+		for _, c := range node.Status.Conditions {
+			if c.Type == "SysLogsSXIDError" {
+				return c.Message
+			}
+		}
+
+		return ""
+	}
+
+	_, err = connector.updateNodeConditions(ctx, sxid(0, 1, "SXid (PCI:0000:c4:00.0): 12028, link 1, GPU 0"))
+	require.NoError(t, err)
+	_, err = connector.updateNodeConditions(ctx, sxid(3, 5, "SXid (PCI:0000:c4:00.0): 12028, link 5, GPU 3"))
+	require.NoError(t, err)
+
+	msg := message()
+	require.Contains(t, msg, "NVLINK:1 GPU:0")
+	require.Contains(t, msg, "NVLINK:5 GPU:3", "a fault on another GPU and link is its own entry, even on the same switch")
+
+	written, err := connector.updateNodeConditions(ctx, sxid(3, 5, "SXid (PCI:0000:c4:00.0): 12028, link 5, GPU 3, again"))
+	require.NoError(t, err)
+	require.False(t, written, "a repeat with other diagnostic text is still the same fault")
+	require.Equal(t, msg, message())
+}
+
 // TestK8sConnector_WithEnvtest_CompactionAndDeduplication verifies the full real-world flow:
 // health events are appended one by one to the same node condition. A repeat of a fault
 // the node already shows (same entity + same Recommended Action, different diagnostic

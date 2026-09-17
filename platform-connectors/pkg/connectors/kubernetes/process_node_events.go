@@ -365,7 +365,7 @@ func (r *K8sConnector) addMessageIfNotExist(messages []string, healthEvent *prot
 			return messages
 		}
 
-		// An entry naming the same fault (error codes, entity, action) is
+		// An entry naming the same fault (error codes, entities, action) is
 		// that fault, whatever its text. Compaction at the length cap rewrites
 		// the text, so without this a saturated message would gain the fault
 		// again, move it, and count as a change on every repeat.
@@ -377,26 +377,25 @@ func (r *K8sConnector) addMessageIfNotExist(messages []string, healthEvent *prot
 	return append(messages, newMessage[:len(newMessage)-1])
 }
 
-// extractMessageIdentity parses ErrorCodes, entity tokens (GPU, PCI, GPU_UUID),
-// and Recommended Action from a node condition message. Works on both full and
-// compacted messages.
+// extractMessageIdentity parses a node condition message into what
+// identifies its fault: the ErrorCode tokens, every entity token (GPU, PCI,
+// GPU_UUID, NVSWITCH, NVLINK, ...) and the Recommended Action. Compaction
+// keeps that identity prefix whole and shortens only the diagnostic text, so
+// this works on full and compacted messages alike.
 func extractMessageIdentity(msg string) (errorCodes []string, entities []string, recommendedAction string) {
-	raIdx := strings.LastIndex(msg, recommendedActionMarker)
-	if raIdx >= 0 {
-		recommendedAction = strings.TrimRight(msg[raIdx:], " ")
-	}
-
 	prefix := msg
-	if raIdx >= 0 {
+
+	if raIdx := strings.LastIndex(msg, recommendedActionMarker); raIdx >= 0 {
+		recommendedAction = strings.TrimRight(msg[raIdx:], " ")
 		prefix = msg[:raIdx]
 	}
 
-	for token := range strings.FieldsSeq(prefix) {
-		switch {
-		case strings.HasPrefix(token, "ErrorCode:"):
+	identityPrefix, _ := splitIdentityAndDiagnostic(strings.TrimRight(prefix, " "))
+
+	for token := range strings.FieldsSeq(identityPrefix) {
+		if strings.HasPrefix(token, "ErrorCode:") {
 			errorCodes = append(errorCodes, token)
-		case strings.HasPrefix(token, "GPU:") ||
-			strings.HasPrefix(token, "PCI:"):
+		} else {
 			entities = append(entities, token)
 		}
 	}
@@ -404,22 +403,46 @@ func extractMessageIdentity(msg string) (errorCodes []string, entities []string,
 	return errorCodes, entities, recommendedAction
 }
 
-// messagesMatchByIdentity returns true if two messages represent the same fault:
-// same ErrorCodes, same Recommended Action, and at least one shared entity
-// (GPU, PCI, or GPU_UUID). Entity any-match handles the case where GPU_UUID is
-// truncated by compaction but GPU or PCI identifiers still match.
+// messagesMatchByIdentity reports whether two messages name the same fault:
+// the same ErrorCodes, the same Recommended Action and the same entities, all
+// of them. Two faults that share an entity but differ in another, two SXID
+// faults on one NVSwitch that hit different GPUs and links for example, are
+// different faults and both stay in the condition.
 func messagesMatchByIdentity(a, b string) bool {
 	aErr, aEnt, aRA := extractMessageIdentity(a)
 	bErr, bEnt, bRA := extractMessageIdentity(b)
 
-	if aRA != bRA || !slices.Equal(aErr, bErr) {
+	if aRA != bRA || !slices.Equal(aErr, bErr) || len(aEnt) != len(bEnt) {
 		return false
 	}
 
-	for _, ae := range aEnt {
-		if slices.Contains(bEnt, ae) {
-			return true
+	slices.Sort(aEnt)
+	slices.Sort(bEnt)
+
+	for i := range aEnt {
+		if !sameEntity(aEnt[i], bEnt[i]) {
+			return false
 		}
+	}
+
+	return true
+}
+
+// sameEntity reports whether two entity tokens name the same entity. The
+// last entry of a message that still does not fit after compaction is cut at
+// the byte level, so a token ending in the truncation suffix matches the
+// token it is a prefix of.
+func sameEntity(a, b string) bool {
+	if a == b {
+		return true
+	}
+
+	if cut, ok := strings.CutSuffix(a, truncationSuffix); ok {
+		return strings.HasPrefix(b, cut)
+	}
+
+	if cut, ok := strings.CutSuffix(b, truncationSuffix); ok {
+		return strings.HasPrefix(a, cut)
 	}
 
 	return false

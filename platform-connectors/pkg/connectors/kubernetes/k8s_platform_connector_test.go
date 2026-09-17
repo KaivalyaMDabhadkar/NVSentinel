@@ -2247,6 +2247,24 @@ func TestMessagesMatchByIdentity(t *testing.T) {
 			b:     "ErrorCode:119 PCI:0003:00:00 Recommended Action=COMPONENT_RESET",
 			match: false,
 		},
+		{
+			name:  "Same switch PCI, different GPU and link - different faults",
+			a:     "ErrorCode:12028 NVSWITCH:0 PCI:0000:c4:00.0 NVLINK:1 GPU:0 SXid link 1 Recommended Action=CONTACT_SUPPORT",
+			b:     "ErrorCode:12028 NVSWITCH:0 PCI:0000:c4:00.0 NVLINK:5 GPU:3 SXid link 5 Recommended Action=CONTACT_SUPPORT",
+			match: false,
+		},
+		{
+			name:  "One message names an extra entity - no match",
+			a:     "ErrorCode:119 GPU:3 PCI:0000:c4:00.0 Recommended Action=RESTART_VM",
+			b:     "ErrorCode:119 GPU:3 PCI:0000:c4:00.0 GPU_UUID:GPU-8614c5d9 Recommended Action=RESTART_VM",
+			match: false,
+		},
+		{
+			name:  "Same entities in another order - match",
+			a:     "ErrorCode:119 GPU:3 PCI:0000:c4:00.0 text Recommended Action=RESTART_VM",
+			b:     "ErrorCode:119 PCI:0000:c4:00.0 GPU:3 other text Recommended Action=RESTART_VM",
+			match: true,
+		},
 	}
 
 	for _, tc := range tests {
