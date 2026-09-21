@@ -75,8 +75,10 @@ func TestWaitForIndex_ReadyOnceTheIndexVerifies(t *testing.T) {
 	gate := &indexGate{}
 	done := make(chan struct{})
 
+	var waitErr error
+
 	go func() {
-		waitForIndex(ctx, verifier, gate, time.Millisecond, 10*time.Second)
+		waitErr = waitForIndex(ctx, verifier, gate, time.Millisecond, 10*time.Second, time.Minute)
 		close(done)
 	}()
 
@@ -99,6 +101,7 @@ func TestWaitForIndex_ReadyOnceTheIndexVerifies(t *testing.T) {
 		t.Fatal("the wait did not end after the index verified")
 	}
 
+	require.NoError(t, waitErr)
 	require.NoError(t, gate.Ready(), "a verified index makes the replica ready")
 	require.EqualValues(t, 3, verifier.calls.Load(), "no check after the first verification")
 }
@@ -113,7 +116,7 @@ func TestWaitForIndex_StalledCheckDoesNotStopTheWait(t *testing.T) {
 	verifier := &scriptedVerifier{results: make(chan error)}
 	gate := &indexGate{}
 
-	go waitForIndex(ctx, verifier, gate, time.Millisecond, 20*time.Millisecond)
+	go func() { _ = waitForIndex(ctx, verifier, gate, time.Millisecond, 20*time.Millisecond, time.Minute) }()
 
 	verifier.awaitCall(t, 3)
 	require.Error(t, gate.Ready(), "still unready while the checks time out")
@@ -127,8 +130,10 @@ func TestWaitForIndex_EndsWithTheContext(t *testing.T) {
 	gate := &indexGate{}
 	done := make(chan struct{})
 
+	var waitErr error
+
 	go func() {
-		waitForIndex(ctx, verifier, gate, time.Millisecond, 10*time.Second)
+		waitErr = waitForIndex(ctx, verifier, gate, time.Millisecond, 10*time.Second, time.Minute)
 		close(done)
 	}()
 
@@ -141,7 +146,26 @@ func TestWaitForIndex_EndsWithTheContext(t *testing.T) {
 		t.Fatal("the wait did not end with the context")
 	}
 
+	require.NoError(t, waitErr, "shutdown is not a failure")
 	require.Error(t, gate.Ready())
+}
+
+// TestWaitForIndex_GivesUpAfterTheBudget: a replica that waits out the whole
+// budget without a verified index returns the last check's error, so the
+// process exits and the failure is visible as a crash loop.
+func TestWaitForIndex_GivesUpAfterTheBudget(t *testing.T) {
+	verifier := &scriptedVerifier{results: make(chan error, 100)}
+	for range 100 {
+		verifier.results <- datastore.ErrIndexMissing
+	}
+
+	gate := &indexGate{}
+
+	err := waitForIndex(context.Background(), verifier, gate, time.Millisecond, time.Second, 10*time.Millisecond)
+
+	require.ErrorContains(t, err, "not verified within 10ms")
+	require.ErrorIs(t, err, datastore.ErrIndexMissing)
+	require.Error(t, gate.Ready(), "still unready")
 }
 
 // recordingConnector keeps the last batch it was handed.

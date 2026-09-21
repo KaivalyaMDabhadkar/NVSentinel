@@ -228,7 +228,7 @@ sum by (node) (rate(health_events_total{recommended_action!="NONE"}[1h]))
 
 ### Platform Connector Request Metrics
 
-Both roles of the platform connector, the node-local DaemonSet and the deployment platform connector, expose these for the batches that reach the request handler. Alert on `failed` outcomes and on best-effort failures. The deployment platform connector (`PC_MODE=deployment`) also exposes the metrics above for its Kubernetes connector and for the node-binding interceptor (its rejections are counted in `platform_connector_auth_violations_total`, by the reasons listed there), and the refusals below, which it answers before the handler sees the batch.
+Both roles of the platform connector, the node-local DaemonSet and the deployment platform connector, expose these for the batches that reach the request handler. Alert on `failed` outcomes and on best-effort failures. The deployment platform connector (`--mode=deployment`) also exposes the metrics above for its Kubernetes connector and for the node-binding interceptor (its rejections are counted in `platform_connector_auth_violations_total`, by the reasons listed there), and the refusals below, which it answers before the handler sees the batch.
 
 | Metric Name | Type | Labels | Description |
 |------------|------|--------|-------------|

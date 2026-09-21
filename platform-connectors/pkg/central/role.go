@@ -13,7 +13,7 @@
 // limitations under the License.
 
 // Package central is the deployment platform connector: the platform
-// connector binary (PC_MODE=deployment) serving the same PlatformConnector
+// connector binary (-mode=deployment) serving the same PlatformConnector
 // gRPC service as the node-local DaemonSet, but over TCP with TLS to the whole
 // fleet, with a small fixed pool of datastore connections.
 //
@@ -61,9 +61,12 @@ const (
 	// indexVerifyInterval is how often an unready replica checks the
 	// idempotency index while waiting for the datastore setup to create it;
 	// indexVerifyTimeout bounds one check, so a datastore call that never
-	// returns cannot stall the wait.
+	// returns cannot stall the wait; indexVerifyBudget is how long a replica
+	// waits in all before it exits, so an index that never appears shows up
+	// as a crash loop instead of a pod that is quietly not ready.
 	indexVerifyInterval = 5 * time.Second
 	indexVerifyTimeout  = 30 * time.Second
+	indexVerifyBudget   = 5 * time.Minute
 	// stopTimeout bounds the wait for requests in flight at shutdown, so one
 	// unresponsive client cannot block it. The chart's termination grace
 	// period is sized from it (this wait, then the datastore disconnect and
@@ -140,9 +143,7 @@ func (r *role) Server(
 		store := conns.Store
 
 		spec.Background = append(spec.Background, func(ctx context.Context) error {
-			waitForIndex(ctx, store, gate, indexVerifyInterval, indexVerifyTimeout)
-
-			return nil
+			return waitForIndex(ctx, store, gate, indexVerifyInterval, indexVerifyTimeout, indexVerifyBudget)
 		})
 	}
 
@@ -223,26 +224,41 @@ type indexVerifier interface {
 // waitForIndex opens the gate once the idempotency index matches its expected
 // definition, checking every `every` until it does: this is what orders the
 // datastore setup before any client traffic. Each check has its own deadline.
-// The wait ends with ctx. The index is not re-checked afterwards: it can only
-// go missing through an operator action on the datastore, and the restore
-// procedure re-runs the setup and restarts the replicas, which verify it
-// again at start.
-func waitForIndex(ctx context.Context, verifier indexVerifier, gate *indexGate, every, attemptTimeout time.Duration) {
+// The wait ends with ctx, or with an error once budget has passed without a
+// verified index: the process then exits and Kubernetes restarts it, so a
+// missing index is visible as a crash loop and the wait resumes with each
+// restart. The index is not re-checked afterwards: it can only go missing
+// through an operator action on the datastore, and the restore procedure
+// re-runs the setup and restarts the replicas, which verify it again at
+// start.
+func waitForIndex(
+	ctx context.Context, verifier indexVerifier, gate *indexGate, every, attemptTimeout, budget time.Duration,
+) error {
+	deadline := time.Now().Add(budget)
+
 	for {
 		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 		err := verifier.VerifyIdempotencyIndex(attemptCtx)
 
 		cancel()
 
-		if ctx.Err() != nil {
-			return
+		select {
+		case <-ctx.Done():
+			// Shutdown ended the wait; not a failure.
+			return nil
+		default:
 		}
 
 		if err == nil {
 			gate.verified.Store(true)
 			slog.InfoContext(ctx, "Idempotency index verified, replica is ready")
 
-			return
+			return nil
+		}
+
+		if time.Now().After(deadline) {
+			return fmt.Errorf("idempotency index not verified within %s, exiting so the failure is visible "+
+				"(the datastore setup creates the index; see the last check's error): %w", budget, err)
 		}
 
 		if errors.Is(err, datastore.ErrIndexMissing) || errors.Is(err, datastore.ErrIndexMismatch) {
@@ -254,7 +270,7 @@ func waitForIndex(ctx context.Context, verifier indexVerifier, gate *indexGate, 
 
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-time.After(every):
 		}
 	}

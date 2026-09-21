@@ -48,13 +48,16 @@ var (
 // file is, and the datastore certificate flags shared with the other
 // components. Everything tunable lives in the config file.
 type flagValues struct {
+	// mode selects the role: "node-local" (the DaemonSet, serving a Unix
+	// socket) or "deployment" (the central Deployment, serving TCP with TLS).
+	mode           string
 	socket         string
 	configPath     string
 	metricsPort    int
 	kubeconfigPath string
 	// The datastore client certificate directory, from the shared flags.
 	certMountPath string
-	// The deployment role's listener (PC_MODE=deployment).
+	// The deployment role's listener (-mode=deployment).
 	listenAddr                 string
 	tlsCertDir                 string
 	tlsInsecureDevelopmentMode bool
@@ -63,6 +66,8 @@ type flagValues struct {
 func parseFlags() flagValues {
 	var f flagValues
 
+	flag.StringVar(&f.mode, "mode", modeNodeLocal,
+		"role of this process: node-local (the DaemonSet, a Unix socket) or deployment (the central Deployment)")
 	flag.StringVar(&f.socket, "socket", "", "unix socket path the node-local role serves on")
 	flag.StringVar(&f.configPath, "config", "/etc/config/config.json", "path to the config file")
 	flag.IntVar(&f.metricsPort, "metrics-port", 2112, "port to expose Prometheus metrics and the probes on")
@@ -82,20 +87,24 @@ func parseFlags() flagValues {
 	return f
 }
 
-// newRole builds the role PC_MODE selects: "deployment" is the deployment
-// platform connector, unset the node-local DaemonSet connector.
-func newRole(mode string, f flagValues) (bootstrap.Role, error) {
-	switch mode {
-	case "deployment":
+const (
+	modeNodeLocal  = "node-local"
+	modeDeployment = "deployment"
+)
+
+// newRole builds the role -mode selects.
+func newRole(f flagValues) (bootstrap.Role, error) {
+	switch f.mode {
+	case modeDeployment:
 		return central.New(central.Options{
 			ListenAddr:              f.listenAddr,
 			TLSCertDir:              f.tlsCertDir,
 			InsecureDevelopmentMode: f.tlsInsecureDevelopmentMode,
 		})
-	case "":
+	case modeNodeLocal:
 		return nodelocal.New(nodelocal.Options{Socket: f.socket})
 	default:
-		return nil, fmt.Errorf("unknown PC_MODE %q: use \"deployment\" or leave it unset for the node-local role", mode)
+		return nil, fmt.Errorf("unknown -mode %q: use %q or %q", f.mode, modeNodeLocal, modeDeployment)
 	}
 }
 
@@ -104,10 +113,9 @@ func newRole(mode string, f flagValues) (bootstrap.Role, error) {
 // name it has always had.
 func main() {
 	f := parseFlags()
-	mode := os.Getenv("PC_MODE")
 
 	appName, tracingName := "platform-connectors", "platform-connector"
-	if mode == "deployment" {
+	if f.mode == modeDeployment {
 		appName, tracingName = central.AppName, central.AppName
 	}
 
@@ -121,7 +129,7 @@ func main() {
 
 	ctx := context.Background()
 
-	role, err := newRole(mode, f)
+	role, err := newRole(f)
 	if err != nil {
 		slog.ErrorContext(ctx, "Invalid configuration", "error", err)
 		os.Exit(1)

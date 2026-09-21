@@ -43,6 +43,7 @@ func TestParseFlags_Defaults(t *testing.T) {
 	setTestArgs(t, "platform-connectors", "--socket=/tmp/nvsentinel.sock")
 
 	f := parseFlags()
+	require.Equal(t, "node-local", f.mode, "the DaemonSet role without a flag, as before the deployment role existed")
 	require.Equal(t, "/tmp/nvsentinel.sock", f.socket)
 	require.Equal(t, "/etc/config/config.json", f.configPath)
 	require.Equal(t, 2112, f.metricsPort)
@@ -57,6 +58,7 @@ func TestParseFlags_Overrides(t *testing.T) {
 	setTestArgs(
 		t,
 		"platform-connectors",
+		"--mode=deployment",
 		"--config=/tmp/config.json",
 		"--metrics-port=3112",
 		"--kubeconfig=/var/lib/kubelet/kubeconfig",
@@ -66,6 +68,7 @@ func TestParseFlags_Overrides(t *testing.T) {
 	)
 
 	f := parseFlags()
+	require.Equal(t, "deployment", f.mode)
 	require.Empty(t, f.socket)
 	require.Equal(t, "/tmp/config.json", f.configPath)
 	require.Equal(t, 3112, f.metricsPort)
@@ -73,4 +76,9 @@ func TestParseFlags_Overrides(t *testing.T) {
 	require.Equal(t, ":6000", f.listenAddr)
 	require.Equal(t, "/etc/tls", f.tlsCertDir)
 	require.Empty(t, f.certMountPath, "TLS to the datastore explicitly off")
+}
+
+func TestNewRole_RefusesAnUnknownMode(t *testing.T) {
+	_, err := newRole(flagValues{mode: "central"})
+	require.ErrorContains(t, err, `unknown -mode "central"`)
 }
