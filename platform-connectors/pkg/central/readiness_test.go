@@ -34,7 +34,6 @@ import (
 	"github.com/nvidia/nvsentinel/commons/pkg/healthpub"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/auth"
-	"github.com/nvidia/nvsentinel/platform-connectors/pkg/connectors/store"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/pipeline"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/server"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
@@ -65,74 +64,84 @@ func (v *scriptedVerifier) awaitCall(t *testing.T, n int32) {
 	require.Eventually(t, func() bool { return v.calls.Load() >= n }, 5*time.Second, time.Millisecond)
 }
 
-// TestVerifyIndexLoop_ReadinessFollowsDefinitiveAnswers: the replica becomes
-// ready when the index verifies, stays ready through a datastore failure,
-// turns unready (and so refuses writes) when the index is confirmed missing or
-// changed, and becomes ready again once it verifies.
-func TestVerifyIndexLoop_ReadinessFollowsDefinitiveAnswers(t *testing.T) {
+// TestWaitForIndex_ReadyOnceTheIndexVerifies: a datastore failure and a
+// missing index keep the replica unready; the first verification makes it
+// ready and ends the wait, so nothing re-checks the index afterwards.
+func TestWaitForIndex_ReadyOnceTheIndexVerifies(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	verifier := &scriptedVerifier{results: make(chan error)}
-	ready := &readiness{}
+	gate := &indexGate{}
+	done := make(chan struct{})
 
-	go verifyIndexLoop(ctx, verifier, ready, time.Millisecond, time.Millisecond, 10*time.Second)
+	go func() {
+		waitForIndex(ctx, verifier, gate, time.Millisecond, 10*time.Second)
+		close(done)
+	}()
 
 	verifier.awaitCall(t, 1)
-	require.Error(t, ready.Ready(ctx), "unready until the first verification")
+	require.Error(t, gate.Ready(), "unready until the first verification")
 
 	verifier.results <- errors.New("connection refused")
 	verifier.awaitCall(t, 2)
-	require.Error(t, ready.Ready(ctx), "a datastore failure before the first verification keeps the replica unready")
-
-	verifier.results <- nil
-	verifier.awaitCall(t, 3)
-	require.NoError(t, ready.Ready(ctx), "a verified index makes the replica ready")
-
-	verifier.results <- errors.New("connection refused")
-	verifier.awaitCall(t, 4)
-	require.NoError(t, ready.Ready(ctx), "a datastore failure leaves a ready replica ready")
+	require.Error(t, gate.Ready(), "a datastore failure keeps the replica unready")
 
 	verifier.results <- datastore.ErrIndexMissing
-	verifier.awaitCall(t, 5)
-	require.Error(t, ready.Ready(ctx), "a confirmed missing index turns the replica unready")
-
-	verifier.results <- datastore.ErrIndexMismatch
-	verifier.awaitCall(t, 6)
-	require.Error(t, ready.Ready(ctx))
+	verifier.awaitCall(t, 3)
+	require.Error(t, gate.Ready(), "a missing index keeps the replica unready")
 
 	verifier.results <- nil
-	verifier.awaitCall(t, 7)
-	require.NoError(t, ready.Ready(ctx), "the recreated index makes the replica ready again")
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait did not end after the index verified")
+	}
+
+	require.NoError(t, gate.Ready(), "a verified index makes the replica ready")
+	require.EqualValues(t, 3, verifier.calls.Load(), "no check after the first verification")
 }
 
-// TestVerifyIndexLoop_StalledCheckDoesNotStopTheLoop: a check that never
-// returns ends with its own deadline, counts as a datastore failure (readiness
-// unchanged) and the loop goes on to the next check.
-func TestVerifyIndexLoop_StalledCheckDoesNotStopTheLoop(t *testing.T) {
+// TestWaitForIndex_StalledCheckDoesNotStopTheWait: a check that never
+// returns ends with its own deadline and the wait goes on to the next check.
+func TestWaitForIndex_StalledCheckDoesNotStopTheWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// No result is ever sent: every check blocks until its own deadline.
 	verifier := &scriptedVerifier{results: make(chan error)}
-	ready := &readiness{}
-	ready.indexVerified.Store(true)
+	gate := &indexGate{}
 
-	go verifyIndexLoop(ctx, verifier, ready, time.Millisecond, time.Millisecond, 20*time.Millisecond)
+	go waitForIndex(ctx, verifier, gate, time.Millisecond, 20*time.Millisecond)
 
 	verifier.awaitCall(t, 3)
-	require.NoError(t, ready.Ready(ctx), "a check that timed out leaves readiness unchanged")
+	require.Error(t, gate.Ready(), "still unready while the checks time out")
 }
 
-func TestReadiness(t *testing.T) {
-	r := &readiness{}
-	require.Error(t, r.Ready(context.Background()), "not ready before the index is verified")
+// TestWaitForIndex_EndsWithTheContext: shutdown ends the wait without
+// marking the replica ready.
+func TestWaitForIndex_EndsWithTheContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	verifier := &scriptedVerifier{results: make(chan error)}
+	gate := &indexGate{}
+	done := make(chan struct{})
 
-	r.indexVerified.Store(true)
-	require.NoError(t, r.Ready(context.Background()))
+	go func() {
+		waitForIndex(ctx, verifier, gate, time.Millisecond, 10*time.Second)
+		close(done)
+	}()
 
-	r.shuttingDown.Store(true)
-	require.Error(t, r.Ready(context.Background()), "shutting down flips unready even with the index verified")
+	verifier.awaitCall(t, 1)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wait did not end with the context")
+	}
+
+	require.Error(t, gate.Ready())
 }
 
 // recordingConnector keeps the last batch it was handed.
@@ -170,10 +179,10 @@ func TestInterceptorChain_AsWired(t *testing.T) {
 		auth.Settings{Enabled: true, Audience: testAudience}, validator)
 	require.NoError(t, err)
 
-	ready := &readiness{}
+	gate := &indexGate{}
 	recorder := &recordingConnector{}
 
-	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(authInterceptor, idempotencyInterceptor(), readinessInterceptor(ready)))
+	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(authInterceptor, idempotencyInterceptor, readinessInterceptor(gate)))
 	pb.RegisterPlatformConnectorServer(grpcServer, &server.PlatformConnectorServer{Pipeline: pipeline.New(), Connector: recorder})
 
 	lis := bufconn.Listen(1 << 20)
@@ -212,7 +221,7 @@ func TestInterceptorChain_AsWired(t *testing.T) {
 	require.Equal(t, codes.Unavailable, status.Code(send("tok", "batch-1")), "the index is not verified yet")
 	require.Zero(t, recorder.calls.Load(), "nothing reached the connector")
 
-	ready.indexVerified.Store(true)
+	gate.verified.Store(true)
 
 	require.NoError(t, send("tok", "batch-1"))
 	require.EqualValues(t, 1, recorder.calls.Load())
@@ -222,39 +231,4 @@ func TestInterceptorChain_AsWired(t *testing.T) {
 	require.Equal(t, "pod-uid-1#batch-1#0", got.Events[0].Metadata[datastore.HealthEventIdempotencyKeyMetadataField])
 	require.Equal(t, "pod-uid-1#batch-1#1", got.Events[1].Metadata[datastore.HealthEventIdempotencyKeyMetadataField])
 	require.Equal(t, "node-a", got.Events[1].NodeName, "a blank node name is pinned to the token's node")
-}
-
-// failingConnector is a set member whose every batch fails.
-type failingConnector struct{}
-
-func (failingConnector) ProcessBatch(context.Context, *pb.HealthEvents) error {
-	return errors.New("node update failed")
-}
-
-// TestMember_BestEffortOnlyNextToAStore: with a store connector the other
-// members are best effort, so their failure never fails a stored batch;
-// without one a member's failure is the reply, so the caller retries.
-func TestMember_BestEffortOnlyNextToAStore(t *testing.T) {
-	cfg := &config{conditionUpdateTimeout: time.Second}
-	batch := &pb.HealthEvents{}
-
-	withStore := &components{cfg: cfg, store: &store.DatabaseStoreConnector{}}
-	require.NoError(t, withStore.member("kubernetes", failingConnector{}).ProcessBatch(context.Background(), batch))
-
-	withoutStore := &components{cfg: cfg}
-	require.EqualError(t, withoutStore.member("kubernetes", failingConnector{}).ProcessBatch(context.Background(), batch),
-		"node update failed")
-}
-
-// TestNewReadiness_NoStoreIsReadyAtStart: with a store connector a replica is
-// unready and refuses writes until the index loop verifies the index; without
-// one there is no index, so it is ready and accepts writes from the start.
-func TestNewReadiness_NoStoreIsReadyAtStart(t *testing.T) {
-	withStore := newReadiness(true)
-	require.False(t, withStore.writesAllowed())
-	require.ErrorContains(t, withStore.Ready(context.Background()), "not verified")
-
-	withoutStore := newReadiness(false)
-	require.True(t, withoutStore.writesAllowed())
-	require.NoError(t, withoutStore.Ready(context.Background()))
 }

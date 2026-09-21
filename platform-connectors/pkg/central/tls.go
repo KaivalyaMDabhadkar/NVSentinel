@@ -15,7 +15,6 @@
 package central
 
 import (
-	"crypto/tls"
 	"fmt"
 	"path/filepath"
 
@@ -24,7 +23,7 @@ import (
 
 // newCertWatcher builds the hot-reloading certificate source for
 // tls.crt/tls.key under certDir; it is how cert-manager rotation takes effect
-// without a restart (transport security). The pair is loaded eagerly, so a
+// without a restart. The pair is loaded eagerly, so a
 // missing or invalid certificate fails startup rather than the first
 // handshake. Handshakes are served from the cached pair, which survives
 // non-atomic rotations (including delete-then-write): the watcher re-reads on
@@ -37,13 +36,4 @@ func newCertWatcher(certDir string) (*certwatcher.CertWatcher, error) {
 	}
 
 	return cw, nil
-}
-
-// tlsConfigFor builds the listener's TLS configuration around the watcher's
-// reloading callback.
-func tlsConfigFor(cw *certwatcher.CertWatcher) *tls.Config {
-	return &tls.Config{
-		GetCertificate: cw.GetCertificate,
-		MinVersion:     tls.VersionTLS12,
-	}
 }

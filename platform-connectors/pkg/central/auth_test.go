@@ -18,12 +18,12 @@ import (
 	"context"
 	"testing"
 
-	"github.com/golang/protobuf/ptypes/empty"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/types/known/emptypb"
 	authv1 "k8s.io/api/authentication/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
@@ -72,16 +72,11 @@ func authenticatedAs(username string, extra map[string]authv1.ExtraValue) authv1
 }
 
 func podBoundExtras(nodeName string) map[string]authv1.ExtraValue {
-	extra := map[string]authv1.ExtraValue{
-		"authentication.kubernetes.io/pod-name": {"monitor-pod"},
-		"authentication.kubernetes.io/pod-uid":  {"pod-uid-1"},
+	return map[string]authv1.ExtraValue{
+		"authentication.kubernetes.io/pod-name":  {"monitor-pod"},
+		"authentication.kubernetes.io/pod-uid":   {"pod-uid-1"},
+		"authentication.kubernetes.io/node-name": {nodeName},
 	}
-
-	if nodeName != "" {
-		extra["authentication.kubernetes.io/node-name"] = authv1.ExtraValue{nodeName}
-	}
-
-	return extra
 }
 
 func bearerContext(token string) context.Context {
@@ -89,141 +84,34 @@ func bearerContext(token string) context.Context {
 		metadata.Pairs("authorization", "Bearer "+token))
 }
 
-func TestAuthInterceptor(t *testing.T) {
-	settings := auth.Settings{Enabled: true, Audience: testAudience}
-
-	unaryInfo := &grpc.UnaryServerInfo{FullMethod: "/PlatformConnector/HealthEventOccurredV1"}
-
-	// unreachableHandler fails the test if the interceptor lets a rejected
-	// request through.
-	unreachableHandler := func(t *testing.T) grpc.UnaryHandler {
-		t.Helper()
-
-		return func(context.Context, interface{}) (interface{}, error) {
-			t.Fatal("handler must not be reached")
-
-			return nil, nil
-		}
-	}
-
-	// build wires the deployment configuration into the shared interceptor.
-	build := func(t *testing.T, settings auth.Settings, v *grpcauth.Validator) grpc.UnaryServerInterceptor {
-		t.Helper()
-
-		interceptor, err := newAuthInterceptor(context.Background(), settings, v)
-		require.NoError(t, err)
-
-		return interceptor
-	}
-
-	t.Run("missing authorization metadata is Unauthenticated", func(t *testing.T) {
-		interceptor := build(t, settings,
-			validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a"))))
-
-		_, err := interceptor(context.Background(), batchNaming("node-a"), unaryInfo, unreachableHandler(t))
-		require.Error(t, err)
-		require.Equal(t, codes.Unauthenticated, status.Code(err))
-	})
-
-	t.Run("malformed authorization metadata is Unauthenticated", func(t *testing.T) {
-		interceptor := build(t, settings,
-			validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a"))))
-
-		ctx := metadata.NewIncomingContext(context.Background(),
-			metadata.Pairs("authorization", "Basic not-a-bearer-token"))
-
-		_, err := interceptor(ctx, batchNaming("node-a"), unaryInfo, unreachableHandler(t))
-		require.Error(t, err)
-		require.Equal(t, codes.Unauthenticated, status.Code(err))
-	})
-
-	t.Run("a token without a pod binding is PermissionDenied", func(t *testing.T) {
-		interceptor := build(t, settings, validatorReturning(t, authenticatedAs(testPublisher, nil)))
-
-		_, err := interceptor(bearerContext("tok-unbound"), batchNaming("node-a"), unaryInfo, unreachableHandler(t))
-		require.Error(t, err)
-		require.Equal(t, codes.PermissionDenied, status.Code(err))
-		require.Contains(t, status.Convert(err).Message(), "pod-bound")
-	})
-
-	t.Run("a batch naming another node is PermissionDenied", func(t *testing.T) {
-		interceptor := build(t, settings,
-			validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a"))))
-
-		_, err := interceptor(bearerContext("tok-scope"), batchNaming("node-b"), unaryInfo, unreachableHandler(t))
-		require.Error(t, err)
-		require.Equal(t, codes.PermissionDenied, status.Code(err))
-	})
-
-	t.Run("happy path reaches the handler with the caller identity", func(t *testing.T) {
-		interceptor := build(t, settings,
-			validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a"))))
-
-		var got *grpcauth.Identity
-
-		handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-			got = auth.CallerFromContext(ctx)
-
-			return &empty.Empty{}, nil
-		}
-
-		resp, err := interceptor(bearerContext("tok-ok"), batchNaming("node-a", "node-a"), unaryInfo, handler)
-		require.NoError(t, err)
-		require.NotNil(t, resp)
-
-		require.NotNil(t, got, "the handler must see the caller identity in its context")
-		require.Equal(t, testPublisher, got.Username)
-		require.Equal(t, "pod-uid-1", got.PodUID)
-		require.Equal(t, "node-a", got.NodeName)
-	})
-
-	crossSettings := auth.Settings{
+// TestNewAuthInterceptor_ForwardsCrossNodePublishers: the deployment wiring
+// hands the cross-node list to the shared interceptor, so a listed publisher
+// naming other nodes reaches the handler with its identity. The rest of the
+// no-local-node behaviour is pkg/auth's and tested there.
+func TestNewAuthInterceptor_ForwardsCrossNodePublishers(t *testing.T) {
+	interceptor, err := newAuthInterceptor(context.Background(), auth.Settings{
 		Enabled:                  true,
 		Audience:                 testAudience,
 		CrossNodeServiceAccounts: []string{testCrossNode},
+	}, validatorReturning(t, authenticatedAs(testCrossNode, podBoundExtras("system-node"))))
+	require.NoError(t, err)
+
+	var got *grpcauth.Identity
+
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		got = auth.CallerFromContext(ctx)
+
+		return &emptypb.Empty{}, nil
 	}
 
-	t.Run("a cross-node publisher naming other nodes reaches the handler", func(t *testing.T) {
-		interceptor := build(t, crossSettings,
-			validatorReturning(t, authenticatedAs(testCrossNode, podBoundExtras("system-node"))))
-
-		var got *grpcauth.Identity
-
-		handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-			got = auth.CallerFromContext(ctx)
-
-			return &empty.Empty{}, nil
-		}
-
-		_, err := interceptor(bearerContext("tok-cross"), batchNaming("node-a", "node-b"), unaryInfo, handler)
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		require.Equal(t, testCrossNode, got.Username)
-		require.Equal(t, "system-node", got.NodeName)
-	})
-
-	t.Run("a cross-node publisher whose token has no node claim is PermissionDenied", func(t *testing.T) {
-		interceptor := build(t, crossSettings,
-			validatorReturning(t, authenticatedAs(testCrossNode, podBoundExtras(""))))
-
-		_, err := interceptor(bearerContext("tok-cross-unbound"), batchNaming("node-a"), unaryInfo, unreachableHandler(t))
-		require.Error(t, err)
-		require.Equal(t, codes.PermissionDenied, status.Code(err))
-	})
-
-	t.Run("a non-HealthEvents request without a token is Unauthenticated", func(t *testing.T) {
-		interceptor := build(t, settings,
-			validatorReturning(t, authenticatedAs(testPublisher, podBoundExtras("node-a"))))
-
-		_, err := interceptor(context.Background(), &empty.Empty{}, unaryInfo, unreachableHandler(t))
-		require.Error(t, err)
-		require.Equal(t, codes.Unauthenticated, status.Code(err))
-	})
+	_, err = interceptor(bearerContext("tok-cross"), batchNaming("node-a", "node-b"),
+		&grpc.UnaryServerInfo{FullMethod: "/PlatformConnector/HealthEventOccurredV1"}, handler)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, testCrossNode, got.Username)
+	require.Equal(t, "system-node", got.NodeName)
 }
 
-// TestDeploymentAuthSettings: the deployment role reads the same config.json
-// keys as the DaemonSet and refuses to start without node binding, since it
-// has no local node to fall back on.
 func TestDeploymentAuthSettings(t *testing.T) {
 	_, err := deploymentAuthSettings(map[string]any{"enableNodeBindingAuth": "false"})
 	require.ErrorContains(t, err, "enableNodeBindingAuth must be true")
@@ -255,6 +143,6 @@ func TestNewAuthInterceptor_SocketOnlySettingsStillEnforce(t *testing.T) {
 
 	_, err = interceptor(bearerContext("tok-audit"), batchNaming("node-b"),
 		&grpc.UnaryServerInfo{FullMethod: "/PlatformConnector/HealthEventOccurredV1"},
-		func(context.Context, interface{}) (interface{}, error) { return &empty.Empty{}, nil })
+		func(context.Context, interface{}) (interface{}, error) { return &emptypb.Empty{}, nil })
 	require.Equal(t, codes.PermissionDenied, status.Code(err))
 }

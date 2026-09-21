@@ -15,12 +15,12 @@
 package auth
 
 import (
-	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/configfile"
 )
 
 // configFromJSON decodes config the way configfile.Load does (numbers as
@@ -30,13 +30,10 @@ import (
 func configFromJSON(t *testing.T, raw string) map[string]any {
 	t.Helper()
 
-	dec := json.NewDecoder(strings.NewReader(raw))
-	dec.UseNumber()
+	m, err := configfile.Decode([]byte(raw))
+	require.NoError(t, err)
 
-	result := map[string]any{}
-	require.NoError(t, dec.Decode(&result))
-
-	return result
+	return m
 }
 
 func TestSettingsFromConfig(t *testing.T) {
@@ -207,22 +204,21 @@ func TestBoolFromConfig(t *testing.T) {
 	tests := []struct {
 		name    string
 		raw     string
-		def     bool
 		want    bool
 		wantErr bool
 	}{
-		{name: "absent returns default", raw: `{"other":1}`, def: true, want: true},
+		{name: "absent is false", raw: `{"other":1}`, want: false},
 		{name: "quoted true", raw: `{"k":"true"}`, want: true},
 		{name: "unquoted true", raw: `{"k":true}`, want: true},
-		{name: "quoted false", raw: `{"k":"false"}`, def: true, want: false},
-		{name: "unquoted false", raw: `{"k":false}`, def: true, want: false},
+		{name: "quoted false", raw: `{"k":"false"}`, want: false},
+		{name: "unquoted false", raw: `{"k":false}`, want: false},
 		{name: "typo is malformed", raw: `{"k":"yes"}`, wantErr: true},
 		{name: "number is malformed", raw: `{"k":1}`, wantErr: true},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := boolFromConfig(configFromJSON(t, tt.raw), "k", tt.def)
+			got, err := boolFromConfig(configFromJSON(t, tt.raw), "k")
 
 			if tt.wantErr {
 				require.Error(t, err)

@@ -18,9 +18,24 @@ import (
 	"encoding/json"
 	"maps"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/configfile"
 )
+
+// settingsFromJSON decodes config.json text the way configfile.Load does
+// (numbers as json.Number), so these tests see the types a rendered ConfigMap
+// produces.
+func settingsFromJSON(t *testing.T, raw string) map[string]any {
+	t.Helper()
+
+	m, err := configfile.Decode([]byte(raw))
+	require.NoError(t, err)
+
+	return m
+}
 
 func TestSettingsFromConfig(t *testing.T) {
 	raw := map[string]any{
@@ -33,9 +48,12 @@ func TestSettingsFromConfig(t *testing.T) {
 	settings, err := SettingsFromConfig(raw)
 	require.NoError(t, err)
 	require.Equal(t, Settings{
-		K8sConnectorConfig: K8sConnectorConfig{MaxNodeConditionMessageLength: 1024, CompactedHealthEventMsgLen: 256},
-		QPS:                20,
-		Burst:              40,
+		K8sConnectorConfig: K8sConnectorConfig{
+			MaxNodeConditionMessageLength: 1024,
+			CompactedHealthEventMsgLen:    256,
+		},
+		QPS:   20,
+		Burst: 40,
 	}, settings)
 
 	for key := range raw {
@@ -45,4 +63,24 @@ func TestSettingsFromConfig(t *testing.T) {
 		_, err := SettingsFromConfig(partial)
 		require.ErrorContains(t, err, key, "every key is required")
 	}
+}
+
+// TestSettingsFromConfig_ReadsTheRetrySettings: the two optional retry keys
+// reach the connector configuration through the shared reader.
+func TestSettingsFromConfig_ReadsTheRetrySettings(t *testing.T) {
+	settings, err := SettingsFromConfig(settingsFromJSON(t, `{
+		"K8sConnectorQps": 20.00, "K8sConnectorBurst": 40,
+		"MaxNodeConditionMessageLength": 1024, "CompactedHealthEventMsgLen": 256,
+		"K8sConnectorMaxRetries": 7, "K8sConnectorMaxRetryDuration": "45s"
+	}`))
+	require.NoError(t, err)
+	require.Equal(t, 7, settings.MaxRetries)
+	require.Equal(t, 45*time.Second, settings.MaxRetryDuration)
+
+	_, err = SettingsFromConfig(settingsFromJSON(t, `{
+		"K8sConnectorQps": 20.00, "K8sConnectorBurst": 40,
+		"MaxNodeConditionMessageLength": 1024, "CompactedHealthEventMsgLen": 256,
+		"K8sConnectorMaxRetries": 1.5
+	}`))
+	require.ErrorContains(t, err, "K8sConnectorMaxRetries")
 }

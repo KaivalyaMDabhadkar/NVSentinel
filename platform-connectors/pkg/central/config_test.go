@@ -15,10 +15,13 @@
 package central
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/configfile"
 )
 
 const (
@@ -26,111 +29,68 @@ const (
 	testCrossNode = "system:serviceaccount:nvsentinel:health-events-analyzer"
 )
 
-// setRequiredEnv sets the minimum environment a config load needs.
-func setRequiredEnv(t *testing.T) {
+// configFromJSON decodes config.json text the way configfile.Load does
+// (numbers as json.Number).
+func configFromJSON(t *testing.T, raw string) map[string]any {
 	t.Helper()
-	t.Setenv("TLS_INSECURE_DEVELOPMENT_MODE", "true")
-}
 
-func TestLoadConfigDefaults(t *testing.T) {
-	setRequiredEnv(t)
-
-	cfg, err := loadConfigFromEnv()
+	m, err := configfile.Decode([]byte(raw))
 	require.NoError(t, err)
 
-	require.Equal(t, ":50051", cfg.listenAddr)
-	require.Equal(t, 2112, cfg.metricsPort)
-	require.Equal(t, 10*time.Minute, cfg.maxConnAge)
-	require.Equal(t, 5*time.Minute, cfg.maxConnIdle)
-	require.Equal(t, 10*time.Second, cfg.conditionUpdateTimeout)
-	require.Zero(t, cfg.tokenCacheSize, "zero keeps the grpcauth default")
-	require.EqualValues(t, 1000, cfg.tokenReviewQPS)
-	require.Equal(t, 2000, cfg.tokenReviewBurst)
-	require.Empty(t, cfg.tlsCertDir, "plaintext is allowed only because the insecure development mode is set")
-	require.Equal(t, "/etc/config/config.json", cfg.configPath)
-	require.Zero(t, cfg.k8sClientQPS, "zero keeps the shared config value")
-	require.Zero(t, cfg.nodeMetadataCacheSize)
-	require.Zero(t, cfg.nodeMetadataCacheTTL)
-	require.Zero(t, cfg.grpcReadBufferBytes, "zero keeps the grpc-go default")
-	require.Zero(t, cfg.grpcWriteBufferBytes)
+	return m
 }
 
-func TestLoadConfigOverrides(t *testing.T) {
-	setRequiredEnv(t)
-	t.Setenv("LISTEN_ADDR", ":9999")
-	t.Setenv("MAX_CONNECTION_AGE", "1m")
-	t.Setenv("MAX_CONNECTION_IDLE", "30s")
-	t.Setenv("CONDITION_UPDATE_TIMEOUT", "3s")
-	t.Setenv("TOKEN_CACHE_SIZE", "450000")
-	t.Setenv("TOKENREVIEW_QPS", "200")
-	t.Setenv("TOKENREVIEW_BURST", "400")
-	t.Setenv("POSTGRESQL_CLIENT_CERT_MOUNT_PATH", "/etc/ssl/client-certs")
-	t.Setenv("K8S_CLIENT_QPS", "100.5")
-	t.Setenv("K8S_CLIENT_BURST", "200")
-	t.Setenv("NODE_METADATA_CACHE_SIZE", "200000")
-	t.Setenv("NODE_METADATA_CACHE_TTL", "10m")
-	t.Setenv("GRPC_READ_BUFFER_BYTES", "8192")
-	t.Setenv("GRPC_WRITE_BUFFER_BYTES", "4096")
+const deploymentConfig = `{"deployment": {
+	"TokenReviewQps": 1000, "TokenReviewBurst": 2000, "TokenCacheSize": 500000,
+	"ConditionUpdateTimeout": "10s", "MaxConnectionAge": "10m", "MaxConnectionIdle": "5m",
+	"GrpcReadBufferBytes": 8192, "GrpcWriteBufferBytes": 4096
+}}`
 
-	cfg, err := loadConfigFromEnv()
+func TestSettingsFromConfig(t *testing.T) {
+	s, err := settingsFromConfig(configFromJSON(t, deploymentConfig))
 	require.NoError(t, err)
-	require.EqualValues(t, 100.5, cfg.k8sClientQPS)
-	require.Equal(t, 200, cfg.k8sClientBurst)
-	require.Equal(t, 200000, cfg.nodeMetadataCacheSize)
-	require.Equal(t, 10*time.Minute, cfg.nodeMetadataCacheTTL)
-	require.Equal(t, 8192, cfg.grpcReadBufferBytes)
-	require.Equal(t, 4096, cfg.grpcWriteBufferBytes)
-
-	require.Equal(t, ":9999", cfg.listenAddr)
-	require.Equal(t, time.Minute, cfg.maxConnAge)
-	require.Equal(t, 30*time.Second, cfg.maxConnIdle)
-	require.Equal(t, 3*time.Second, cfg.conditionUpdateTimeout)
-	require.Equal(t, 450000, cfg.tokenCacheSize)
-	require.EqualValues(t, 200, cfg.tokenReviewQPS)
-	require.Equal(t, 400, cfg.tokenReviewBurst)
-	require.Equal(t, "/etc/ssl/client-certs", cfg.certMountPath)
+	require.Equal(t, settings{
+		tokenReviewQPS:         1000,
+		tokenReviewBurst:       2000,
+		tokenCacheSize:         500000,
+		conditionUpdateTimeout: 10 * time.Second,
+		maxConnAge:             10 * time.Minute,
+		maxConnIdle:            5 * time.Minute,
+		grpcReadBufferBytes:    8192,
+		grpcWriteBufferBytes:   4096,
+	}, s)
 }
 
-func TestLoadConfigRejections(t *testing.T) {
+func TestSettingsFromConfig_Rejections(t *testing.T) {
 	cases := []struct {
-		name    string
-		mutate  func(t *testing.T)
-		wantErr string
+		name, raw, wantErr string
 	}{
-		{
-			"plaintext without insecure development mode",
-			func(t *testing.T) { t.Setenv("TLS_INSECURE_DEVELOPMENT_MODE", "") },
-			"TLS_CERT_DIR is required",
-		},
-		{"malformed duration", func(t *testing.T) { t.Setenv("CONDITION_UPDATE_TIMEOUT", "soon") }, "invalid CONDITION_UPDATE_TIMEOUT"},
-		{"zero condition timeout", func(t *testing.T) { t.Setenv("CONDITION_UPDATE_TIMEOUT", "0s") }, "must be positive"},
-		{"malformed connection age", func(t *testing.T) { t.Setenv("MAX_CONNECTION_AGE", "soon") }, "invalid MAX_CONNECTION_AGE"},
-		{"negative token cache", func(t *testing.T) { t.Setenv("TOKEN_CACHE_SIZE", "-1") }, "TOKEN_CACHE_SIZE must not be negative"},
-		{"zero tokenreview qps", func(t *testing.T) { t.Setenv("TOKENREVIEW_QPS", "0") }, "TOKENREVIEW_QPS must be positive"},
-		{"malformed metrics port", func(t *testing.T) { t.Setenv("METRICS_PORT", "p") }, "invalid METRICS_PORT"},
-		{"negative node cache", func(t *testing.T) { t.Setenv("NODE_METADATA_CACHE_SIZE", "-1") }, "must not be negative"},
+		{"no deployment object", `{"K8sConnectorQps": 5}`, `"deployment" missing`},
+		{"deployment not an object", `{"deployment": 3}`, "not an object"},
+		{"missing key", `{"deployment": {"TokenReviewQps": 1000}}`, `"TokenReviewBurst" missing`},
+		{"zero", strings.Replace(deploymentConfig, `"TokenCacheSize": 500000`, `"TokenCacheSize": 0`, 1), "TokenCacheSize must be positive"},
+		{"negative", strings.Replace(deploymentConfig, `"GrpcReadBufferBytes": 8192`, `"GrpcReadBufferBytes": -1`, 1), "GrpcReadBufferBytes must be positive"},
+		{"fraction", strings.Replace(deploymentConfig, `"TokenReviewQps": 1000`, `"TokenReviewQps": 1.5`, 1), "TokenReviewQps"},
+		{"malformed duration", strings.Replace(deploymentConfig, `"MaxConnectionAge": "10m"`, `"MaxConnectionAge": "soon"`, 1), "MaxConnectionAge"},
+		{"zero duration", strings.Replace(deploymentConfig, `"ConditionUpdateTimeout": "10s"`, `"ConditionUpdateTimeout": "0s"`, 1), "ConditionUpdateTimeout must be positive"},
+		{"duration as number", strings.Replace(deploymentConfig, `"MaxConnectionIdle": "5m"`, `"MaxConnectionIdle": 300`, 1), "not a duration string"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			setRequiredEnv(t)
-			tc.mutate(t)
-
-			_, err := loadConfigFromEnv()
-			require.Error(t, err)
-			require.Contains(t, err.Error(), tc.wantErr)
+			_, err := settingsFromConfig(configFromJSON(t, tc.raw))
+			require.ErrorContains(t, err, tc.wantErr)
 		})
 	}
 }
 
-func TestDatastoreCertMountPath(t *testing.T) {
-	t.Setenv("POSTGRESQL_CLIENT_CERT_MOUNT_PATH", "")
-	t.Setenv("MONGODB_CLIENT_CERT_MOUNT_PATH", "")
-	require.Empty(t, datastoreCertMountPath(), "no certificate mount means TLS off")
+func TestNew_RequiresTLSUnlessTheDevelopmentModeIsNamed(t *testing.T) {
+	_, err := New(Options{ListenAddr: ":50051"})
+	require.ErrorContains(t, err, "-tls-cert-dir is required")
 
-	t.Setenv("MONGODB_CLIENT_CERT_MOUNT_PATH", "/etc/ssl/mongo-client")
-	require.Equal(t, "/etc/ssl/mongo-client", datastoreCertMountPath())
+	_, err = New(Options{ListenAddr: ":50051", InsecureDevelopmentMode: true})
+	require.NoError(t, err)
 
-	t.Setenv("POSTGRESQL_CLIENT_CERT_MOUNT_PATH", "/etc/ssl/client-certs")
-	require.Equal(t, "/etc/ssl/client-certs", datastoreCertMountPath(), "the PostgreSQL path wins when set")
+	_, err = New(Options{ListenAddr: ":50051", TLSCertDir: "/etc/tls"})
+	require.NoError(t, err)
 }

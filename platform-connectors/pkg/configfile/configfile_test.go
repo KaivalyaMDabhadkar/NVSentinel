@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -100,4 +101,31 @@ func TestBool(t *testing.T) {
 	require.False(t, Bool(m, "off"))
 	require.False(t, Bool(m, "number"))
 	require.False(t, Bool(m, "missing"))
+}
+
+func TestDurationAndObject(t *testing.T) {
+	raw, err := Load(writeConfig(t, `{"deployment": {"MaxConnectionAge": "10m", "Bad": "soon", "Number": 5}, "flat": 1}`))
+	require.NoError(t, err)
+
+	dep, err := Object(raw, "deployment")
+	require.NoError(t, err)
+
+	d, err := Duration(dep, "MaxConnectionAge")
+	require.NoError(t, err)
+	require.Equal(t, 10*time.Minute, d)
+
+	_, err = Duration(dep, "Bad")
+	require.ErrorContains(t, err, `"Bad"`)
+
+	_, err = Duration(dep, "Number")
+	require.ErrorContains(t, err, "not a duration string")
+
+	_, err = Duration(dep, "missing")
+	require.ErrorContains(t, err, "missing")
+
+	_, err = Object(raw, "flat")
+	require.ErrorContains(t, err, "not an object")
+
+	_, err = Object(raw, "absent")
+	require.ErrorContains(t, err, "missing")
 }

@@ -25,32 +25,42 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
 
-// Load reads and decodes the file at path. Numbers stay json.Number, so the
-// chart's 20.00 and a hand-written 20 read back as the same value.
+// Load reads and decodes the file at path.
 func Load(path string) (map[string]any, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config %s: %w", path, err)
 	}
 
+	raw, err := Decode(data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal config %s: %w", path, err)
+	}
+
+	return raw, nil
+}
+
+// Decode decodes one JSON object. Numbers stay json.Number, so the chart's
+// 20.00 and a hand-written 20 read back as the same value. Anything after
+// the object is a mistake that a plain Unmarshal would have refused too.
+func Decode(data []byte) (map[string]any, error) {
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 
 	result := map[string]any{}
 	if err := dec.Decode(&result); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal config %s: %w", path, err)
+		return nil, err
 	}
 
-	// The file is one JSON object; anything after it is a mistake that a
-	// plain Unmarshal would have refused too.
 	if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return nil, fmt.Errorf("failed to unmarshal config %s: more than one JSON value", path)
+			return nil, errors.New("more than one JSON value")
 		}
 
-		return nil, fmt.Errorf("failed to unmarshal config %s: content after the JSON object: %w", path, err)
+		return nil, fmt.Errorf("content after the JSON object: %w", err)
 	}
 
 	return result, nil
@@ -122,4 +132,29 @@ func number(m map[string]any, key string) (json.Number, error) {
 	}
 
 	return n, nil
+}
+
+// Duration reads a required duration string such as "30s" or "5m".
+func Duration(m map[string]any, key string) (time.Duration, error) {
+	str, ok := m[key].(string)
+	if !ok {
+		return 0, fmt.Errorf("config key %q missing or not a duration string (got %T)", key, m[key])
+	}
+
+	d, err := time.ParseDuration(str)
+	if err != nil {
+		return 0, fmt.Errorf("config key %q: %w", key, err)
+	}
+
+	return d, nil
+}
+
+// Object reads a required nested object; the readers above work on it too.
+func Object(m map[string]any, key string) (map[string]any, error) {
+	obj, ok := m[key].(map[string]any)
+	if !ok {
+		return nil, fmt.Errorf("config key %q missing or not an object (got %T)", key, m[key])
+	}
+
+	return obj, nil
 }

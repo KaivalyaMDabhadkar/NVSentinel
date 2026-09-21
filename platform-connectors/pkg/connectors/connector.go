@@ -86,8 +86,8 @@ var bestEffortFailures = promauto.NewCounterVec(prometheus.CounterOpts{
 		"by connector and reason (failed, timeout)",
 }, []string{"connector", "reason"})
 
-// BestEffort returns a Connector that gives c at most timeout per batch (no
-// bound when timeout is zero) and never fails the batch: a failure or a
+// BestEffort returns a Connector that gives c at most timeout per batch
+// (which must be positive) and never fails the batch: a failure or a
 // timeout is logged and counted under name, and the batch is acknowledged
 // anyway. It is for work that repairs itself, like node conditions the next
 // report rewrites, and for forwards nobody waits for. When the caller's own
@@ -104,14 +104,8 @@ type bestEffort struct {
 }
 
 func (b *bestEffort) ProcessBatch(ctx context.Context, he *pb.HealthEvents) error {
-	boundedCtx := ctx
-
-	if b.timeout > 0 {
-		var cancel context.CancelFunc
-
-		boundedCtx, cancel = context.WithTimeout(ctx, b.timeout)
-		defer cancel()
-	}
+	boundedCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
 
 	err := b.next.ProcessBatch(boundedCtx, he)
 	if err == nil {

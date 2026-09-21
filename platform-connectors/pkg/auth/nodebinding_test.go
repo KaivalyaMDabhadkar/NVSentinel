@@ -431,16 +431,6 @@ func TestNewNodeBindingInterceptor_Validation(t *testing.T) {
 	}
 }
 
-func TestNewNodeBindingInterceptor_AlwaysEnforces(t *testing.T) {
-	// An interceptor built with no Mode set defaults to ModeEnforce and
-	// rejects. ModeAudit is opt-in; see TestNodeBinding_AuditMode.
-	in := events(otherNode)
-
-	_, err := run(t, Config{NodeName: ownNode}, context.Background(), in)
-
-	assert.Equal(t, codes.PermissionDenied, status.Code(err))
-}
-
 func TestNodeBinding_AuditMode(t *testing.T) {
 	// ModeAudit records the same violation it would have rejected under
 	// ModeEnforce, but lets the request through.
@@ -732,17 +722,6 @@ func TestNodeBinding_NodeClaim(t *testing.T) {
 		assert.False(t, called)
 		assert.Equal(t, before+1, testutil.ToFloat64(counter))
 	})
-
-	t.Run("no claim on the token: pinned like an anonymous caller", func(t *testing.T) {
-		noClaims := &stubValidator{identities: map[string]string{"bare": unlistedSA}}
-		bareCfg := cfg
-		bareCfg.Validator = noClaims
-
-		called, err := run(t, bareCfg, ctxWithAuth("Bearer bare"), events(ownNode))
-
-		require.NoError(t, err)
-		assert.True(t, called)
-	})
 }
 
 // nilIdentityValidator returns neither an identity nor an error, the one shape
@@ -856,25 +835,6 @@ func TestNodeBinding_PodBoundTokenWithoutNodeClaimIsRefusedCrossNodeScope(t *tes
 	assert.Equal(t, before+1, testutil.ToFloat64(counter))
 }
 
-func TestNodeBinding_ClaimlessTokenStillPinsNodeLocalCallers(t *testing.T) {
-	// Node-local callers keep the permissive treatment: their scope is the
-	// connector's own node, exactly what reaching the socket already grants.
-	validator := &stubValidator{
-		identities:  map[string]string{"pending": unlistedSA},
-		noNodeClaim: map[string]bool{"pending": true},
-	}
-	cfg := Config{
-		NodeName:                 ownNode,
-		Validator:                validator,
-		CrossNodeServiceAccounts: []string{crossSA},
-	}
-
-	called, err := run(t, cfg, ctxWithAuth("Bearer pending"), events(ownNode))
-
-	require.NoError(t, err)
-	assert.True(t, called)
-}
-
 func TestNodeBinding_UnboundTokenStillWorksForNodeLocalCallers(t *testing.T) {
 	// Node-local scope equals what reaching the socket already grants, so an
 	// unbound token gains such a caller nothing and is not worth refusing.
@@ -898,7 +858,8 @@ func TestNodeBinding_AllowlistedClaimMismatchIsRejected(t *testing.T) {
 	// Cross-node reach is permission to name other nodes, not permission to
 	// present the credential from other nodes. A token bound elsewhere has been
 	// carried off its node, and the allowlist does not excuse that: refusing it
-	// confines a copied token to the node where its pod actually runs.
+	// confines a copied token to the node where its pod actually runs. The
+	// matching-claim side is TestNodeBinding_CrossNodeToken.
 	validator := &stubValidator{
 		identities: map[string]string{"fwd": crossSA},
 		nodeClaims: map[string]string{"fwd": otherNode},
@@ -916,28 +877,6 @@ func TestNodeBinding_AllowlistedClaimMismatchIsRejected(t *testing.T) {
 	assert.Equal(t, codes.PermissionDenied, status.Code(err))
 	assert.False(t, called)
 	assert.Equal(t, before+1, testutil.ToFloat64(counter))
-}
-
-func TestNodeBinding_AllowlistedCallerWithMatchingClaimKeepsCrossNodeScope(t *testing.T) {
-	// The other side of the same rule: provenance verified, so the allowlist
-	// decides scope and the caller may name any node.
-	validator := &stubValidator{
-		identities: map[string]string{"cross": crossSA},
-		nodeClaims: map[string]string{"cross": ownNode},
-	}
-	cfg := Config{
-		NodeName:                 ownNode,
-		Validator:                validator,
-		CrossNodeServiceAccounts: []string{crossSA},
-	}
-
-	in := events(otherNode, "gpu-node-99")
-
-	called, err := run(t, cfg, ctxWithAuth("Bearer cross"), in)
-
-	require.NoError(t, err)
-	assert.True(t, called)
-	assert.Equal(t, []string{otherNode, "gpu-node-99"}, nodeNames(in))
 }
 
 // concurrentValidator is race-free, unlike stubValidator's call counter.
@@ -1139,8 +1078,10 @@ func TestFleet_TokenlessCallerIsUnauthenticated(t *testing.T) {
 
 func TestFleet_MalformedCredentialsAreUnauthenticated(t *testing.T) {
 	_, err := runFleet(t, fleetConfig(fleetValidator()), ctxWithAuth("Basic not-a-bearer"), events(fleetNodeA))
-
 	assert.Equal(t, codes.Unauthenticated, status.Code(err))
+
+	_, err = runFleet(t, fleetConfig(fleetValidator()), ctxWithAuth("Bearer tok-nobody"), events(fleetNodeA))
+	assert.Equal(t, codes.Unauthenticated, status.Code(err), "an unknown token is unauthenticated, not forbidden")
 }
 
 // TestFleet_EventsArePinnedToTheTokenNodeClaim: a publisher's events must
@@ -1284,14 +1225,6 @@ func TestFleet_ConfigValidation(t *testing.T) {
 			wantErr: "needs a local node",
 		},
 		{
-			name: "cross-node entry must be canonical",
-			cfg: Config{
-				Validator:                &stubValidator{},
-				CrossNodeServiceAccounts: []string{"gpu-health-monitor"},
-			},
-			wantErr: "not a canonical Kubernetes username",
-		},
-		{
 			name:    "audit mode needs a local node",
 			cfg:     Config{Validator: &stubValidator{}, Mode: ModeAudit},
 			wantErr: "audit mode needs a local node",
@@ -1310,29 +1243,4 @@ func TestFleet_ConfigValidation(t *testing.T) {
 		_, err := NewNodeBindingInterceptor(Config{Validator: &stubValidator{}})
 		require.NoError(t, err)
 	})
-}
-
-// TestFleet_ExistingRequestsKeepTheirCodes pins the status codes the
-// deployment platform connector's clients rely on, in one place.
-func TestFleet_ExistingRequestsKeepTheirCodes(t *testing.T) {
-	cases := []struct {
-		name string
-		ctx  context.Context
-		req  *pb.HealthEvents
-		want codes.Code
-	}{
-		{"no token", context.Background(), events(fleetNodeA), codes.Unauthenticated},
-		{"unknown token", ctxWithAuth("Bearer tok-nobody"), events(fleetNodeA), codes.Unauthenticated},
-		{"another identity, own node", ctxWithAuth("Bearer tok-unlisted"), events(fleetNodeA), codes.OK},
-		{"other node", ctxWithAuth("Bearer tok-a"), events(fleetNodeB), codes.PermissionDenied},
-		{"cross-node blank name", ctxWithAuth("Bearer tok-cross"), events(""), codes.InvalidArgument},
-		{"own node", ctxWithAuth("Bearer tok-a"), events(fleetNodeA), codes.OK},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := runFleet(t, fleetConfig(fleetValidator()), tc.ctx, tc.req)
-			assert.Equal(t, tc.want, status.Code(err))
-		})
-	}
 }

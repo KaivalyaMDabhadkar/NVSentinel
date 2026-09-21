@@ -16,239 +16,115 @@ package central
 
 import (
 	"fmt"
-	"os"
 	"time"
 
-	"github.com/nvidia/nvsentinel/commons/pkg/envutil"
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/configfile"
 )
 
-// Environment defaults for the deployment platform connector. These are
-// tuning values; the chart exposes the ones an operator may need to change.
-const (
-	defaultListenAddr             = ":50051"
-	defaultMetricsPort            = 2112
-	defaultMaxConnAge             = 10 * time.Minute
-	defaultMaxConnIdle            = 5 * time.Minute
-	defaultConditionUpdateTimeout = 10 * time.Second
-	// The ADR's worst case is about 830 TokenReviews per second per replica
-	// (every monitor pod of a 100,000-node fleet writing in every cache
-	// window); the default leaves headroom above it.
-	defaultTokenReviewQPS   = 1000
-	defaultTokenReviewBurst = 2000
-	defaultConfigPath       = "/etc/config/config.json"
-)
+// Options are the deployment role's settings, from flags.
+type Options struct {
+	// ListenAddr is the TCP address the gRPC server binds.
+	ListenAddr string
+	// TLSCertDir holds tls.crt and tls.key, reloaded when cert-manager
+	// rotates them. Empty is refused unless InsecureDevelopmentMode is set:
+	// the caller token crosses the pod network in gRPC metadata.
+	TLSCertDir              string
+	InsecureDevelopmentMode bool
+}
 
-type config struct {
-	listenAddr    string
-	metricsPort   int
-	certMountPath string
-	tlsCertDir    string
-	maxConnAge    time.Duration
-	maxConnIdle   time.Duration
-	// conditionUpdateTimeout bounds the node condition update (and the
-	// Kubernetes Event write) of one request; the write alone decides the
-	// reply, so this only bounds how long a slow API server can delay it.
-	conditionUpdateTimeout time.Duration
-	// tokenCacheSize is the number of caller tokens whose TokenReview verdict
-	// is remembered; zero keeps the grpcauth default.
-	tokenCacheSize   int
+// settings are the deployment role's tunables, from the "deployment" object
+// of the shared config.json. The chart writes every key; a missing or
+// non-positive value refuses to start and names the key.
+type settings struct {
+	// The TokenReview client and its verdict cache are sized for a call on
+	// the path of every batch of the fleet, not for one node's callers.
 	tokenReviewQPS   float32
 	tokenReviewBurst int
-	// k8sClientQPS, k8sClientBurst, nodeMetadataCacheSize and
-	// nodeMetadataCacheTTL, when set, override the values of the shared
-	// config.json, which are sized for one node's platform connector; the
-	// central replicas serve the whole fleet.
-	k8sClientQPS          float32
-	k8sClientBurst        int
-	nodeMetadataCacheSize int
-	nodeMetadataCacheTTL  time.Duration
-	// grpcReadBufferBytes and grpcWriteBufferBytes size the two buffers gRPC
-	// keeps per connection; zero keeps the grpc-go default of 32 KiB each.
-	// Smaller buffers cut the memory each connected monitor pod costs.
+	tokenCacheSize   int
+	// conditionUpdateTimeout bounds the node condition update (and the
+	// Kubernetes Event write) and the gRPC sink call of one request; the
+	// datastore write alone decides the reply, so this only bounds how long
+	// a slow API server or sink can delay it.
+	conditionUpdateTimeout time.Duration
+	// Connections are closed after maxConnAge or maxConnIdle so a rollout
+	// spreads the monitors over the new replicas.
+	maxConnAge  time.Duration
+	maxConnIdle time.Duration
+	// The two buffers gRPC keeps per connection: the main lever on the memory
+	// each connected monitor pod costs.
 	grpcReadBufferBytes  int
 	grpcWriteBufferBytes int
-	configPath           string
 }
 
-// envPositiveInt reads an integer whose zero or negative value would make the
-// server useless.
-func envPositiveInt(key string, def int) (int, error) {
-	v, err := envutil.ParseEnvInt(key, def)
+func settingsFromConfig(raw map[string]any) (settings, error) {
+	dep, err := configfile.Object(raw, "deployment")
 	if err != nil {
-		return 0, err
+		return settings{}, err
+	}
+
+	var s settings
+
+	ints := []struct {
+		dst *int
+		key string
+	}{
+		{&s.tokenReviewBurst, "TokenReviewBurst"},
+		{&s.tokenCacheSize, "TokenCacheSize"},
+		{&s.grpcReadBufferBytes, "GrpcReadBufferBytes"},
+		{&s.grpcWriteBufferBytes, "GrpcWriteBufferBytes"},
+	}
+	for _, v := range ints {
+		if *v.dst, err = positiveInt(dep, v.key); err != nil {
+			return settings{}, err
+		}
+	}
+
+	qps, err := positiveInt(dep, "TokenReviewQps")
+	if err != nil {
+		return settings{}, err
+	}
+
+	s.tokenReviewQPS = float32(qps)
+
+	durations := []struct {
+		dst *time.Duration
+		key string
+	}{
+		{&s.conditionUpdateTimeout, "ConditionUpdateTimeout"},
+		{&s.maxConnAge, "MaxConnectionAge"},
+		{&s.maxConnIdle, "MaxConnectionIdle"},
+	}
+	for _, v := range durations {
+		if *v.dst, err = positiveDuration(dep, v.key); err != nil {
+			return settings{}, err
+		}
+	}
+
+	return s, nil
+}
+
+func positiveInt(m map[string]any, key string) (int, error) {
+	v, err := configfile.Int64(m, key)
+	if err != nil {
+		return 0, fmt.Errorf("deployment settings: %w", err)
 	}
 
 	if v <= 0 {
-		return 0, fmt.Errorf("%s must be positive, got %d", key, v)
+		return 0, fmt.Errorf("deployment settings: %s must be positive, got %d", key, v)
 	}
 
-	return v, nil
+	return int(v), nil
 }
 
-// envPositiveDuration reads a duration whose zero or negative value would
-// make the server useless. Unset keeps the default, which may be zero where
-// zero means "keep the shared config.json value".
-func envPositiveDuration(key string, def time.Duration) (time.Duration, error) {
-	if os.Getenv(key) == "" {
-		return def, nil
-	}
-
-	v, err := envutil.ParseEnvDuration(key, def)
+func positiveDuration(m map[string]any, key string) (time.Duration, error) {
+	v, err := configfile.Duration(m, key)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("deployment settings: %w", err)
 	}
 
 	if v <= 0 {
-		return 0, fmt.Errorf("%s must be positive, got %s", key, v)
+		return 0, fmt.Errorf("deployment settings: %s must be positive, got %s", key, v)
 	}
 
 	return v, nil
-}
-
-// trueValue is the string form of an enabled boolean toggle, as both the
-// chart's quoted env values and the shared JSON config use it.
-const trueValue = "true"
-
-func loadConfigFromEnv() (*config, error) {
-	cfg := &config{
-		listenAddr:    envutil.GetEnvString("LISTEN_ADDR", defaultListenAddr),
-		certMountPath: datastoreCertMountPath(),
-		configPath:    envutil.GetEnvString("CONFIG_PATH", defaultConfigPath),
-	}
-
-	var err error
-
-	if cfg.metricsPort, err = envutil.ParseEnvInt("METRICS_PORT", defaultMetricsPort); err != nil {
-		return nil, err
-	}
-
-	if err = loadTokenReviewEnv(cfg); err != nil {
-		return nil, err
-	}
-
-	if err = loadFleetSizingEnv(cfg); err != nil {
-		return nil, err
-	}
-
-	if err = loadTLSEnv(cfg); err != nil {
-		return nil, err
-	}
-
-	if err = loadTuningEnv(cfg); err != nil {
-		return nil, err
-	}
-
-	return cfg, nil
-}
-
-// datastoreCertMountPath returns the client certificate mount path of the
-// configured datastore: the chart sets exactly one of the two variables.
-func datastoreCertMountPath() string {
-	if path := os.Getenv("POSTGRESQL_CLIENT_CERT_MOUNT_PATH"); path != "" {
-		return path
-	}
-
-	return os.Getenv("MONGODB_CLIENT_CERT_MOUNT_PATH")
-}
-
-// loadTokenReviewEnv reads the TokenReview client rate limit and the verdict
-// cache size.
-func loadTokenReviewEnv(cfg *config) error {
-	var err error
-
-	if cfg.tokenCacheSize, err = envutil.ParseEnvInt("TOKEN_CACHE_SIZE", 0); err != nil {
-		return err
-	}
-
-	if cfg.tokenCacheSize < 0 {
-		return fmt.Errorf("TOKEN_CACHE_SIZE must not be negative, got %d", cfg.tokenCacheSize)
-	}
-
-	qps, err := envPositiveInt("TOKENREVIEW_QPS", defaultTokenReviewQPS)
-	if err != nil {
-		return err
-	}
-
-	cfg.tokenReviewQPS = float32(qps)
-
-	if cfg.tokenReviewBurst, err = envPositiveInt("TOKENREVIEW_BURST", defaultTokenReviewBurst); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// loadFleetSizingEnv reads the overrides for values the shared config.json
-// sizes for one node. Unset (zero) keeps the config.json value.
-func loadFleetSizingEnv(cfg *config) error {
-	qps, err := envutil.ParseEnvFloat64("K8S_CLIENT_QPS", 0)
-	if err != nil {
-		return err
-	}
-
-	cfg.k8sClientQPS = float32(qps)
-
-	if cfg.k8sClientBurst, err = envutil.ParseEnvInt("K8S_CLIENT_BURST", 0); err != nil {
-		return err
-	}
-
-	if cfg.nodeMetadataCacheSize, err = envutil.ParseEnvInt("NODE_METADATA_CACHE_SIZE", 0); err != nil {
-		return err
-	}
-
-	if cfg.k8sClientQPS < 0 || cfg.k8sClientBurst < 0 || cfg.nodeMetadataCacheSize < 0 {
-		return fmt.Errorf("K8S_CLIENT_QPS, K8S_CLIENT_BURST and NODE_METADATA_CACHE_SIZE must not be negative")
-	}
-
-	if cfg.nodeMetadataCacheTTL, err = envPositiveDuration("NODE_METADATA_CACHE_TTL", 0); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-// loadTLSEnv reads the listener TLS settings. The token crosses the pod
-// network in gRPC metadata, so a plaintext listener is refused unless the
-// explicitly named insecure development mode is set.
-func loadTLSEnv(cfg *config) error {
-	cfg.tlsCertDir = os.Getenv("TLS_CERT_DIR")
-	insecureDev := os.Getenv("TLS_INSECURE_DEVELOPMENT_MODE") == trueValue
-
-	if cfg.tlsCertDir == "" && !insecureDev {
-		return fmt.Errorf("TLS_CERT_DIR is required unless TLS_INSECURE_DEVELOPMENT_MODE=true")
-	}
-
-	return nil
-}
-
-// loadTuningEnv reads the connection lifetime and timeout knobs.
-func loadTuningEnv(cfg *config) error {
-	var err error
-
-	if cfg.maxConnAge, err = envPositiveDuration("MAX_CONNECTION_AGE", defaultMaxConnAge); err != nil {
-		return err
-	}
-
-	if cfg.maxConnIdle, err = envPositiveDuration("MAX_CONNECTION_IDLE", defaultMaxConnIdle); err != nil {
-		return err
-	}
-
-	if cfg.conditionUpdateTimeout, err = envPositiveDuration(
-		"CONDITION_UPDATE_TIMEOUT", defaultConditionUpdateTimeout); err != nil {
-		return err
-	}
-
-	if cfg.grpcReadBufferBytes, err = envutil.ParseEnvInt("GRPC_READ_BUFFER_BYTES", 0); err != nil {
-		return err
-	}
-
-	if cfg.grpcWriteBufferBytes, err = envutil.ParseEnvInt("GRPC_WRITE_BUFFER_BYTES", 0); err != nil {
-		return err
-	}
-
-	if cfg.grpcReadBufferBytes < 0 || cfg.grpcWriteBufferBytes < 0 {
-		return fmt.Errorf("GRPC_READ_BUFFER_BYTES and GRPC_WRITE_BUFFER_BYTES must not be negative")
-	}
-
-	return nil
 }

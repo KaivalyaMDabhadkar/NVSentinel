@@ -137,7 +137,8 @@ func (rb *RingBuffer) HealthMetricEleProcessingCompleted(data *QueuedHealthEvent
 	rb.healthMetricQueue.Done(data)
 }
 
-func (rb *RingBuffer) HealthMetricEleProcessingFailed(data *QueuedHealthEvents) {
+// Discard releases an unsuccessful item permanently. It does not requeue it.
+func (rb *RingBuffer) Discard(data *QueuedHealthEvents) {
 	rb.healthMetricQueue.Forget(data)
 	rb.healthMetricQueue.Done(data)
 }

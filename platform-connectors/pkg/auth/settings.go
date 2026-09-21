@@ -14,7 +14,11 @@
 
 package auth
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/configfile"
+)
 
 // Settings are the node-binding settings the platform connector's config.json
 // carries. The chart writes them once, into the ConfigMap both roles mount;
@@ -63,7 +67,10 @@ func SettingsFromConfig(raw map[string]any) (Settings, error) {
 	// Every monitor may present a token, not only the cross-node ones, so the
 	// audience is required whenever node binding is on: without it no token
 	// can be verified and the node claims this check rests on are unreadable.
-	settings.Audience, _ = raw["AuthAudience"].(string)
+	if settings.Audience, err = configfile.String(raw, "AuthAudience"); err != nil {
+		return Settings{}, err
+	}
+
 	if settings.Audience == "" {
 		return Settings{}, fmt.Errorf("AuthAudience must be set when node-binding auth is enabled")
 	}
@@ -72,7 +79,7 @@ func SettingsFromConfig(raw map[string]any) (Settings, error) {
 		return Settings{}, fmt.Errorf("parse AuthMode: %w", err)
 	}
 
-	if settings.FailOpenOnUnavailable, err = boolFromConfig(raw, "AuthFailOpenOnUnavailable", false); err != nil {
+	if settings.FailOpenOnUnavailable, err = boolFromConfig(raw, "AuthFailOpenOnUnavailable"); err != nil {
 		return Settings{}, fmt.Errorf("parse AuthFailOpenOnUnavailable: %w", err)
 	}
 
@@ -95,12 +102,7 @@ func nodeBindingEnabled(raw map[string]any) (bool, error) {
 				"relying on a default", key)
 	}
 
-	enabled, err := parseBool(value)
-	if err != nil {
-		return false, fmt.Errorf("%s must be true or false, got %#v", key, value)
-	}
-
-	return enabled, nil
+	return parseBool(key, value)
 }
 
 // stringSliceFromConfig reads a JSON array of strings out of the ConfigMap.
@@ -165,25 +167,20 @@ func authMode(raw map[string]any) (Mode, error) {
 	}
 }
 
-// boolFromConfig reads a strict boolean, defaulting when absent. Values
-// arrive as JSON, where the chart quotes them; an unquoted bool from a
-// hand-edited ConfigMap is accepted too.
-func boolFromConfig(raw map[string]any, key string, def bool) (bool, error) {
+// boolFromConfig reads a strict boolean, false when absent. Values arrive as
+// JSON, where the chart quotes them; an unquoted bool from a hand-edited
+// ConfigMap is accepted too.
+func boolFromConfig(raw map[string]any, key string) (bool, error) {
 	value, present := raw[key]
 	if !present {
-		return def, nil
+		return false, nil
 	}
 
-	parsed, err := parseBool(value)
-	if err != nil {
-		return false, fmt.Errorf("%s must be true or false, got %#v", key, value)
-	}
-
-	return parsed, nil
+	return parseBool(key, value)
 }
 
-// parseBool accepts a raw bool or exactly "true" / "false".
-func parseBool(value any) (bool, error) {
+// parseBool accepts a raw bool or exactly "true" / "false" for key.
+func parseBool(key string, value any) (bool, error) {
 	switch v := value.(type) {
 	case bool:
 		return v, nil
@@ -196,5 +193,5 @@ func parseBool(value any) (bool, error) {
 		}
 	}
 
-	return false, fmt.Errorf("not a boolean: %#v", value)
+	return false, fmt.Errorf("%s must be true or false, got %#v", key, value)
 }

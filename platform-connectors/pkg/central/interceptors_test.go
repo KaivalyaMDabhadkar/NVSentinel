@@ -106,15 +106,13 @@ func requestFrom(withKey bool) context.Context {
 	return auth.ContextWithCaller(ctx, &grpcauth.Identity{Username: testPublisher, PodUID: "pod-uid-1", NodeName: "node-a"})
 }
 
-// countingHandler records whether it ran and hands back the request it saw.
+// countingHandler records how many times it ran.
 type countingHandler struct {
 	calls int
-	seen  any
 }
 
-func (h *countingHandler) handle(_ context.Context, req any) (any, error) {
+func (h *countingHandler) handle(context.Context, any) (any, error) {
 	h.calls++
-	h.seen = req
 
 	return &emptypb.Empty{}, nil
 }
@@ -123,7 +121,7 @@ func (h *countingHandler) handle(_ context.Context, req any) (any, error) {
 // caller's pod UID, the client key and the event index; a missing key, or a
 // missing caller identity, stops the request before the handler.
 func TestIdempotencyInterceptor(t *testing.T) {
-	interceptor := idempotencyInterceptor()
+	interceptor := idempotencyInterceptor
 
 	t.Run("stamps every event", func(t *testing.T) {
 		h := &countingHandler{}
@@ -169,8 +167,8 @@ func TestIdempotencyInterceptor(t *testing.T) {
 // refuses batches with a retryable status, so an established connection
 // cannot make it store a resend twice; once verified, batches pass.
 func TestReadinessInterceptor(t *testing.T) {
-	ready := &readiness{}
-	interceptor := readinessInterceptor(ready)
+	gate := &indexGate{}
+	interceptor := readinessInterceptor(gate)
 	h := &countingHandler{}
 
 	before := testutil.ToFloat64(refusals.WithLabelValues(refusalIndexUnverified))
@@ -180,7 +178,7 @@ func TestReadinessInterceptor(t *testing.T) {
 	require.Zero(t, h.calls, "nothing reaches the handler while the index is unverified")
 	require.Equal(t, before+1, testutil.ToFloat64(refusals.WithLabelValues(refusalIndexUnverified)))
 
-	ready.indexVerified.Store(true)
+	gate.verified.Store(true)
 
 	_, err = interceptor(requestFrom(true), batchNaming("node-a"), unaryInfo, h.handle)
 	require.NoError(t, err)

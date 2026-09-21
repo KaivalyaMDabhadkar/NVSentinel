@@ -79,40 +79,40 @@ func stampIdempotencyKeys(he *pb.HealthEvents, podUID, clientKey string) {
 // (the metadata transformer skips a node label of that name), so one stamp
 // is enough. It runs after the auth interceptor, which put the caller's
 // identity in the context.
-func idempotencyInterceptor() grpc.UnaryServerInterceptor {
-	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		he, ok := req.(*pb.HealthEvents)
-		if !ok {
-			return handler(ctx, req)
-		}
-
-		caller := auth.CallerFromContext(ctx)
-		if caller == nil {
-			return nil, status.Error(codes.Internal, "caller identity missing from context")
-		}
-
-		md, _ := metadata.FromIncomingContext(ctx)
-
-		clientKey, err := clientIdempotencyKey(md)
-		if err != nil {
-			refusals.WithLabelValues(refusalIdempotencyKey).Inc()
-
-			return nil, err
-		}
-
-		stampIdempotencyKeys(he, caller.PodUID, clientKey)
-
+func idempotencyInterceptor(
+	ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler,
+) (any, error) {
+	he, ok := req.(*pb.HealthEvents)
+	if !ok {
 		return handler(ctx, req)
 	}
+
+	caller := auth.CallerFromContext(ctx)
+	if caller == nil {
+		return nil, status.Error(codes.Internal, "caller identity missing from context")
+	}
+
+	md, _ := metadata.FromIncomingContext(ctx)
+
+	clientKey, err := clientIdempotencyKey(md)
+	if err != nil {
+		refusals.WithLabelValues(refusalIdempotencyKey).Inc()
+
+		return nil, err
+	}
+
+	stampIdempotencyKeys(he, caller.PodUID, clientKey)
+
+	return handler(ctx, req)
 }
 
 // readinessInterceptor refuses batches with a retryable status while the
 // replica has not verified the idempotency index, so a resend is never stored
 // twice before the index exists. Taking the replica out of the Service is not
 // enough, because established connections keep sending to it.
-func readinessInterceptor(ready *readiness) grpc.UnaryServerInterceptor {
+func readinessInterceptor(gate *indexGate) grpc.UnaryServerInterceptor {
 	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
-		if !ready.writesAllowed() {
+		if !gate.verified.Load() {
 			refusals.WithLabelValues(refusalIndexUnverified).Inc()
 
 			return nil, status.Error(codes.Unavailable, "idempotency index not verified on this replica; retry")

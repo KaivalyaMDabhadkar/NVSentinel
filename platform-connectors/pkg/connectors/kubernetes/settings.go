@@ -14,7 +14,9 @@
 
 package kubernetes
 
-import "github.com/nvidia/nvsentinel/platform-connectors/pkg/configfile"
+import (
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/configfile"
+)
 
 // Settings are the connector's values from the shared config.json: the
 // Kubernetes client rate limit and the node condition message limits.
@@ -25,7 +27,10 @@ type Settings struct {
 }
 
 // SettingsFromConfig reads Settings from a config.json map loaded by
-// configfile.Load. Both roles of the binary build the connector from it.
+// configfile.Load. Both roles of the binary build the connector from it. The
+// two retry keys are optional: absent selects the connector's defaults
+// (NewK8sConnector), and InitializeK8sConnector refuses a negative count or
+// an over-long duration.
 func SettingsFromConfig(raw map[string]any) (Settings, error) {
 	qps, err := configfile.Float64(raw, "K8sConnectorQps")
 	if err != nil {
@@ -37,22 +42,30 @@ func SettingsFromConfig(raw map[string]any) (Settings, error) {
 		return Settings{}, err
 	}
 
-	maxLen, err := configfile.Int64(raw, "MaxNodeConditionMessageLength")
-	if err != nil {
+	cfg := K8sConnectorConfig{}
+
+	if cfg.MaxNodeConditionMessageLength, err = configfile.Int64(raw, "MaxNodeConditionMessageLength"); err != nil {
 		return Settings{}, err
 	}
 
-	compactLen, err := configfile.Int64(raw, "CompactedHealthEventMsgLen")
-	if err != nil {
+	if cfg.CompactedHealthEventMsgLen, err = configfile.Int64(raw, "CompactedHealthEventMsgLen"); err != nil {
 		return Settings{}, err
 	}
 
-	return Settings{
-		K8sConnectorConfig: K8sConnectorConfig{
-			MaxNodeConditionMessageLength: maxLen,
-			CompactedHealthEventMsgLen:    compactLen,
-		},
-		QPS:   float32(qps),
-		Burst: int(burst),
-	}, nil
+	if _, ok := raw["K8sConnectorMaxRetries"]; ok {
+		var maxRetries int64
+		if maxRetries, err = configfile.Int64(raw, "K8sConnectorMaxRetries"); err != nil {
+			return Settings{}, err
+		}
+
+		cfg.MaxRetries = int(maxRetries)
+	}
+
+	if _, ok := raw["K8sConnectorMaxRetryDuration"]; ok {
+		if cfg.MaxRetryDuration, err = configfile.Duration(raw, "K8sConnectorMaxRetryDuration"); err != nil {
+			return Settings{}, err
+		}
+	}
+
+	return Settings{K8sConnectorConfig: cfg, QPS: float32(qps), Burst: int(burst)}, nil
 }

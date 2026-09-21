@@ -30,16 +30,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// writeSelfSignedPair writes a fresh self-signed certificate and key into dir
-// and returns the certificate's serial number so tests can tell pairs apart.
-func writeSelfSignedPair(t *testing.T, dir string, serial int64) {
+// writeSelfSignedPair writes a self-signed certificate and key into dir.
+func writeSelfSignedPair(t *testing.T, dir string) {
 	t.Helper()
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
 
 	template := x509.Certificate{
-		SerialNumber: big.NewInt(serial),
+		SerialNumber: big.NewInt(1),
 		Subject:      pkix.Name{CommonName: "platform-connector-deployment-test"},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
@@ -54,30 +53,22 @@ func writeSelfSignedPair(t *testing.T, dir string, serial int64) {
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 
-	// The key is written first so a watcher that fires on the cert write can
-	// always parse a complete pair.
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.key"), keyPEM, 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "tls.crt"), certPEM, 0o600))
 }
 
-func certSerial(t *testing.T, raw [][]byte) int64 {
-	t.Helper()
-
-	parsed, err := x509.ParseCertificate(raw[0])
-	require.NoError(t, err)
-
-	return parsed.SerialNumber.Int64()
-}
-
 func TestCertWatcherServesLoadedCert(t *testing.T) {
 	dir := t.TempDir()
-	writeSelfSignedPair(t, dir, 1)
+	writeSelfSignedPair(t, dir)
 
 	cw, err := newCertWatcher(dir)
 	require.NoError(t, err)
 
-	served, err := tlsConfigFor(cw).GetCertificate(nil)
+	served, err := cw.GetCertificate(nil)
 	require.NoError(t, err)
 	require.NotNil(t, served)
-	require.EqualValues(t, 1, certSerial(t, served.Certificate))
+
+	parsed, err := x509.ParseCertificate(served.Certificate[0])
+	require.NoError(t, err)
+	require.EqualValues(t, 1, parsed.SerialNumber.Int64())
 }

@@ -22,7 +22,6 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/nvidia/nvsentinel/commons/pkg/grpcauth"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/auth"
 )
 
@@ -42,21 +41,6 @@ func deploymentAuthSettings(raw map[string]any) (auth.Settings, error) {
 	}
 
 	return settings, nil
-}
-
-// newValidator builds the TokenReview validator for the audience the shared
-// config.json names, with the builder the DaemonSet uses, sized for a call on
-// the path of every batch of the fleet rather than one node's callers.
-func newValidator(cfg *config, audience string) (*grpcauth.Validator, error) {
-	// Every batch of the fleet authenticates; a line per success would be
-	// most of the log.
-	opts := []grpcauth.ValidatorOption{grpcauth.WithSuccessLogLevel(slog.LevelDebug)}
-
-	if cfg.tokenCacheSize > 0 {
-		opts = append(opts, grpcauth.WithCacheSize(cfg.tokenCacheSize))
-	}
-
-	return auth.NewTokenReviewValidator("", audience, cfg.tokenReviewQPS, cfg.tokenReviewBurst, opts...)
 }
 
 // newAuthInterceptor builds caller authentication for the deployment role
