@@ -64,8 +64,8 @@ type Spec struct {
 	// Background tasks run until shutdown begins, when their context ends;
 	// one returning an error stops the server.
 	Background []func(ctx context.Context) error
-	// StopTimeout bounds the wait for requests in flight at shutdown; zero
-	// waits for none.
+	// StopTimeout bounds the wait for requests in flight at shutdown; both
+	// roles set a positive value.
 	StopTimeout time.Duration
 }
 
@@ -114,6 +114,8 @@ func Run(ctx context.Context, role Role, opts Options) error {
 		KubeClientBurst: k8s.Burst,
 	})
 	if err != nil {
+		conns.Shutdown(ctx)
+
 		return fmt.Errorf("failed to initialize pipeline: %w", err)
 	}
 
@@ -121,6 +123,8 @@ func Run(ctx context.Context, role Role, opts Options) error {
 
 	spec, err := role.Server(ctx, raw, opts, conns)
 	if err != nil {
+		conns.Shutdown(ctx)
+
 		return err
 	}
 

@@ -18,6 +18,9 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,6 +37,7 @@ import (
 	"github.com/nvidia/nvsentinel/commons/pkg/healthpub"
 	pb "github.com/nvidia/nvsentinel/data-models/pkg/protos"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/auth"
+	"github.com/nvidia/nvsentinel/platform-connectors/pkg/bootstrap"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/pipeline"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/server"
 	"github.com/nvidia/nvsentinel/store-client/pkg/datastore"
@@ -206,6 +210,8 @@ func TestInterceptorChain_AsWired(t *testing.T) {
 	gate := &indexGate{}
 	recorder := &recordingConnector{}
 
+	// The same three, in the order role.Server wires them (TestServer_WiresTheRole
+	// pins the count); built by hand here so the validator can be a fake.
 	grpcServer := grpc.NewServer(grpc.ChainUnaryInterceptor(authInterceptor, idempotencyInterceptor, readinessInterceptor(gate)))
 	pb.RegisterPlatformConnectorServer(grpcServer, &server.PlatformConnectorServer{Pipeline: pipeline.New(), Connector: recorder})
 
@@ -255,4 +261,83 @@ func TestInterceptorChain_AsWired(t *testing.T) {
 	require.Equal(t, "pod-uid-1#batch-1#0", got.Events[0].Metadata[datastore.HealthEventIdempotencyKeyMetadataField])
 	require.Equal(t, "pod-uid-1#batch-1#1", got.Events[1].Metadata[datastore.HealthEventIdempotencyKeyMetadataField])
 	require.Equal(t, "node-a", got.Events[1].NodeName, "a blank node name is pinned to the token's node")
+}
+
+// stubKubeconfig points the TokenReview client at an address nothing serves;
+// building the client needs no call.
+func stubKubeconfig(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "kubeconfig")
+	require.NoError(t, os.WriteFile(path, []byte(`apiVersion: v1
+kind: Config
+clusters:
+  - name: test
+    cluster:
+      server: https://127.0.0.1:1
+contexts:
+  - name: test
+    context:
+      cluster: test
+      user: test
+current-context: test
+users:
+  - name: test
+    user: {}
+`), 0o600))
+
+	return path
+}
+
+// wiredConfig is the deployment object plus the auth keys the role reads.
+func wiredConfig(t *testing.T) map[string]any {
+	t.Helper()
+
+	return configFromJSON(t, strings.Replace(deploymentConfig, `{"deployment": {`,
+		`{"enableNodeBindingAuth": "true", "AuthAudience": "aud", "AuthCrossNodeServiceAccounts": [], "deployment": {`, 1))
+}
+
+// TestServer_WiresTheRole: Connectors takes the best-effort timeout from the
+// deployment object; Server hands bootstrap the three interceptors in order,
+// the gate as the readiness condition (open at once without a store), the
+// stop timeout, a TCP listener, and in TLS mode the credentials plus the
+// certificate watcher as a background task.
+func TestServer_WiresTheRole(t *testing.T) {
+	ctx := context.Background()
+	raw := wiredConfig(t)
+	opts := bootstrap.Options{KubeconfigPath: stubKubeconfig(t)}
+
+	plain, err := New(Options{ListenAddr: "127.0.0.1:0", InsecureDevelopmentMode: true})
+	require.NoError(t, err)
+
+	mode, err := plain.Connectors(raw)
+	require.NoError(t, err)
+	require.False(t, mode.Queued)
+	require.Equal(t, 10*time.Second, mode.BestEffortTimeout, "ConditionUpdateTimeout from the deployment object")
+
+	spec, err := plain.Server(ctx, raw, opts, &bootstrap.Connectors{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = spec.Listener.Close() })
+
+	require.Len(t, spec.Interceptors, 3, "auth, idempotency, readiness")
+	require.NoError(t, spec.Ready(), "no store connector: nothing to verify, ready at once")
+	require.Equal(t, stopTimeout, spec.StopTimeout)
+	require.Empty(t, spec.Background, "plaintext: no certificate watcher")
+	require.Len(t, spec.ServerOptions, 3, "keepalive and the two buffers, no credentials")
+	require.Equal(t, "tcp", spec.Listener.Addr().Network())
+
+	dir := t.TempDir()
+	writeSelfSignedPair(t, dir)
+
+	secure, err := New(Options{ListenAddr: "127.0.0.1:0", TLSCertDir: dir})
+	require.NoError(t, err)
+	_, err = secure.Connectors(raw)
+	require.NoError(t, err)
+
+	tlsSpec, err := secure.Server(ctx, raw, opts, &bootstrap.Connectors{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tlsSpec.Listener.Close() })
+
+	require.Len(t, tlsSpec.ServerOptions, 4, "the TLS credentials join the options")
+	require.Len(t, tlsSpec.Background, 1, "the certificate watcher runs in the background")
 }

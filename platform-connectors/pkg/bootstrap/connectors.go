@@ -182,6 +182,8 @@ func (c *Connectors) addSink(ctx context.Context, raw map[string]any) error {
 		return fmt.Errorf("failed to initialize gRPC sink connector: %w", err)
 	}
 
+	// The best-effort label is lowercase like the metric names; the queue
+	// name above keeps the DaemonSet's existing "grpcSink" metric names.
 	c.add(ctx, queue, "grpcsink", c.sink, true)
 
 	return nil

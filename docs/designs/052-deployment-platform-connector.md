@@ -316,7 +316,7 @@ If a datastore outage longer than the monitors' retry window ever has to be surv
 
 ### Pinning each node to one replica
 
-**Rejected.** Give the replicas stable names and have each monitor pick its replica by hashing its node name, so one replica is the only writer for a node, as the DaemonSet pod is today. Order per node holds while that replica is up. But every rollout, crash or node drain takes it down, and then either the nodes pinned to it stop publishing until it is back, so a third of the fleet pauses on every restart, or they fail over to another replica and the ordering problem comes straight back. The safe version needs a hand-off protocol in the database, and the four components that report about many nodes would have to split each batch by node and hold a connection to every replica.
+**Rejected.** Give the replicas stable names and have each monitor pick its replica by hashing its node name, so one replica is the only writer for a node, as the DaemonSet pod is today. Order per node holds while that replica is up. But every rollout, crash or node drain takes it down, and then either the nodes pinned to it stop publishing until it is back, so a third of the fleet pauses on every restart, or they fail over to another replica and the ordering problem comes straight back. The safe version needs a hand-off protocol in the database, and the five components that report about many nodes would have to split each batch by node and hold a connection to every replica.
 
 ### Node conditions from a change-stream consumer
 

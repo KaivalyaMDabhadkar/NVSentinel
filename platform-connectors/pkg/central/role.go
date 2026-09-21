@@ -53,8 +53,8 @@ import (
 
 // AppName is the deployment platform connector's application name: main
 // names the logger, the audit log and the tracing service with it, and the
-// chart derives the Kubernetes objects, the TLS certificate and the audience
-// from the same name.
+// chart derives the Kubernetes objects and the TLS certificate from the same
+// name.
 const AppName = "platform-connector-deployment"
 
 const (

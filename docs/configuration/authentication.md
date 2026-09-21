@@ -187,7 +187,7 @@ cluster already uses.
 | `node_claim_absent` | Deployment platform connector only: the token is bound to a pod that never scheduled, so there is no node to pin its events to. |
 | `missing_node_name` | An event carried no node name and none could be stamped. |
 | `token_invalid` | TokenReview rejected the token. |
-| `malformed_credentials` | The authorization header was duplicated, or did not use the Bearer scheme. A *completely absent* header is not a violation — that caller is accepted and pinned to the connector's node. |
+| `malformed_credentials` | The authorization header was duplicated, or did not use the Bearer scheme. On the node-local socket a *completely absent* header is not a violation — that caller is accepted and pinned to the connector's node; on the deployment platform connector it is counted as `token_missing`. |
 | `validator_unavailable` / `validator_timeout` / `validator_error` | The API server could not be reached, or returned no identity. With `failOpenOnUnavailable: true`, `validator_unavailable` and `validator_timeout` still increment this counter but fall back to a degraded node-local scope instead of rejecting the request — see [`failOpenOnUnavailable`](#failopenonunavailable) for how that scope treats a blank vs. a differently-named node. |
 
 A healthy cluster reports zero violations. A sustained non-zero
@@ -210,7 +210,7 @@ old chart does not write it.
 The deployment platform connector reads the same node-binding settings as the
 DaemonSet, from the same `config.json`: `enableNodeBindingAuth`, `AuthAudience`
 and `AuthCrossNodeServiceAccounts` mean exactly what they mean above, and node
-binding must be enabled for it (the chart refuses to render it otherwise). One
+binding must be enabled for it (the connector refuses to start otherwise). One
 thing differs because it has no local node: **every caller must present a
 token**, bound to a running pod on a scheduled node. The node named in that
 token is the node the caller may report on; the cross-node list is the only
@@ -218,11 +218,6 @@ way to name other nodes. `AuthMode: audit` and `AuthFailOpenOnUnavailable` are
 socket settings: with no node to fall back on, the deployment platform
 connector always enforces, and logs a warning when either is set.
 
-A monitor that publishes to the deployment platform connector
-(`publishTo: deployment`) mounts a second projected token at
-`/var/run/secrets/nvsentinel/platform-connector-deployment/token`, minted for
-the same audience as the socket token, `global.platformConnectorAuth.audience`,
-with the lifetime `global.platformConnectorDeployment.auth.tokenExpirationSeconds`
-(default 3600, validated like `tokenExpirationSeconds` above). One audience for
-both roles means a monitor's token stays valid when it switches from the socket
-to the Deployment.
+Both roles read one `AuthAudience`, so a monitor's token stays valid when it
+switches from the socket to the Deployment; how the chart projects that token
+for a publisher is described with the chart.

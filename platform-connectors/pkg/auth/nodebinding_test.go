@@ -1012,7 +1012,8 @@ func TestNodeBinding_CrossNamespaceAllowlistedIdentity(t *testing.T) {
 }
 
 // The deployment platform connector: no local node, every caller must
-// present a pod-bound token, and only the listed publishers may call.
+// present a pod-bound token, and the cross-node list alone grants reach
+// beyond the token's node.
 const (
 	fleetPublisherSA = "system:serviceaccount:nvsentinel:gpu-health-monitor"
 	fleetNodeA       = "gpu-node-a"

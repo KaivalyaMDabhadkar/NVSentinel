@@ -16,11 +16,13 @@ package bootstrap_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +34,47 @@ import (
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/bootstrap"
 	"github.com/nvidia/nvsentinel/platform-connectors/pkg/nodelocal"
 )
+
+// testConfig is a config.json with every connector off and node binding
+// disabled, enough for Run to come up without a cluster.
+const testConfig = `{
+	"enableNodeBindingAuth": "false",
+	"enableK8sPlatformConnector": "false", "enableGRPCSinkConnector": "false", "enablePromPlatformConnector": "false",
+	"enableMongoDBStorePlatformConnector": "false", "enablePostgresDBStorePlatformConnector": "false",
+	"K8sConnectorQps": 5.00, "K8sConnectorBurst": 10,
+	"MaxNodeConditionMessageLength": 1024, "CompactedHealthEventMsgLen": 256,
+	"pipeline": [{"name": "Deduplicator", "enabled": false, "config": "/nonexistent/dedup.toml"}]
+}`
+
+func writeTestConfig(t *testing.T) string {
+	t.Helper()
+
+	path := filepath.Join(t.TempDir(), "config.json")
+	require.NoError(t, os.WriteFile(path, []byte(testConfig), 0o600))
+
+	return path
+}
+
+// tcpRole is the smallest deployment-shaped role: a TCP listener, no
+// interceptors, and whatever readiness condition and background tasks the
+// test hands it.
+type tcpRole struct {
+	ready      func() error
+	background []func(context.Context) error
+}
+
+func (tcpRole) Connectors(map[string]any) (bootstrap.ConnectorOptions, error) {
+	return bootstrap.ConnectorOptions{BestEffortTimeout: time.Second}, nil
+}
+
+func (r tcpRole) Server(context.Context, map[string]any, bootstrap.Options, *bootstrap.Connectors) (*bootstrap.Spec, error) {
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+
+	return &bootstrap.Spec{Listener: lis, Ready: r.ready, Background: r.background, StopTimeout: time.Second}, nil
+}
 
 func freePort(t *testing.T) int {
 	t.Helper()
@@ -49,17 +92,8 @@ func freePort(t *testing.T) int {
 // config.json, answers a batch on its socket and the probes on the metrics port,
 // and returns nil once its context ends, with the socket file gone.
 func TestRun_ServesAndStopsCleanly(t *testing.T) {
-	dir := t.TempDir()
-	socket := filepath.Join(dir, "pc.sock")
-	configPath := filepath.Join(dir, "config.json")
-	require.NoError(t, os.WriteFile(configPath, []byte(`{
-		"enableNodeBindingAuth": "false",
-		"enableK8sPlatformConnector": "false", "enableGRPCSinkConnector": "false", "enablePromPlatformConnector": "false",
-		"enableMongoDBStorePlatformConnector": "false", "enablePostgresDBStorePlatformConnector": "false",
-		"K8sConnectorQps": 5.00, "K8sConnectorBurst": 10,
-		"MaxNodeConditionMessageLength": 1024, "CompactedHealthEventMsgLen": 256,
-		"pipeline": [{"name": "Deduplicator", "enabled": false, "config": "/nonexistent/dedup.toml"}]
-	}`), 0o600))
+	socket := filepath.Join(t.TempDir(), "pc.sock")
+	configPath := writeTestConfig(t)
 
 	port := freePort(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -111,4 +145,83 @@ func TestRun_ServesAndStopsCleanly(t *testing.T) {
 
 	_, err = os.Stat(socket)
 	require.True(t, os.IsNotExist(err), "closing the listener removes the socket file")
+}
+
+// TestRun_BackgroundFailureEndsTheRun: a background task's error (the index
+// wait giving up after its budget) stops the server, shuts down and comes
+// back from Run, so the process exits and Kubernetes restarts it.
+func TestRun_BackgroundFailureEndsTheRun(t *testing.T) {
+	role := tcpRole{background: []func(context.Context) error{
+		func(context.Context) error { return errors.New("index budget spent") },
+	}}
+
+	err := bootstrap.Run(context.Background(), role, bootstrap.Options{ConfigPath: writeTestConfig(t), MetricsPort: freePort(t)})
+
+	require.ErrorContains(t, err, "index budget spent")
+}
+
+// TestRun_MetricsServerFailureEndsTheRun: the metrics and probe server not
+// coming up is fatal, since the probes live on it.
+func TestRun_MetricsServerFailureEndsTheRun(t *testing.T) {
+	port := freePort(t)
+	taken, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = taken.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	err = bootstrap.Run(ctx, tcpRole{}, bootstrap.Options{ConfigPath: writeTestConfig(t), MetricsPort: port})
+
+	require.ErrorContains(t, err, "metrics and probe server")
+}
+
+// TestRun_ReadyzFollowsTheRole: /readyz answers the role's condition while
+// serving, so a replica whose index is unverified stays out of the Service.
+func TestRun_ReadyzFollowsTheRole(t *testing.T) {
+	var unready atomic.Bool
+
+	unready.Store(true)
+
+	role := tcpRole{ready: func() error {
+		if unready.Load() {
+			return errors.New("index not verified yet")
+		}
+
+		return nil
+	}}
+
+	port := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+
+	go func() {
+		done <- bootstrap.Run(ctx, role, bootstrap.Options{ConfigPath: writeTestConfig(t), MetricsPort: port})
+	}()
+
+	readyz := fmt.Sprintf("http://127.0.0.1:%d/readyz", port)
+	require.Eventually(t, func() bool { return httpStatus(readyz) == http.StatusServiceUnavailable }, 10*time.Second, 50*time.Millisecond)
+
+	unready.Store(false)
+	require.Eventually(t, func() bool { return httpStatus(readyz) == http.StatusOK }, 10*time.Second, 50*time.Millisecond)
+
+	cancel()
+
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("Run did not return after its context ended")
+	}
+}
+
+func httpStatus(url string) int {
+	resp, err := http.Get(url) //nolint:gosec,noctx // a probe of the test's own server
+	if err != nil {
+		return 0
+	}
+
+	_ = resp.Body.Close()
+
+	return resp.StatusCode
 }

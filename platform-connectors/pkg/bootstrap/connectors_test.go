@@ -157,3 +157,19 @@ func TestAdd_QueuedDirectAndBestEffort(t *testing.T) {
 	require.EqualError(t, direct.Set[0].ProcessBatch(ctx, batch), "boom", "a member that decides the reply fails the batch")
 	require.NoError(t, direct.Set[1].ProcessBatch(ctx, batch), "a best-effort member never fails the batch")
 }
+
+// TestReadiness_ShuttingDownWinsOverReady: /readyz follows the role's
+// condition until shutdown begins, then answers unready whatever the role
+// says, so the probes take the replica out of the Service first.
+func TestReadiness_ShuttingDownWinsOverReady(t *testing.T) {
+	roleReady := errors.New("not yet")
+	probe := &readiness{ready: func() error { return roleReady }}
+
+	require.ErrorIs(t, probe.Ready(context.Background()), roleReady)
+
+	roleReady = nil
+	require.NoError(t, probe.Ready(context.Background()))
+
+	probe.shuttingDown.Store(true)
+	require.ErrorContains(t, probe.Ready(context.Background()), "shutting down")
+}
