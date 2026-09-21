@@ -91,8 +91,10 @@ var bestEffortFailures = promauto.NewCounterVec(prometheus.CounterOpts{
 // timeout is logged and counted under name, and the batch is acknowledged
 // anyway. It is for work that repairs itself, like node conditions the next
 // report rewrites, and for forwards nobody waits for. When the caller's own
-// context ends first, the connector was cut short with the request and
-// nothing is counted: the batch is not acknowledged and will be resent.
+// context ends first, the caller has given up on this attempt and will resend
+// the batch under the same idempotency key, so the cut-short work is not a
+// failure of this connector: nothing is counted and nil is returned, and the
+// request's outcome stays with the members that decide it (the store).
 func BestEffort(name string, c Connector, timeout time.Duration) Connector {
 	return &bestEffort{name: name, next: c, timeout: timeout}
 }
@@ -113,8 +115,8 @@ func (b *bestEffort) ProcessBatch(ctx context.Context, he *pb.HealthEvents) erro
 	}
 
 	if ctx.Err() != nil {
-		// The request ended: the batch is not acknowledged and will be
-		// resent, so this is not a failure of ours.
+		// The caller is gone and will resend; the connector was cut short
+		// with the request, which is not a failure of ours.
 		slog.DebugContext(ctx, "Connector cut short with the request", "connector", b.name, "error", err)
 
 		return nil
