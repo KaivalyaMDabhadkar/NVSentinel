@@ -130,6 +130,21 @@ PERMANENT_STATUS_CODES = frozenset(
     }
 )
 
+
+def rpc_status_code(error: grpc.RpcError) -> grpc.StatusCode | None:
+    """The status code carried by a gRPC failure, or None when it carries none.
+
+    Failures raised by a live channel are ``grpc.Call`` instances and always
+    carry a code. A bare ``grpc.RpcError`` does not; it expresses no verdict
+    either way, so callers keep treating it as retryable.
+    """
+    code_getter = getattr(error, "code", None)
+    if not callable(code_getter):
+        return None
+    code = code_getter()
+    return code if isinstance(code, grpc.StatusCode) else None
+
+
 # Go-style durations ("5m", "1m30s", "500ms"); bare numbers are rejected the
 # same way Go's time.ParseDuration rejects them, so both clients read the
 # same value the same way.
@@ -415,8 +430,9 @@ class DirectPublisher:
                 metrics.health_events_direct_publish_succeed.inc()
                 return True
             except grpc.RpcError as e:
-                # The synchronous stub's errors are grpc.Call objects too.
-                code = e.code()
+                # A live channel's errors are grpc.Call objects and carry a
+                # code; a bare RpcError carries none and is retried.
+                code = rpc_status_code(e)
                 if code in PERMANENT_STATUS_CODES:
                     return self._drop(batch, DROP_REASON_REJECTED, f"the server rejected it: {e}")
                 if code == grpc.StatusCode.UNAVAILABLE:

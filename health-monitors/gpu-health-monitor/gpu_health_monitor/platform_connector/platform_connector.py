@@ -61,20 +61,6 @@ RETRYABLE_STATUS_CODES = frozenset(
 )
 
 
-def _rpc_status_code(error: grpc.RpcError) -> grpc.StatusCode | None:
-    """The status code carried by a gRPC failure, or None when it carries none.
-
-    Failures raised by a live channel are ``grpc.Call`` instances and always
-    carry a code. A bare ``grpc.RpcError`` does not; it expresses no verdict
-    either way, so callers keep treating it as retryable.
-    """
-    code_getter = getattr(error, "code", None)
-    if not callable(code_getter):
-        return None
-    code = code_getter()
-    return code if isinstance(code, grpc.StatusCode) else None
-
-
 def _serialized_event_state(method: Callable[..., Any]) -> Callable[..., Any]:
     """Serialize cache/counter transitions across callback and watchdog threads."""
 
@@ -887,7 +873,7 @@ class PlatformConnectorEventProcessor(dcgmtypes.CallbackInterface):
                     return True
                 except grpc.RpcError as e:
                     log.error(f"Failed to send health event {health_events} to UDS: {e}")
-                    code = _rpc_status_code(e)
+                    code = direct_publisher_mod.rpc_status_code(e)
                     if code is not None and code not in RETRYABLE_STATUS_CODES:
                         # The same request will earn the same status next time,
                         # so stop here instead of spending the backoff budget.

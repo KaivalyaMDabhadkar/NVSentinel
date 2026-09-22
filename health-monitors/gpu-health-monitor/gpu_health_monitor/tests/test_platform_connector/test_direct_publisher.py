@@ -431,6 +431,17 @@ class TestDirectPublisherDelivery(unittest.TestCase):
         second_key = stub.calls[3][direct_publisher.IDEMPOTENCY_KEY_HEADER]
         self.assertNotIn(second_key, first_batch_keys, "each batch needs its own key")
 
+    def test_error_without_status_code_is_retried(self) -> None:
+        # A bare RpcError carries no verdict, so it is retried like a transport failure.
+        stub = ScriptedStub(script=[grpc.RpcError(), None])
+        publisher = make_publisher(stub)
+        self.addCleanup(publisher.close)
+        before_rejected = dropped(direct_publisher.DROP_REASON_REJECTED)
+
+        self.assertTrue(publisher.publish(sample_events()))
+        self.assertEqual(len(stub.calls), 2)
+        self.assertEqual(dropped(direct_publisher.DROP_REASON_REJECTED), before_rejected)
+
     def test_retry_window_expiry_drops_with_reason(self) -> None:
         # Every attempt fails; the elapsed-time window must end the retries.
         stub = AlwaysUnavailable()
