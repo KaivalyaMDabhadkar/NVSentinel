@@ -23,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -50,9 +49,7 @@ func TokenInterceptor(tokenPath string) grpc.UnaryClientInterceptor {
 			return fmt.Errorf("reading SA token from %q: %w", tokenPath, err)
 		}
 
-		// A Secret-mounted token may end in a newline, which gRPC refuses in a
-		// header value; a projected token never does.
-		token := strings.TrimSpace(string(tokenBytes))
+		token := string(tokenBytes)
 
 		// An empty file is a broken mount, not a credential. Sending "Bearer "
 		// would get a generic "token not authenticated" back from the server and
