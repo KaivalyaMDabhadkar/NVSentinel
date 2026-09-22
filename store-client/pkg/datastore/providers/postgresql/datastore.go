@@ -81,6 +81,15 @@ func NewPostgreSQLStore(ctx context.Context, config datastore.DataStoreConfig) (
 		return nil, fmt.Errorf("failed to ping PostgreSQL database: %w", err)
 	}
 
+	// Create tables if they don't exist, one component at a time. This runs
+	// before the pool limit is applied: the setup lock holds one connection
+	// while the setup statements use another, which a pool limited to a
+	// single connection could never hand out.
+	if err := withSetupLock(ctx, db, func() error { return createTables(ctx, db) }); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to create tables: %w", err)
+	}
+
 	// Set connection pool settings
 	ConfigureConnectionPool(db, config.Options)
 
@@ -88,12 +97,6 @@ func NewPostgreSQLStore(ctx context.Context, config datastore.DataStoreConfig) (
 		otelsql.WithAttributes(semconv.DBSystemPostgreSQL),
 	); err != nil {
 		slog.Warn("Failed to register DB stats metrics", "error", err)
-	}
-
-	// Create tables if they don't exist, one component at a time.
-	if err := withSetupLock(ctx, db, func() error { return createTables(ctx, db) }); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
 
 	store := &PostgreSQLDataStore{
@@ -636,7 +639,9 @@ var setupLockPoll = time.Second
 
 // withSetupLock runs setup while holding the setup lock. The lock is
 // session-level: it lives on one connection and is released with it, so a
-// component that dies mid-setup does not keep the others out. Waiters poll
+// component that dies mid-setup does not keep the others out. The setup's
+// own statements run on other pooled connections, so the pool must not be
+// limited to one connection yet when this runs. Waiters poll
 // pg_try_advisory_lock instead of blocking in pg_advisory_lock, because a
 // session blocked inside a statement holds a snapshot, and a concurrent index
 // build in the holder's setup would wait for that snapshot while the waiter

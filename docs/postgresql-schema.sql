@@ -135,9 +135,10 @@ AND (
 CREATE INDEX IF NOT EXISTS idx_health_events_updated_desc ON health_events(updated_at DESC);
 
 -- Unique partial index behind the idempotency keys the platform connectors write
--- (ADR 052). The components build it CONCURRENTLY at start, one at a time under
--- an advisory lock; CONCURRENTLY cannot run inside a transaction, so it is left
--- out of this script.
+-- (ADR 052). This script creates it without CONCURRENTLY, which cannot run inside
+-- a transaction; the components verify it at start and build or rebuild it
+-- CONCURRENTLY when it is missing or broken, one component at a time under an
+-- advisory lock.
 CREATE UNIQUE INDEX IF NOT EXISTS healthevent_idempotency_key_unique ON health_events ((document #>> '{healthevent,metadata,idempotencyKey}'))
 WHERE (document #>> '{healthevent,metadata,idempotencyKey}') IS NOT NULL;
 
