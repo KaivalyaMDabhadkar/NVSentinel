@@ -90,8 +90,8 @@ func NewPostgreSQLStore(ctx context.Context, config datastore.DataStoreConfig) (
 		slog.Warn("Failed to register DB stats metrics", "error", err)
 	}
 
-	// Create tables if they don't exist
-	if err := createTables(ctx, db); err != nil {
+	// Create tables if they don't exist, one component at a time.
+	if err := withSetupLock(ctx, db, func() error { return createTables(ctx, db) }); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("failed to create tables: %w", err)
 	}
@@ -621,9 +621,71 @@ func createChangeTriggers(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// setupLockKey is the advisory lock a component holds while it sets the
+// tables up, so the setups run one at a time; any value, the same in every
+// component. The idempotency index is built CONCURRENTLY, and PostgreSQL
+// aborts such a build as the deadlock victim whenever another session's DDL
+// on the table arrives during it, even a statement that changes nothing,
+// after blocking that session for the rest of the build. Without the lock,
+// components starting together would abort each other's build on a large
+// table again and again.
+const setupLockKey int64 = 2026091401
+
+// setupLockPoll is how often a waiting component tries the lock again.
+var setupLockPoll = time.Second
+
+// withSetupLock runs setup while holding the setup lock. The lock is
+// session-level: it lives on one connection and is released with it, so a
+// component that dies mid-setup does not keep the others out. Waiters poll
+// pg_try_advisory_lock instead of blocking in pg_advisory_lock, because a
+// session blocked inside a statement holds a snapshot, and a concurrent index
+// build in the holder's setup would wait for that snapshot while the waiter
+// waits for the lock: the deadlock the lock is there to prevent.
+func withSetupLock(ctx context.Context, db *sql.DB, setup func() error) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquiring a connection for the setup lock: %w", err)
+	}
+
+	defer conn.Close()
+
+	for waited := false; ; waited = true {
+		var locked bool
+		if err := conn.QueryRowContext(ctx, "SELECT pg_try_advisory_lock($1)", setupLockKey).Scan(&locked); err != nil {
+			return fmt.Errorf("taking the setup lock: %w", err)
+		}
+
+		if locked {
+			if waited {
+				slog.Info("Setup lock acquired")
+			}
+
+			break
+		}
+
+		if !waited {
+			slog.Info("Another component is setting the tables up; waiting for the setup lock")
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(setupLockPoll):
+		}
+	}
+
+	defer func() {
+		if _, err := conn.ExecContext(ctx, "SELECT pg_advisory_unlock($1)", setupLockKey); err != nil {
+			slog.Warn("Releasing the setup lock failed; the connection's close releases it", "error", err)
+		}
+	}()
+
+	return setup()
+}
+
 // idempotencyIndexBuildAttempts and idempotencyIndexRetryDelay bound how often
 // a CONCURRENTLY build of the idempotency index is tried again after
-// PostgreSQL chose it as a deadlock victim (see ensureIdempotencyIndex).
+// PostgreSQL aborted it as a deadlock victim (see ensureIdempotencyIndex).
 const idempotencyIndexBuildAttempts = 3
 
 var idempotencyIndexRetryDelay = 2 * time.Second
@@ -632,22 +694,31 @@ var idempotencyIndexRetryDelay = 2 * time.Second
 // idempotency index, or repairs it, without blocking the health event
 // inserts of the other components: CONCURRENTLY, unlike the indexes above,
 // because it is added to tables that are already large and written to.
-// Every component runs this at start, so it must tolerate another one
-// building the same index at the same time: a build in progress is left
-// alone; a leftover of a failed build (INVALID) or an index of another
-// definition is dropped and built again. The result is verified, so a build
-// another session aborted is reported rather than skipped.
+// A build in progress is left alone; a leftover of a failed build (INVALID)
+// or an index of another definition is dropped and built again. The result
+// is verified, so a build another session aborted is reported rather than
+// skipped.
 //
-// The components also start together, and their table setup takes strong
-// locks on the same table (adding columns, building the other indexes). A
-// CONCURRENTLY build waits for such transactions, and PostgreSQL may choose
-// it as the deadlock victim, which leaves an INVALID index behind. The build
-// is then tried again, a few times: the next pass finds the index another
-// session finished, leaves a build still running alone, or drops the
-// leftover and builds once more.
+// The setup lock keeps the components' setups from overlapping, so their
+// DDL cannot abort this build. The retry below covers a component still on
+// older code during an upgrade, whose setup takes strong locks on the table:
+// PostgreSQL then aborts the concurrent build as the deadlock victim and
+// leaves an INVALID index behind, and the next pass finds the index another
+// session finished, leaves a build still running alone, or drops the leftover
+// and builds once more.
+//
+// Documents that already share a key make the unique build fail for good: the
+// error names the key and how to find the rows, and nothing is retried.
 func ensureIdempotencyIndex(ctx context.Context, db *sql.DB) error {
 	for attempt := 1; ; attempt++ {
 		err := ensureIdempotencyIndexOnce(ctx, db)
+		if pqErr, ok := pgError(err); ok && pqErr.Code == pqerror.UniqueViolation {
+			return fmt.Errorf("the health events table holds documents that share an idempotency key, so the unique "+
+				"index cannot be built until the extra rows are removed (%s); they are listed by: SELECT document #>> "+
+				"'%s' AS key, count(*) FROM health_events GROUP BY 1 HAVING count(*) > 1: %w",
+				pqErr.Detail, idempotencyKeyJSONPath, err)
+		}
+
 		if err == nil || attempt == idempotencyIndexBuildAttempts || !isDeadlockVictim(err) {
 			return err
 		}
@@ -664,10 +735,19 @@ func ensureIdempotencyIndex(ctx context.Context, db *sql.DB) error {
 	}
 }
 
+// idempotencyKeyJSONPath is the key's path in the stored document, as the
+// index expression spells it.
+const idempotencyKeyJSONPath = "{healthevent,metadata," + datastore.HealthEventIdempotencyKeyMetadataField + "}"
+
+// pgError returns the PostgreSQL error inside err, if there is one.
+func pgError(err error) (*pq.Error, bool) {
+	return errors.AsType[*pq.Error](err)
+}
+
 // isDeadlockVictim reports whether PostgreSQL aborted the statement to
 // resolve a deadlock.
 func isDeadlockVictim(err error) bool {
-	pqErr, ok := errors.AsType[*pq.Error](err)
+	pqErr, ok := pgError(err)
 
 	return ok && pqErr.Code == pqerror.TRDeadlockDetected
 }

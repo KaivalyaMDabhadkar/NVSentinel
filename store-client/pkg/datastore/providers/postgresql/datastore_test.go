@@ -22,6 +22,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/lib/pq"
@@ -406,6 +407,48 @@ func TestEnsureIdempotencyIndex(t *testing.T) {
 		assert.NoError(t, mock.ExpectationsWereMet())
 	})
 
+	t.Run("a valid index with another definition is dropped and built again", func(t *testing.T) {
+		db, mock := newDB(t)
+		mock.ExpectQuery(verifyQuery).
+			WithArgs(datastore.HealthEventIdempotencyIndexName, healthEventsTable).
+			WillReturnRows(sqlmock.NewRows(verifyColumns).AddRow(true, true, 1,
+				strings.Replace(validIndexDef, "IS NOT NULL)", "IS NOT NULL AND (node_name = 'node-a'::text))", 1),
+				"(((document #>> '{healthevent,metadata,idempotencyKey}'::text[]) IS NOT NULL) AND (node_name = 'node-a'::text))"))
+		expectBuilding(mock, false)
+		mock.ExpectExec(dropStatement).WillReturnResult(sqlmock.NewResult(0, 0))
+		mock.ExpectExec(createStatement).WillReturnResult(sqlmock.NewResult(0, 0))
+		expectIndex(mock, true)
+
+		require.NoError(t, ensureIdempotencyIndex(context.Background(), db))
+		assert.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("a failed drop is reported and no create follows", func(t *testing.T) {
+		db, mock := newDB(t)
+		expectIndex(mock, false)
+		expectBuilding(mock, false)
+		mock.ExpectExec(dropStatement).WillReturnError(errors.New("lock timeout"))
+
+		err := ensureIdempotencyIndex(context.Background(), db)
+		require.ErrorContains(t, err, "dropping the mismatched idempotency index")
+		assert.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("documents sharing a key stop the build and name the key", func(t *testing.T) {
+		db, mock := newDB(t)
+		expectMissing(mock)
+		mock.ExpectExec(createStatement).WillReturnError(&pq.Error{
+			Code:   pqerror.UniqueViolation,
+			Detail: "Key ((document #>> '{healthevent,metadata,idempotencyKey}'::text[]))=(dup-2) is duplicated.",
+		})
+
+		err := ensureIdempotencyIndex(context.Background(), db)
+		require.ErrorContains(t, err, "share an idempotency key")
+		require.ErrorContains(t, err, "dup-2")
+		require.ErrorContains(t, err, "GROUP BY 1 HAVING count(*) > 1")
+		assert.NoError(t, mock.ExpectationsWereMet(), "no retry: the next build would fail the same way")
+	})
+
 	t.Run("a build that did not end valid is reported", func(t *testing.T) {
 		db, mock := newDB(t)
 		expectMissing(mock)
@@ -498,5 +541,60 @@ func TestEnsureIdempotencyIndex(t *testing.T) {
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "disk full")
 		assert.NoError(t, mock.ExpectationsWereMet())
+	})
+}
+
+// TestWithSetupLock: the table setup runs once the advisory lock is held,
+// waiting while another component holds it, and releases the lock afterwards,
+// also when the setup fails.
+func TestWithSetupLock(t *testing.T) {
+	setupLockPoll = time.Millisecond
+
+	t.Cleanup(func() { setupLockPoll = time.Second })
+
+	lockQuery := "SELECT pg_try_advisory_lock"
+	unlockQuery := "SELECT pg_advisory_unlock"
+	locked := func(v bool) *sqlmock.Rows { return sqlmock.NewRows([]string{"pg_try_advisory_lock"}).AddRow(v) }
+
+	t.Run("waits for the lock, runs the setup, releases the lock", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		t.Cleanup(func() { db.Close() })
+
+		mock.ExpectQuery(lockQuery).WithArgs(setupLockKey).WillReturnRows(locked(false))
+		mock.ExpectQuery(lockQuery).WithArgs(setupLockKey).WillReturnRows(locked(true))
+		mock.ExpectExec(unlockQuery).WithArgs(setupLockKey).WillReturnResult(sqlmock.NewResult(0, 0))
+
+		ran := false
+		require.NoError(t, withSetupLock(context.Background(), db, func() error { ran = true; return nil }))
+		assert.True(t, ran)
+		assert.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("a failed setup still releases the lock", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		t.Cleanup(func() { db.Close() })
+
+		mock.ExpectQuery(lockQuery).WithArgs(setupLockKey).WillReturnRows(locked(true))
+		mock.ExpectExec(unlockQuery).WithArgs(setupLockKey).WillReturnResult(sqlmock.NewResult(0, 0))
+
+		err = withSetupLock(context.Background(), db, func() error { return errors.New("setup failed") })
+		require.ErrorContains(t, err, "setup failed")
+		assert.NoError(t, mock.ExpectationsWereMet())
+	})
+
+	t.Run("gives up with the context while waiting", func(t *testing.T) {
+		db, mock, err := sqlmock.New()
+		require.NoError(t, err)
+		t.Cleanup(func() { db.Close() })
+
+		mock.ExpectQuery(lockQuery).WithArgs(setupLockKey).WillReturnRows(locked(false))
+
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		err = withSetupLock(ctx, db, func() error { t.Fatal("setup must not run"); return nil })
+		require.ErrorIs(t, err, context.Canceled)
 	})
 }
