@@ -17,13 +17,15 @@ package postgresql
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
 	"github.com/XSAM/otelsql"
-	_ "github.com/lib/pq" // PostgreSQL driver
+	"github.com/lib/pq" // also registers the PostgreSQL driver
+	"github.com/lib/pq/pqerror"
 	"github.com/prometheus/client_golang/prometheus"
 	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
 
@@ -492,6 +494,14 @@ func createTables(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	// Not fatal for this component: the deployment platform connector
+	// verifies the index before it takes writes and stays unready, refusing
+	// batches with a retryable status, until it exists.
+	if err := ensureIdempotencyIndex(ctx, db); err != nil {
+		slog.Error("Failed to ensure the health event idempotency index; the deployment platform connector "+
+			"stays unready until it exists", "index", datastore.HealthEventIdempotencyIndexName, "error", err)
+	}
+
 	// Create change tracking triggers
 	if err := createChangeTriggers(ctx, db); err != nil {
 		return fmt.Errorf("failed to create change triggers: %w", err)
@@ -609,4 +619,90 @@ func createChangeTriggers(ctx context.Context, db *sql.DB) error {
 	}
 
 	return nil
+}
+
+// idempotencyIndexBuildAttempts and idempotencyIndexRetryDelay bound how often
+// a CONCURRENTLY build of the idempotency index is tried again after
+// PostgreSQL chose it as a deadlock victim (see ensureIdempotencyIndex).
+const idempotencyIndexBuildAttempts = 3
+
+var idempotencyIndexRetryDelay = 2 * time.Second
+
+// ensureIdempotencyIndex creates the deployment platform connector's
+// idempotency index, or repairs it, without blocking the health event
+// inserts of the other components: CONCURRENTLY, unlike the indexes above,
+// because it is added to tables that are already large and written to.
+// Every component runs this at start, so it must tolerate another one
+// building the same index at the same time: a build in progress is left
+// alone; a leftover of a failed build (INVALID) or an index of another
+// definition is dropped and built again. The result is verified, so a build
+// another session aborted is reported rather than skipped.
+//
+// The components also start together, and their table setup takes strong
+// locks on the same table (adding columns, building the other indexes). A
+// CONCURRENTLY build waits for such transactions, and PostgreSQL may choose
+// it as the deadlock victim, which leaves an INVALID index behind. The build
+// is then tried again, a few times: the next pass finds the index another
+// session finished, leaves a build still running alone, or drops the
+// leftover and builds once more.
+func ensureIdempotencyIndex(ctx context.Context, db *sql.DB) error {
+	for attempt := 1; ; attempt++ {
+		err := ensureIdempotencyIndexOnce(ctx, db)
+		if err == nil || attempt == idempotencyIndexBuildAttempts || !isDeadlockVictim(err) {
+			return err
+		}
+
+		slog.Warn("Building the health event idempotency index was chosen as a deadlock victim by another "+
+			"component's table setup; trying again",
+			"index", datastore.HealthEventIdempotencyIndexName, "attempt", attempt, "error", err)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(idempotencyIndexRetryDelay):
+		}
+	}
+}
+
+// isDeadlockVictim reports whether PostgreSQL aborted the statement to
+// resolve a deadlock.
+func isDeadlockVictim(err error) bool {
+	pqErr, ok := errors.AsType[*pq.Error](err)
+
+	return ok && pqErr.Code == pqerror.TRDeadlockDetected
+}
+
+// ensureIdempotencyIndexOnce is one pass of ensureIdempotencyIndex.
+func ensureIdempotencyIndexOnce(ctx context.Context, db *sql.DB) error {
+	c := client.NewPostgreSQLClientFromDB(db, healthEventsTable)
+
+	switch err := c.VerifyHealthEventIdempotencyIndex(ctx); {
+	case err == nil:
+		return nil
+	case errors.Is(err, datastore.ErrIndexMissing):
+	case errors.Is(err, datastore.ErrIndexMismatch):
+		building, progressErr := c.IdempotencyIndexBuildInProgress(ctx)
+		if progressErr != nil {
+			return progressErr
+		}
+
+		if building {
+			slog.Info("Health event idempotency index is being built by another session; leaving it alone",
+				"index", datastore.HealthEventIdempotencyIndexName)
+
+			return nil
+		}
+
+		if _, dropErr := db.ExecContext(ctx, client.DropIdempotencyIndexStatement); dropErr != nil {
+			return fmt.Errorf("dropping the mismatched idempotency index: %w", dropErr)
+		}
+	default:
+		return fmt.Errorf("checking the idempotency index: %w", err)
+	}
+
+	if _, err := db.ExecContext(ctx, client.CreateIdempotencyIndexStatement); err != nil {
+		return fmt.Errorf("building the idempotency index: %w", err)
+	}
+
+	return c.VerifyHealthEventIdempotencyIndex(ctx)
 }

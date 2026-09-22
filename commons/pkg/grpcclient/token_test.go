@@ -108,12 +108,11 @@ func TestTokenInterceptor_MissingTokenFile(t *testing.T) {
 	assert.Contains(t, err.Error(), "reading SA token")
 }
 
-func TestTokenInterceptor_SendsTokenFileVerbatim(t *testing.T) {
-	// kubelet writes projected token files with no surrounding whitespace
-	// (verified on-cluster: byte count is identical before and after stripping).
-	// Trimming here would only paper over a mount that is not a projected token
-	// volume at all, so the file is sent exactly as read.
-	tokenPath := writeTestToken(t, "my-token")
+func TestTokenInterceptor_TrimsWhitespaceAroundTheToken(t *testing.T) {
+	// A projected token has no surrounding whitespace, but a token mounted
+	// from a Secret may end in a newline, which gRPC refuses in a header
+	// value. The interceptor sends the trimmed token.
+	tokenPath := writeTestToken(t, "my-token\n")
 	interceptor := TokenInterceptor(tokenPath)
 
 	var capturedCtx context.Context
@@ -130,10 +129,11 @@ func TestTokenInterceptor_SendsTokenFileVerbatim(t *testing.T) {
 }
 
 func TestTokenInterceptor_EmptyTokenFileFailsWithoutCalling(t *testing.T) {
-	// A blank or truncated projected token is a broken mount. Sending
-	// "Bearer " would come back as a generic authentication failure from the
-	// server; failing here names the real problem and costs no round trip.
-	for _, contents := range []string{""} {
+	// A blank or truncated projected token is a broken mount, and so is a file
+	// holding only whitespace. Sending "Bearer " would come back as a generic
+	// authentication failure from the server; failing here names the real
+	// problem and costs no round trip.
+	for _, contents := range []string{"", "\n", " \t\n"} {
 		path := filepath.Join(t.TempDir(), "token")
 		require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
 
