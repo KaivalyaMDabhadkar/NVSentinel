@@ -35,64 +35,44 @@ const (
 	agentName      = "preflight-nccl-loopback"
 	componentClass = "Node"
 	checkName      = "NCCLLoopbackTest"
-
-	// envPublishTarget is the healthpub variable that switches on direct
-	// mode. It is read here only to remember which mode the reporter runs in.
-	envPublishTarget = "HEALTH_PUBLISH_TARGET"
 )
 
 // Socket mode timing. These are variables so tests can shorten them.
 var (
-	// socketWaitTimeout bounds how long socket mode waits for the node-local
-	// platform connector socket file, before dialing and again when the
-	// socket is missing at send time. It keeps the tolerance of the old
-	// reporter, which retried for about 17 seconds, for a node whose
-	// DaemonSet pod is still starting or restarting.
+	// socketWaitTimeout bounds the wait for a socket file that is missing at
+	// send time.
 	socketWaitTimeout  = 20 * time.Second
 	socketPollInterval = 500 * time.Millisecond
 
-	// socketSendTimeout bounds one socket mode Publish call. healthpub sets
-	// no deadline on the socket path, so without this a handler that hangs
-	// would block the check forever. Three minutes covers healthpub's five
-	// attempts of 30 seconds each plus the backoff between them.
+	// socketSendTimeout bounds one socket mode Publish call; healthpub sets no
+	// deadline on the socket path.
 	socketSendTimeout = 3 * time.Minute
 )
 
-// Reporter sends the check's health event to the platform connector through
-// the shared healthpub client. With HEALTH_PUBLISH_TARGET set it publishes
-// directly to the deployment platform connector; otherwise it uses the
-// node-local Unix socket as before.
+// Reporter sends the check's health event through the shared healthpub client.
+// Direct mode (see healthpub.DialFromEnvOr) leaves timeouts and retries to
+// healthpub; socket mode bounds each send and waits for a missing socket itself.
 type Reporter struct {
 	publisher          *healthpub.Publisher
 	nodeName           string
 	processingStrategy pb.ProcessingStrategy
-
-	// direct is true when HEALTH_PUBLISH_TARGET was set at NewReporter.
-	// Direct mode leaves timeouts and retries to healthpub; socket mode
-	// bounds each send and waits for a missing socket itself.
-	direct     bool
-	socketPath string
+	direct             bool
+	socketPath         string
 }
 
-// NewReporter dials the platform connector and builds a Reporter. socketPath
-// is the node-local Unix socket used in socket mode. tokenPath is the
-// optional file path of a projected ServiceAccount token to present as a
+// NewReporter dials the platform connector and builds a Reporter. tokenPath is
+// the optional file path of a projected ServiceAccount token to present as a
 // Bearer credential on every socket mode call; empty disables token metadata.
-// Direct mode reads its own token path from HEALTH_PUBLISH_TOKEN_PATH. A
-// direct mode environment that is incomplete or invalid is returned as an
-// error, so the caller can treat it like any other configuration error.
-func NewReporter(
-	ctx context.Context, socketPath, nodeName string, strategy pb.ProcessingStrategy, tokenPath string,
-) (*Reporter, error) {
+func NewReporter(socketPath, nodeName string, strategy pb.ProcessingStrategy, tokenPath string) (*Reporter, error) {
 	// Remove unix:// prefix if present so the target is built the same way
 	// for both forms of the socket setting.
 	socketPath = strings.TrimPrefix(socketPath, "unix://")
 	target := "unix://" + socketPath
+	direct := true
 
 	_, client, opt, err := healthpub.DialFromEnvOr(func() (*grpc.ClientConn, error) {
-		if waitErr := waitForSocket(ctx, socketPath); waitErr != nil {
-			return nil, waitErr
-		}
+		// DialFromEnvOr runs the fallback only in socket mode.
+		direct = false
 
 		return grpc.NewClient(target, grpcclient.InsecureDialOptions(tokenPath)...)
 	})
@@ -104,16 +84,15 @@ func NewReporter(
 		publisher:          healthpub.New(client, target, agentName, opt),
 		nodeName:           nodeName,
 		processingStrategy: strategy,
-		direct:             os.Getenv(envPublishTarget) != "",
+		direct:             direct,
 		socketPath:         socketPath,
 	}, nil
 }
 
-// waitForSocket waits up to socketWaitTimeout for the socket file to exist.
-// It runs before the lazy dial and again when a send finds the socket
-// missing. A socket that is still missing at the end is not an error here:
-// the following Publish reports the connector as unavailable, which keeps the
-// send failure exit code of the old reporter. Only a finished ctx is an error.
+// waitForSocket waits up to socketWaitTimeout for the socket file when a send
+// finds it missing. A socket still missing at the end is not an error: the
+// following Publish reports the connector unavailable, which keeps the old
+// send failure exit code. Only a finished ctx is an error.
 func waitForSocket(ctx context.Context, socketPath string) error {
 	err := wait.PollUntilContextTimeout(ctx, socketPollInterval, socketWaitTimeout, true,
 		func(context.Context) (bool, error) {
@@ -129,7 +108,7 @@ func waitForSocket(ctx context.Context, socketPath string) error {
 		return fmt.Errorf("waiting for platform connector socket %s: %w", socketPath, ctx.Err())
 	}
 
-	slog.Warn("Platform connector socket not found after waiting; dialing anyway",
+	slog.Warn("Platform connector socket not found after waiting; sending anyway",
 		"socket", socketPath, "waited", socketWaitTimeout)
 
 	return nil
@@ -190,11 +169,8 @@ func (r *Reporter) SendEvent(ctx context.Context, isHealthy, isFatal bool, messa
 	return nil
 }
 
-// publish hands the batch to healthpub. Direct mode keeps the caller's
-// context because healthpub applies its own retry window there. Socket mode
-// bounds the call and, when the socket file is missing (the node-local
-// platform connector is restarting during the benchmark), waits for it once
-// with the same bounded wait used at startup and retries the send once.
+// publish hands the batch to healthpub; in socket mode it waits once for a
+// socket that is missing at send time and retries the send.
 func (r *Reporter) publish(ctx context.Context, events *pb.HealthEvents) error {
 	if r.direct {
 		return r.publisher.Publish(ctx, events)

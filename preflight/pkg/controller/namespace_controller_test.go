@@ -119,7 +119,7 @@ type nsTestEnv struct {
 
 // setupNSTestEnv starts an envtest API server and runs the namespace reconciler
 // under a manager. With caFile set, the reconciler also gets a CABundleSync that
-// copies that file into every labelled namespace as caTestName.
+// copies that file into every labelled namespace.
 func setupNSTestEnv(t *testing.T, ctx context.Context, caFile string) (*ActiveNamespaces, *nsTestEnv) {
 	t.Helper()
 
@@ -140,7 +140,7 @@ func setupNSTestEnv(t *testing.T, ctx context.Context, caFile string) (*ActiveNa
 	var caSync *CABundleSync
 
 	if caFile != "" {
-		caSync = NewCABundleSync(mgr.GetClient(), mgr.GetAPIReader(), caFile, caTestName)
+		caSync = NewCABundleSync(mgr.GetClient(), mgr.GetAPIReader(), caFile)
 	}
 
 	skipValidation := true

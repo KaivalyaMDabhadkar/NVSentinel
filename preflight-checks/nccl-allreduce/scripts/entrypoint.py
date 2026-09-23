@@ -51,7 +51,7 @@ from dataclasses import dataclass
 # Add parent directory to path for imports when running as script
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nccl_allreduce.config import DirectPublishConfig
+from nccl_allreduce.config import DirectPublisherConfig
 from nccl_allreduce.errors import NCCLError
 from nccl_allreduce.gang import GangConfig, GangWaiter
 from nccl_allreduce.health import HealthReporter
@@ -276,7 +276,7 @@ def _report_error(error: NCCLError, message: str) -> None:
     # without them the platform connector refuses the event.
     token_path = os.getenv("PLATFORM_CONNECTOR_TOKEN_PATH") or None
     try:
-        publish = DirectPublishConfig.from_env()
+        publish = DirectPublisherConfig.from_env()
     except ValueError as err:
         log.warning("Cannot send health event: invalid HEALTH_PUBLISH_* settings", extra={"error": str(err)})
         return

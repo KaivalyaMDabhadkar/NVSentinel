@@ -50,14 +50,15 @@ const (
 	// ServiceAccount (every pod has one, so no coordination with the workload
 	// is needed).
 	connectorTokenVolumeName = "nvsentinel-connector-token"
-	// healthPublishCAVolumeName holds the per namespace ConfigMap copy of the
-	// deployment platform connector CA bundle. The controller keeps the copy
-	// current; the checks read it to verify the server in direct mode.
-	healthPublishCAVolumeName = "nvsentinel-platform-connector-ca"
+	// HealthPublishCAConfigMapName names the per namespace ConfigMap copy of
+	// the deployment platform connector CA bundle and the volume that mounts
+	// it. The controller keeps the copy current; the checks read it to verify
+	// the server in direct mode.
+	HealthPublishCAConfigMapName = "nvsentinel-platform-connector-ca"
 	// healthPublishCAMountPath is where that copy is mounted in the checks.
 	healthPublishCAMountPath = "/etc/nvsentinel/platform-connector-deployment-ca"
-	// healthPublishCAKey is the ConfigMap key and file name of the bundle.
-	healthPublishCAKey = "ca.crt"
+	// HealthPublishCAKey is the ConfigMap key and file name of the bundle.
+	HealthPublishCAKey = "ca.crt"
 	// healthPublisherLabel marks pods the deployment platform connector's
 	// NetworkPolicy lets through. Injected pods carry it in direct mode.
 	healthPublisherLabel      = "nvsentinel.nvidia.com/health-publisher"
@@ -583,12 +584,9 @@ func (i *Injector) injectCommonEnv(container *corev1.Container) {
 	i.mergeEnvVars(container, envVars)
 }
 
-// healthPublishCAConfigured reports whether direct mode verifies the server
-// with the CA ConfigMap copy. Config validation makes the CA file and the
-// ConfigMap name a pair, and one of that pair or insecure mode is set whenever
-// the target is.
+// healthPublishCAConfigured reports whether direct mode verifies the server with the CA copy.
 func (i *Injector) healthPublishCAConfigured() bool {
-	return i.cfg.HealthPublishTarget != "" && i.cfg.HealthPublishCAConfigMap != ""
+	return i.cfg.HealthPublishCAFile != ""
 }
 
 // injectHealthPublishEnv points the check at the deployment platform connector
@@ -614,7 +612,7 @@ func (i *Injector) injectHealthPublishEnv(container *corev1.Container) {
 	if i.healthPublishCAConfigured() {
 		envVars = append(envVars, corev1.EnvVar{
 			Name:  "HEALTH_PUBLISH_TLS_CA_FILE",
-			Value: healthPublishCAMountPath + "/" + healthPublishCAKey,
+			Value: healthPublishCAMountPath + "/" + HealthPublishCAKey,
 		})
 	} else {
 		envVars = append(envVars, corev1.EnvVar{
@@ -636,13 +634,13 @@ func (i *Injector) injectHealthPublishCAMount(container *corev1.Container) {
 	}
 
 	for _, m := range container.VolumeMounts {
-		if m.Name == healthPublishCAVolumeName {
+		if m.Name == HealthPublishCAConfigMapName {
 			return
 		}
 	}
 
 	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
-		Name:      healthPublishCAVolumeName,
+		Name:      HealthPublishCAConfigMapName,
 		MountPath: healthPublishCAMountPath,
 		ReadOnly:  true,
 	})
@@ -653,12 +651,12 @@ func (i *Injector) injectHealthPublishCAMount(container *corev1.Container) {
 // verify the server, and admission is the right place to surface that.
 func (i *Injector) healthPublishCAVolume() corev1.Volume {
 	return corev1.Volume{
-		Name: healthPublishCAVolumeName,
+		Name: HealthPublishCAConfigMapName,
 		ConfigMap: &corev1.ConfigMapVolumeSource{
-			Name: i.cfg.HealthPublishCAConfigMap,
+			Name: HealthPublishCAConfigMapName,
 			Items: []corev1.KeyToPath{{
-				Key:  healthPublishCAKey,
-				Path: healthPublishCAKey,
+				Key:  HealthPublishCAKey,
+				Path: HealthPublishCAKey,
 			}},
 		},
 	}
@@ -676,16 +674,16 @@ func (i *Injector) ValidateHealthPublishCAVolume(pod *corev1.Pod) error {
 	}
 
 	for _, vol := range pod.Spec.Volumes {
-		if vol.Name != healthPublishCAVolumeName {
+		if vol.Name != HealthPublishCAConfigMapName {
 			continue
 		}
 
-		if !isOurHealthPublishCAVolume(vol, i.cfg.HealthPublishCAConfigMap) {
+		if !isOurHealthPublishCAVolume(vol) {
 			return fmt.Errorf(
 				"pod declares a volume named %q that is not the CA ConfigMap projection "+
 					"preflight injects; rename it, because injected checks read the "+
 					"platform connector CA bundle from that volume",
-				healthPublishCAVolumeName)
+				HealthPublishCAConfigMapName)
 		}
 	}
 
@@ -693,11 +691,11 @@ func (i *Injector) ValidateHealthPublishCAVolume(pod *corev1.Pod) error {
 }
 
 // isOurHealthPublishCAVolume reports whether an existing pod volume is exactly
-// the ConfigMap projection this webhook would have injected: the configured
-// ConfigMap, only the ca.crt key at the ca.crt path, and not optional.
-func isOurHealthPublishCAVolume(vol corev1.Volume, configMapName string) bool {
+// the ConfigMap projection this webhook would have injected: the CA ConfigMap,
+// only the ca.crt key at the ca.crt path, and not optional.
+func isOurHealthPublishCAVolume(vol corev1.Volume) bool {
 	cm := vol.ConfigMap
-	if cm == nil || cm.Name != configMapName || len(cm.Items) != 1 {
+	if cm == nil || cm.Name != HealthPublishCAConfigMapName || len(cm.Items) != 1 {
 		return false
 	}
 
@@ -705,7 +703,7 @@ func isOurHealthPublishCAVolume(vol corev1.Volume, configMapName string) bool {
 		return false
 	}
 
-	return cm.Items[0].Key == healthPublishCAKey && cm.Items[0].Path == healthPublishCAKey
+	return cm.Items[0].Key == HealthPublishCAKey && cm.Items[0].Path == HealthPublishCAKey
 }
 
 // injectHealthPublisherLabel adds the label the deployment platform
@@ -899,7 +897,7 @@ func (i *Injector) collectPublishVolumes(existingVolumes map[string]bool) []core
 		volumes = append(volumes, i.connectorTokenVolume())
 	}
 
-	if i.healthPublishCAConfigured() && !existingVolumes[healthPublishCAVolumeName] {
+	if i.healthPublishCAConfigured() && !existingVolumes[HealthPublishCAConfigMapName] {
 		volumes = append(volumes, i.healthPublishCAVolume())
 	}
 

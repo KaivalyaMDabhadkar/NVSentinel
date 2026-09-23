@@ -25,16 +25,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nvidia/nvsentinel/preflight/pkg/gang/coordinator"
+	"github.com/nvidia/nvsentinel/preflight/pkg/webhook"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
-	// caBundleKey is the ConfigMap key the checks read the CA bundle from.
-	caBundleKey = "ca.crt"
-	// caBundleManagedByLabel marks the copies as owned by preflight.
-	caBundleManagedByLabel = "nvsentinel.nvidia.com/managed-by"
 	// caBundleLabel selects the copies when the bundle changes.
 	caBundleLabel = "nvsentinel.nvidia.com/platform-connector-ca"
 	// syncInterval is how often Start re-reads the CA file and retries the
@@ -51,7 +49,6 @@ type CABundleSync struct {
 	client client.Client
 	reader client.Reader
 	caFile string
-	name   string
 
 	// last holds the bundle bytes the sync loop saw on its previous tick. It
 	// is nil until the first successful read, so the first tick sweeps every
@@ -67,14 +64,12 @@ type CABundleSync struct {
 	pending map[string]struct{}
 }
 
-// NewCABundleSync builds the sync for the CA file at caFile and the ConfigMap
-// name the copies use in every namespace.
-func NewCABundleSync(c client.Client, reader client.Reader, caFile, name string) *CABundleSync {
+// NewCABundleSync builds the sync for the CA file at caFile.
+func NewCABundleSync(c client.Client, reader client.Reader, caFile string) *CABundleSync {
 	return &CABundleSync{
 		client:  c,
 		reader:  reader,
 		caFile:  caFile,
-		name:    name,
 		pending: map[string]struct{}{},
 	}
 }
@@ -103,38 +98,42 @@ func (s *CABundleSync) ensure(ctx context.Context, namespace string) error {
 		return err
 	}
 
-	key := client.ObjectKey{Namespace: namespace, Name: s.name}
+	key := client.ObjectKey{Namespace: namespace, Name: webhook.HealthPublishCAConfigMapName}
 	existing := &corev1.ConfigMap{}
 
 	err = s.reader.Get(ctx, key, existing)
 	if apierrors.IsNotFound(err) {
 		err = s.client.Create(ctx, s.desired(namespace, ca))
 		if err == nil {
-			slog.Info("Created platform connector CA ConfigMap", "namespace", namespace, "configMap", s.name)
+			slog.Info("Created platform connector CA ConfigMap",
+				"namespace", namespace, "configMap", webhook.HealthPublishCAConfigMapName)
 
 			return nil
 		}
 
 		if !apierrors.IsAlreadyExists(err) {
-			return fmt.Errorf("failed to create ConfigMap %s/%s: %w", namespace, s.name, err)
+			return fmt.Errorf("failed to create ConfigMap %s/%s: %w",
+				namespace, webhook.HealthPublishCAConfigMapName, err)
 		}
 
 		err = s.reader.Get(ctx, key, existing)
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to get ConfigMap %s/%s: %w", namespace, s.name, err)
+		return fmt.Errorf("failed to get ConfigMap %s/%s: %w", namespace, webhook.HealthPublishCAConfigMapName, err)
 	}
 
 	return s.updateIfDiffers(ctx, existing, ca)
 }
 
 // Start is the controller-runtime Runnable that follows CA rotation and
-// repairs failed copies. Every syncInterval it re-reads the file, sweeps the
-// labelled copies when the bytes changed, and retries every pending
-// namespace. Failures are logged and retried on the next tick; the loop only
-// stops with the context.
+// repairs failed copies. Once at startup and then every syncInterval it
+// re-reads the file, sweeps the labelled copies when the bytes changed, and
+// retries every pending namespace. Failures are logged and retried on the
+// next tick; the loop only stops with the context.
 func (s *CABundleSync) Start(ctx context.Context) error {
+	s.tick(ctx)
+
 	ticker := time.NewTicker(syncInterval)
 	defer ticker.Stop()
 
@@ -169,15 +168,12 @@ func (s *CABundleSync) refresh(ctx context.Context) {
 		return
 	}
 
-	if s.last == nil {
-		slog.Info("Sweeping the platform connector CA copies at startup", "path", s.caFile, "configMap", s.name)
-	} else {
-		slog.Info("Platform connector CA bundle changed, refreshing the namespace copies",
-			"path", s.caFile, "configMap", s.name)
-	}
+	slog.Info("Refreshing platform connector CA copies",
+		"path", s.caFile, "configMap", webhook.HealthPublishCAConfigMapName, "startup", s.last == nil)
 
 	if err := s.refreshCopies(ctx, ca); err != nil {
-		slog.Error("Failed to refresh platform connector CA ConfigMaps", "configMap", s.name, "error", err)
+		slog.Error("Failed to refresh platform connector CA ConfigMaps",
+			"configMap", webhook.HealthPublishCAConfigMapName, "error", err)
 
 		return
 	}
@@ -191,12 +187,13 @@ func (s *CABundleSync) retryPending(ctx context.Context) {
 	for _, namespace := range s.pendingNamespaces() {
 		if err := s.Ensure(ctx, namespace); err != nil {
 			slog.Error("Platform connector CA ConfigMap still failing, will retry",
-				"namespace", namespace, "configMap", s.name, "error", err)
+				"namespace", namespace, "configMap", webhook.HealthPublishCAConfigMapName, "error", err)
 
 			continue
 		}
 
-		slog.Info("Repaired platform connector CA ConfigMap", "namespace", namespace, "configMap", s.name)
+		slog.Info("Repaired platform connector CA ConfigMap",
+			"namespace", namespace, "configMap", webhook.HealthPublishCAConfigMapName)
 	}
 }
 
@@ -219,10 +216,9 @@ func (s *CABundleSync) refreshCopies(ctx context.Context, ca []byte) error {
 	return errors.Join(errs...)
 }
 
-// updateIfDiffers writes ca into existing when its ca.crt differs and makes
-// sure the copy carries the labels the sync loop selects on.
+// updateIfDiffers writes ca into existing when its ca.crt differs.
 func (s *CABundleSync) updateIfDiffers(ctx context.Context, existing *corev1.ConfigMap, ca []byte) error {
-	if existing.Data[caBundleKey] == string(ca) {
+	if existing.Data[webhook.HealthPublishCAKey] == string(ca) {
 		return nil
 	}
 
@@ -230,15 +226,7 @@ func (s *CABundleSync) updateIfDiffers(ctx context.Context, existing *corev1.Con
 		existing.Data = map[string]string{}
 	}
 
-	existing.Data[caBundleKey] = string(ca)
-
-	if existing.Labels == nil {
-		existing.Labels = map[string]string{}
-	}
-
-	for k, v := range caBundleLabels() {
-		existing.Labels[k] = v
-	}
+	existing.Data[webhook.HealthPublishCAKey] = string(ca)
 
 	if err := s.client.Update(ctx, existing); err != nil {
 		return fmt.Errorf("failed to update ConfigMap %s/%s: %w", existing.Namespace, existing.Name, err)
@@ -281,11 +269,11 @@ func (s *CABundleSync) pendingNamespaces() []string {
 
 func (s *CABundleSync) desired(namespace string, ca []byte) *corev1.ConfigMap {
 	return &corev1.ConfigMap{
-		Name:      s.name,
+		Name:      webhook.HealthPublishCAConfigMapName,
 		Namespace: namespace,
 		Labels:    caBundleLabels(),
 		Data: map[string]string{
-			caBundleKey: string(ca),
+			webhook.HealthPublishCAKey: string(ca),
 		},
 	}
 }
@@ -305,7 +293,7 @@ func (s *CABundleSync) readBundle() ([]byte, error) {
 
 func caBundleLabels() map[string]string {
 	return map[string]string{
-		caBundleManagedByLabel: "preflight",
-		caBundleLabel:          "true",
+		coordinator.ConfigMapLabelManagedBy: "preflight",
+		caBundleLabel:                       "true",
 	}
 }

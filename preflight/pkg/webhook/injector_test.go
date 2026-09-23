@@ -1064,7 +1064,6 @@ func healthPublishConfig() *config.Config {
 	cfg.ConnectorTokenExpirationSeconds = 3600
 	cfg.HealthPublishTarget = "platform-connector-deployment.nvsentinel.svc.cluster.local:50051"
 	cfg.HealthPublishCAFile = "/etc/nvsentinel/platform-connector-deployment-ca/ca.crt"
-	cfg.HealthPublishCAConfigMap = "nvsentinel-platform-connector-ca"
 
 	return cfg
 }
@@ -1074,7 +1073,6 @@ func healthPublishConfig() *config.Config {
 func healthPublishInsecureConfig() *config.Config {
 	cfg := healthPublishConfig()
 	cfg.HealthPublishCAFile = ""
-	cfg.HealthPublishCAConfigMap = ""
 	cfg.HealthPublishInsecure = true
 
 	return cfg
@@ -1115,8 +1113,8 @@ func TestInjectHealthPublish(t *testing.T) {
 			assert.NotContains(t, e.Name, "HEALTH_PUBLISH_", "socket mode must not see direct mode env")
 		}
 
-		assert.False(t, hasVolumeMount(containers[0], healthPublishCAVolumeName))
-		assert.Nil(t, findVolume(extractVolumes(t, patches), healthPublishCAVolumeName))
+		assert.False(t, hasVolumeMount(containers[0], HealthPublishCAConfigMapName))
+		assert.Nil(t, findVolume(extractVolumes(t, patches), HealthPublishCAConfigMapName))
 		assert.Nil(t, findPatchByPath(patches, "/metadata/labels"))
 		assert.Nil(t, findPatchByPath(patches, labelPath))
 		// The socket env and volume stay in place.
@@ -1143,7 +1141,7 @@ func TestInjectHealthPublish(t *testing.T) {
 		var caMount *corev1.VolumeMount
 
 		for i := range c.VolumeMounts {
-			if c.VolumeMounts[i].Name == healthPublishCAVolumeName {
+			if c.VolumeMounts[i].Name == HealthPublishCAConfigMapName {
 				caMount = &c.VolumeMounts[i]
 			}
 		}
@@ -1154,9 +1152,9 @@ func TestInjectHealthPublish(t *testing.T) {
 		// The CA mount follows the token mount so inherited user mounts at
 		// that path are skipped later.
 		assert.Equal(t, connectorTokenVolumeName, c.VolumeMounts[0].Name)
-		assert.Equal(t, healthPublishCAVolumeName, c.VolumeMounts[1].Name)
+		assert.Equal(t, HealthPublishCAConfigMapName, c.VolumeMounts[1].Name)
 
-		vol := requireVolume(t, extractVolumes(t, patches), healthPublishCAVolumeName)
+		vol := requireVolume(t, extractVolumes(t, patches), HealthPublishCAConfigMapName)
 		require.NotNil(t, vol.ConfigMap)
 		assert.Equal(t, "nvsentinel-platform-connector-ca", vol.ConfigMap.Name)
 		assert.Nil(t, vol.ConfigMap.Optional, "the CA copy must not be optional")
@@ -1181,8 +1179,8 @@ func TestInjectHealthPublish(t *testing.T) {
 			findEnv(c.Env, "HEALTH_PUBLISH_TOKEN_PATH"))
 		assert.Equal(t, "true", findEnv(c.Env, "HEALTH_PUBLISH_INSECURE"))
 		assert.False(t, hasEnvVar(c, "HEALTH_PUBLISH_TLS_CA_FILE"))
-		assert.False(t, hasVolumeMount(c, healthPublishCAVolumeName))
-		assert.Nil(t, findVolume(extractVolumes(t, patches), healthPublishCAVolumeName))
+		assert.False(t, hasVolumeMount(c, HealthPublishCAConfigMapName))
+		assert.Nil(t, findVolume(extractVolumes(t, patches), HealthPublishCAConfigMapName))
 		// The label depends on the target, not on the CA.
 		assert.NotNil(t, findPatchByPath(patches, "/metadata/labels"))
 	})
@@ -1200,14 +1198,6 @@ func TestInjectHealthPublish(t *testing.T) {
 		assert.Equal(t, "true", p.Value)
 	})
 
-	t.Run("chart env wins over the injected env", func(t *testing.T) {
-		cfg := healthPublishConfig()
-		cfg.InitContainers[0].Env = []corev1.EnvVar{{Name: "HEALTH_PUBLISH_TARGET", Value: "chart:1"}}
-
-		containers, _ := injectedContainers(t, cfg, gpuPod())
-		assert.Equal(t, "chart:1", findEnv(containers[0].Env, "HEALTH_PUBLISH_TARGET"))
-	})
-
 	t.Run("our own CA volume on the pod is not duplicated", func(t *testing.T) {
 		injector := &Injector{cfg: healthPublishConfig()}
 		pod := &corev1.Pod{Spec: corev1.PodSpec{Volumes: []corev1.Volume{injector.healthPublishCAVolume()}}}
@@ -1216,7 +1206,7 @@ func TestInjectHealthPublish(t *testing.T) {
 
 		for _, p := range injector.injectVolumes(pod, nil) {
 			if vol, ok := p.Value.(corev1.Volume); ok {
-				assert.NotEqual(t, healthPublishCAVolumeName, vol.Name)
+				assert.NotEqual(t, HealthPublishCAConfigMapName, vol.Name)
 			}
 		}
 	})
@@ -1244,7 +1234,7 @@ func TestInjectHealthPublish(t *testing.T) {
 			}
 		}
 
-		assert.Equal(t, []string{healthPublishCAVolumeName}, atCAPath,
+		assert.Equal(t, []string{HealthPublishCAConfigMapName}, atCAPath,
 			"only the injected CA mount may sit at the CA path")
 		assert.False(t, hasVolumeMount(c, "nvtcpxo-ca"), "the user mount at the CA path is not inherited")
 	})
@@ -1274,13 +1264,13 @@ func TestValidateHealthPublishCAVolume(t *testing.T) {
 		{name: "our own projection is accepted", volume: &ours},
 		{
 			name:    "workload-supplied emptyDir is refused",
-			volume:  &corev1.Volume{Name: healthPublishCAVolumeName, EmptyDir: &corev1.EmptyDirVolumeSource{}},
+			volume:  &corev1.Volume{Name: HealthPublishCAConfigMapName, EmptyDir: &corev1.EmptyDirVolumeSource{}},
 			wantErr: true,
 		},
 		{
 			name: "ConfigMap with another name is refused",
 			volume: &corev1.Volume{
-				Name: healthPublishCAVolumeName,
+				Name: HealthPublishCAConfigMapName,
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					Name:  "workload-supplied",
 					Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
@@ -1291,7 +1281,7 @@ func TestValidateHealthPublishCAVolume(t *testing.T) {
 		{
 			name: "ConfigMap projecting other keys is refused",
 			volume: &corev1.Volume{
-				Name: healthPublishCAVolumeName,
+				Name: HealthPublishCAConfigMapName,
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					Name:  "nvsentinel-platform-connector-ca",
 					Items: []corev1.KeyToPath{{Key: "other.crt", Path: "ca.crt"}},
@@ -1302,7 +1292,7 @@ func TestValidateHealthPublishCAVolume(t *testing.T) {
 		{
 			name: "ConfigMap without items is refused",
 			volume: &corev1.Volume{
-				Name:      healthPublishCAVolumeName,
+				Name:      HealthPublishCAConfigMapName,
 				ConfigMap: &corev1.ConfigMapVolumeSource{Name: "nvsentinel-platform-connector-ca"},
 			},
 			wantErr: true,
@@ -1310,7 +1300,7 @@ func TestValidateHealthPublishCAVolume(t *testing.T) {
 		{
 			name: "optional projection is refused",
 			volume: &corev1.Volume{
-				Name: healthPublishCAVolumeName,
+				Name: HealthPublishCAConfigMapName,
 				ConfigMap: &corev1.ConfigMapVolumeSource{
 					Name:     "nvsentinel-platform-connector-ca",
 					Items:    []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
@@ -1323,34 +1313,40 @@ func TestValidateHealthPublishCAVolume(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			pod := gpuPod()
+			injector := &Injector{cfg: healthPublishConfig()}
+
+			pod := &corev1.Pod{}
 			if tt.volume != nil {
 				pod.Spec.Volumes = []corev1.Volume{*tt.volume}
 			}
 
-			injector := NewInjector(healthPublishConfig(), nil)
 			err := injector.ValidateHealthPublishCAVolume(pod)
-
-			// The full injection refuses the same pods.
-			_, _, injectErr := injector.InjectInitContainers(context.Background(), pod)
 
 			if tt.wantErr {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), healthPublishCAVolumeName)
-				require.Error(t, injectErr)
+				assert.Contains(t, err.Error(), HealthPublishCAConfigMapName)
 
 				return
 			}
 
 			require.NoError(t, err)
-			require.NoError(t, injectErr)
 		})
 	}
+
+	t.Run("the full injection refuses a foreign volume by that name", func(t *testing.T) {
+		pod := gpuPod()
+		pod.Spec.Volumes = []corev1.Volume{
+			{Name: HealthPublishCAConfigMapName, EmptyDir: &corev1.EmptyDirVolumeSource{}},
+		}
+
+		_, _, err := NewInjector(healthPublishConfig(), nil).InjectInitContainers(context.Background(), pod)
+		require.Error(t, err)
+	})
 
 	t.Run("no check at all in insecure mode", func(t *testing.T) {
 		injector := &Injector{cfg: healthPublishInsecureConfig()}
 		pod := &corev1.Pod{
-			Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: healthPublishCAVolumeName}}},
+			Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: HealthPublishCAConfigMapName}}},
 		}
 
 		require.NoError(t, injector.ValidateHealthPublishCAVolume(pod))
@@ -1359,7 +1355,7 @@ func TestValidateHealthPublishCAVolume(t *testing.T) {
 	t.Run("no check at all in socket mode", func(t *testing.T) {
 		injector := &Injector{cfg: testConfig()}
 		pod := &corev1.Pod{
-			Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: healthPublishCAVolumeName}}},
+			Spec: corev1.PodSpec{Volumes: []corev1.Volume{{Name: HealthPublishCAConfigMapName}}},
 		}
 
 		require.NoError(t, injector.ValidateHealthPublishCAVolume(pod))

@@ -391,7 +391,6 @@ func TestHandleMutate(t *testing.T) {
 		cfg.ConnectorTokenExpirationSeconds = 3600
 		cfg.HealthPublishTarget = "platform-connector-deployment.nvsentinel.svc.cluster.local:50051"
 		cfg.HealthPublishCAFile = "/etc/nvsentinel/platform-connector-deployment-ca/ca.crt"
-		cfg.HealthPublishCAConfigMap = "nvsentinel-platform-connector-ca"
 
 		handler := NewHandler(cfg, nil, nil, func(_ context.Context, namespace string) {
 			mu.Lock()

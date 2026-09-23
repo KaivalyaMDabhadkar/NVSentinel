@@ -145,7 +145,6 @@ connectorTokenMountPath: /var/run/secrets/nvsentinel/platform-connector
 connectorTokenExpirationSeconds: 3600
 healthPublishTarget: platform-connector-deployment.nvsentinel.svc.cluster.local:50051
 healthPublishCAFile: /etc/nvsentinel/platform-connector-deployment-ca/ca.crt
-healthPublishCAConfigMap: nvsentinel-platform-connector-ca
 `
 
 	yamlGangDiscoveryDefault = `
@@ -320,7 +319,6 @@ func TestLoad(t *testing.T) {
 
 		assert.Equal(t, "platform-connector-deployment.nvsentinel.svc.cluster.local:50051", cfg.HealthPublishTarget)
 		assert.Equal(t, "/etc/nvsentinel/platform-connector-deployment-ca/ca.crt", cfg.HealthPublishCAFile)
-		assert.Equal(t, "nvsentinel-platform-connector-ca", cfg.HealthPublishCAConfigMap)
 		assert.False(t, cfg.HealthPublishInsecure)
 	})
 
@@ -451,7 +449,6 @@ func TestValidateHealthPublish(t *testing.T) {
 	const (
 		target = "platform-connector-deployment.nvsentinel.svc.cluster.local:50051"
 		caFile = "/etc/nvsentinel/platform-connector-deployment-ca/ca.crt"
-		caCM   = "nvsentinel-platform-connector-ca"
 	)
 
 	withToken := func(c *FileConfig) {
@@ -470,12 +467,11 @@ func TestValidateHealthPublish(t *testing.T) {
 			mutate: func(_ *FileConfig) {},
 		},
 		{
-			name: "target with token and CA pair is fine",
+			name: "target with token and CA file is fine",
 			mutate: func(c *FileConfig) {
 				withToken(c)
 				c.HealthPublishTarget = target
 				c.HealthPublishCAFile = caFile
-				c.HealthPublishCAConfigMap = caCM
 			},
 		},
 		{
@@ -490,13 +486,6 @@ func TestValidateHealthPublish(t *testing.T) {
 			name: "CA file without a target",
 			mutate: func(c *FileConfig) {
 				c.HealthPublishCAFile = caFile
-			},
-			wantInErr: "need healthPublishTarget",
-		},
-		{
-			name: "CA ConfigMap without a target",
-			mutate: func(c *FileConfig) {
-				c.HealthPublishCAConfigMap = caCM
 			},
 			wantInErr: "need healthPublishTarget",
 		},
@@ -529,28 +518,9 @@ func TestValidateHealthPublish(t *testing.T) {
 				withToken(c)
 				c.HealthPublishTarget = target
 				c.HealthPublishCAFile = caFile
-				c.HealthPublishCAConfigMap = caCM
 				c.HealthPublishInsecure = true
 			},
 			wantInErr: "exactly one of",
-		},
-		{
-			name: "CA file without the ConfigMap name",
-			mutate: func(c *FileConfig) {
-				withToken(c)
-				c.HealthPublishTarget = target
-				c.HealthPublishCAFile = caFile
-			},
-			wantInErr: "must be set together",
-		},
-		{
-			name: "CA ConfigMap name without the file",
-			mutate: func(c *FileConfig) {
-				withToken(c)
-				c.HealthPublishTarget = target
-				c.HealthPublishCAConfigMap = caCM
-			},
-			wantInErr: "must be set together",
 		},
 		{
 			name: "relative CA file path",
@@ -558,7 +528,6 @@ func TestValidateHealthPublish(t *testing.T) {
 				withToken(c)
 				c.HealthPublishTarget = target
 				c.HealthPublishCAFile = "relative/ca.crt"
-				c.HealthPublishCAConfigMap = caCM
 			},
 			wantInErr: "absolute path",
 		},

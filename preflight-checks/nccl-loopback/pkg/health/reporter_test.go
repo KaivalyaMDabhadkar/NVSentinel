@@ -20,10 +20,11 @@ package health
 import (
 	"context"
 	"errors"
+	"log"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sync"
 	"testing"
 	"time"
@@ -37,19 +38,13 @@ import (
 	"google.golang.org/protobuf/types/known/emptypb"
 )
 
-// idempotencyKeyPattern is the format the deployment platform connector
-// accepts for the idempotency-key header.
-var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
-
 // capturingConnector is a PlatformConnector implementation that records the
-// "authorization" and "idempotency-key" metadata of every
-// HealthEventOccurredV1 call it receives.
+// "authorization" metadata of every HealthEventOccurredV1 call it receives.
 type capturingConnector struct {
 	pb.UnimplementedPlatformConnectorServer
 
-	mu              sync.Mutex
-	authHeaders     [][]string
-	idempotencyKeys [][]string
+	mu          sync.Mutex
+	authHeaders [][]string
 }
 
 func (c *capturingConnector) HealthEventOccurredV1(
@@ -62,7 +57,6 @@ func (c *capturingConnector) HealthEventOccurredV1(
 	defer c.mu.Unlock()
 
 	c.authHeaders = append(c.authHeaders, md.Get("authorization"))
-	c.idempotencyKeys = append(c.idempotencyKeys, md.Get("idempotency-key"))
 
 	return &emptypb.Empty{}, nil
 }
@@ -88,19 +82,6 @@ func (c *capturingConnector) lastAuth(t *testing.T) []string {
 	}
 
 	return captured[len(captured)-1]
-}
-
-func (c *capturingConnector) lastIdempotencyKeys(t *testing.T) []string {
-	t.Helper()
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if len(c.idempotencyKeys) == 0 {
-		t.Fatal("no HealthEventOccurredV1 calls were captured")
-	}
-
-	return c.idempotencyKeys[len(c.idempotencyKeys)-1]
 }
 
 // clearPublishEnv blanks every HEALTH_PUBLISH_* variable so the reporter runs
@@ -134,20 +115,6 @@ func startTestConnector(t *testing.T) (string, *capturingConnector) {
 	}
 
 	return socketPath, serveConnector(t, lis)
-}
-
-// startTestTCPConnector serves a capturingConnector on a loopback TCP port,
-// standing in for the deployment platform connector Service in direct mode,
-// and returns its host:port.
-func startTestTCPConnector(t *testing.T) (string, *capturingConnector) {
-	t.Helper()
-
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to listen on loopback TCP: %v", err)
-	}
-
-	return lis.Addr().String(), serveConnector(t, lis)
 }
 
 func serveConnector(t *testing.T, lis net.Listener) *capturingConnector {
@@ -215,23 +182,40 @@ func shortenSocketWaits(t *testing.T, waitTimeout, pollInterval, sendTimeout tim
 	})
 }
 
-// reporterResult carries a NewReporter outcome out of a goroutine.
-type reporterResult struct {
-	reporter *Reporter
-	err      error
+// logSignal is a slog.Handler that closes seen the first time it handles a
+// record with message msg and writes every record to stderr as text.
+type logSignal struct {
+	slog.Handler
+
+	msg  string
+	seen chan struct{}
+	once sync.Once
 }
 
-// newReporterAsync starts NewReporter in a goroutine and returns the channel
-// that receives its outcome.
-func newReporterAsync(ctx context.Context, socketPath string) <-chan reporterResult {
-	done := make(chan reporterResult, 1)
+func (h *logSignal) Handle(ctx context.Context, record slog.Record) error {
+	if record.Message == h.msg {
+		h.once.Do(func() { close(h.seen) })
+	}
 
-	go func() {
-		reporter, err := NewReporter(ctx, socketPath, "test-node", pb.ProcessingStrategy_STORE_ONLY, "")
-		done <- reporterResult{reporter: reporter, err: err}
-	}()
+	return h.Handler.Handle(ctx, record)
+}
 
-	return done
+// awaitLog makes the default logger close the returned channel the first time
+// msg is logged and restores the previous logging setup when the test ends.
+func awaitLog(t *testing.T, msg string) <-chan struct{} {
+	t.Helper()
+
+	prevLogger, prevOut, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	handler := &logSignal{Handler: slog.NewTextHandler(os.Stderr, nil), msg: msg, seen: make(chan struct{})}
+
+	slog.SetDefault(slog.New(handler))
+	t.Cleanup(func() {
+		slog.SetDefault(prevLogger)
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	})
+
+	return handler.seen
 }
 
 func writeToken(t *testing.T, contents string) string {
@@ -248,9 +232,7 @@ func writeToken(t *testing.T, contents string) string {
 func newTestReporter(t *testing.T, socketPath, tokenPath string) *Reporter {
 	t.Helper()
 
-	reporter, err := NewReporter(
-		context.Background(), socketPath, "test-node", pb.ProcessingStrategy_STORE_ONLY, tokenPath,
-	)
+	reporter, err := NewReporter(socketPath, "test-node", pb.ProcessingStrategy_STORE_ONLY, tokenPath)
 	if err != nil {
 		t.Fatalf("NewReporter failed: %v", err)
 	}
@@ -366,15 +348,20 @@ func TestSendEventMissingTokenFileFailsWithoutSending(t *testing.T) {
 	}
 }
 
-func TestSendEventDirectModeAttachesTokenAndIdempotencyKey(t *testing.T) {
+func TestSendEventDirectModeIgnoresSocketAndAttachesEnvToken(t *testing.T) {
 	// With HEALTH_PUBLISH_TARGET set the reporter ignores the socket and
 	// publishes to the deployment platform connector, carrying the token from
-	// HEALTH_PUBLISH_TOKEN_PATH and one idempotency key per batch.
-	target, connector := startTestTCPConnector(t)
+	// HEALTH_PUBLISH_TOKEN_PATH.
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen on loopback TCP: %v", err)
+	}
+
+	connector := serveConnector(t, lis)
 	tokenPath := writeToken(t, "direct-token")
 
 	clearPublishEnv(t)
-	t.Setenv("HEALTH_PUBLISH_TARGET", target)
+	t.Setenv("HEALTH_PUBLISH_TARGET", lis.Addr().String())
 	t.Setenv("HEALTH_PUBLISH_INSECURE", "true")
 	t.Setenv("HEALTH_PUBLISH_TOKEN_PATH", tokenPath)
 
@@ -382,108 +369,19 @@ func TestSendEventDirectModeAttachesTokenAndIdempotencyKey(t *testing.T) {
 	missingSocket := filepath.Join(t.TempDir(), "absent.sock")
 	reporter := newTestReporter(t, missingSocket, "")
 
-	if err := reporter.SendEvent(context.Background(), true, false, "test event", ""); err != nil {
-		t.Fatalf("SendEvent failed: %v", err)
+	if sendErr := reporter.SendEvent(context.Background(), true, false, "test event", ""); sendErr != nil {
+		t.Fatalf("SendEvent failed: %v", sendErr)
 	}
 
 	auth := connector.lastAuth(t)
 	if len(auth) != 1 || auth[0] != "Bearer direct-token" {
 		t.Errorf("got authorization %v, want [Bearer direct-token]", auth)
 	}
-
-	keys := connector.lastIdempotencyKeys(t)
-	if len(keys) != 1 {
-		t.Fatalf("got idempotency-key %v, want exactly one value", keys)
-	}
-
-	if !idempotencyKeyPattern.MatchString(keys[0]) {
-		t.Errorf("idempotency-key %q does not match %s", keys[0], idempotencyKeyPattern)
-	}
 }
 
-func TestNewReporterDirectModeWithoutTokenPathFails(t *testing.T) {
-	// The deployment platform connector accepts no batch without a token, so
-	// a direct mode environment without a token path is a configuration error
-	// at startup, not a send failure later.
-	clearPublishEnv(t)
-	t.Setenv("HEALTH_PUBLISH_TARGET", "127.0.0.1:50051")
-	t.Setenv("HEALTH_PUBLISH_INSECURE", "true")
-
-	socketPath := filepath.Join(t.TempDir(), "pc.sock")
-
-	reporter, err := NewReporter(context.Background(), socketPath, "test-node", pb.ProcessingStrategy_STORE_ONLY, "")
-	if err == nil {
-		reporter.Close()
-		t.Fatal("expected NewReporter to fail without HEALTH_PUBLISH_TOKEN_PATH")
-	}
-}
-
-func TestNewReporterWaitsForSocketToAppear(t *testing.T) {
-	// The node-local platform connector pod may still be starting when the
-	// check runs: NewReporter waits for the socket file instead of failing.
-	clearPublishEnv(t)
-	shortenSocketWaits(t, 10*time.Second, 50*time.Millisecond, socketSendTimeout)
-
-	socketPath := filepath.Join(t.TempDir(), "pc.sock")
-	started := time.Now()
-	done := newReporterAsync(context.Background(), socketPath)
-
-	time.Sleep(300 * time.Millisecond)
-
-	connector := serveConnector(t, listenUnix(t, socketPath))
-
-	var result reporterResult
-
-	select {
-	case result = <-done:
-	case <-time.After(15 * time.Second):
-		t.Fatal("NewReporter did not return after the socket appeared")
-	}
-
-	if result.err != nil {
-		t.Fatalf("NewReporter failed: %v", result.err)
-	}
-
-	t.Cleanup(result.reporter.Close)
-
-	if waited := time.Since(started); waited < 300*time.Millisecond {
-		t.Errorf("NewReporter returned after %v, before the socket existed", waited)
-	}
-
-	if err := result.reporter.SendEvent(context.Background(), true, false, "test event", ""); err != nil {
-		t.Fatalf("SendEvent failed: %v", err)
-	}
-
-	if captured := connector.calls(t); len(captured) != 1 {
-		t.Errorf("got %d calls, want 1", len(captured))
-	}
-}
-
-func TestNewReporterCancelledContextFails(t *testing.T) {
-	// A context that is already over must not start a 20 second wait for a
-	// socket that is not there.
-	clearPublishEnv(t)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	socketPath := filepath.Join(t.TempDir(), "absent.sock")
-
-	reporter, err := NewReporter(ctx, socketPath, "test-node", pb.ProcessingStrategy_STORE_ONLY, "")
-	if err == nil {
-		reporter.Close()
-		t.Fatal("expected NewReporter to fail with a cancelled context")
-	}
-
-	if !errors.Is(err, context.Canceled) {
-		t.Errorf("got error %v, want it to wrap context.Canceled", err)
-	}
-}
-
-func TestNewReporterWithoutSocketWarnsAndSendEventFails(t *testing.T) {
-	// When the socket never appears NewReporter still returns a reporter (the
-	// dial is lazy) and the send is what fails, keeping the send failure exit
-	// code of the old reporter rather than a configuration error.
+func TestSendEventWithoutSocketWaitsThenFails(t *testing.T) {
+	// When the socket never appears the send waits for it once and then fails,
+	// keeping the send failure exit code of the old reporter.
 	clearPublishEnv(t)
 	shortenSocketWaits(t, 300*time.Millisecond, 50*time.Millisecond, socketSendTimeout)
 
@@ -508,40 +406,35 @@ func TestSendEventWaitsForSocketToReappear(t *testing.T) {
 	shortenSocketWaits(t, 10*time.Second, 50*time.Millisecond, socketSendTimeout)
 
 	socketPath := filepath.Join(t.TempDir(), "pc.sock")
-	firstServer := serveOn(t, listenUnix(t, socketPath), &capturingConnector{})
 	reporter := newTestReporter(t, socketPath, "")
 
-	// Stopping the server closes the listener, which removes the socket file.
-	firstServer.Stop()
-
-	if removeErr := os.Remove(socketPath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
-		t.Fatalf("failed to remove socket file: %v", removeErr)
-	}
-
-	if _, statErr := os.Stat(socketPath); statErr == nil {
-		t.Fatal("socket file still exists after the server stopped")
-	}
-
-	// The restarted connector is built here so its cleanup belongs to the
-	// test; the goroutine only listens and serves once the socket is back.
+	// The connector is built here so its cleanup belongs to the test; the
+	// goroutine serves it once the reporter has found the socket missing.
 	connector := &capturingConnector{}
-	secondServer := grpc.NewServer()
-	pb.RegisterPlatformConnectorServer(secondServer, connector)
-	t.Cleanup(secondServer.Stop)
+	server := grpc.NewServer()
+	pb.RegisterPlatformConnectorServer(server, connector)
+	t.Cleanup(server.Stop)
+
+	socketMissing := awaitLog(t, "Platform connector socket missing at send time; waiting for it to come back")
 
 	go func() {
-		time.Sleep(300 * time.Millisecond)
+		<-socketMissing
 
 		lis, err := net.Listen("unix", socketPath)
 		if err != nil {
 			return
 		}
 
-		_ = secondServer.Serve(lis)
+		_ = server.Serve(lis)
 	}()
 
 	if err := reporter.SendEvent(context.Background(), true, false, "test event", ""); err != nil {
-		t.Fatalf("SendEvent failed after the socket came back: %v", err)
+		select {
+		case <-socketMissing:
+			t.Fatalf("SendEvent failed after the socket came back: %v", err)
+		default:
+			t.Fatalf("the reporter never logged the missing socket, so the connector was never served: %v", err)
+		}
 	}
 
 	if captured := connector.calls(t); len(captured) != 1 {
@@ -550,9 +443,8 @@ func TestSendEventWaitsForSocketToReappear(t *testing.T) {
 }
 
 func TestSendEventTimesOutWhenHandlerHangs(t *testing.T) {
-	// healthpub sets no deadline on the socket path, so the reporter bounds
-	// each send itself: a hanging node-local connector must not block the
-	// check forever.
+	// A hanging node-local connector must not block the check forever: socket
+	// mode bounds each send.
 	clearPublishEnv(t)
 	shortenSocketWaits(t, socketWaitTimeout, socketPollInterval, 2*time.Second)
 

@@ -33,6 +33,14 @@ DEFAULT_REDUCE_OP = "sum"
 # before the send is given up. Same default as the shared Go client.
 DEFAULT_PUBLISH_RETRY_WINDOW_SECONDS = 300.0
 
+# Environment contract (identical names in the shared Go client).
+TARGET_ENV = "HEALTH_PUBLISH_TARGET"
+INSECURE_ENV = "HEALTH_PUBLISH_INSECURE"
+TLS_CA_FILE_ENV = "HEALTH_PUBLISH_TLS_CA_FILE"
+TLS_SERVER_NAME_ENV = "HEALTH_PUBLISH_TLS_SERVER_NAME"
+TOKEN_PATH_ENV = "HEALTH_PUBLISH_TOKEN_PATH"
+RETRY_WINDOW_ENV = "HEALTH_PUBLISH_RETRY_WINDOW"
+
 # Go-style durations ("5m", "1m30s", "500ms"); bare numbers are rejected the
 # same way Go's time.ParseDuration rejects them, so both clients read the
 # same value the same way.
@@ -63,13 +71,8 @@ def _bool_env(environ: Mapping[str, str], name: str) -> bool:
 
 
 @dataclass(frozen=True)
-class DirectPublishConfig:
-    """HEALTH_PUBLISH_* settings for publishing straight to the deployment platform connector.
-
-    The variable names are shared with the Go client in commons/pkg/healthpub
-    and the gpu health monitor. Set, they replace the node-local socket for
-    every health event this check sends.
-    """
+class DirectPublisherConfig:
+    """HEALTH_PUBLISH_* settings for publishing straight to the deployment platform connector."""
 
     target: str
     insecure: bool
@@ -79,7 +82,7 @@ class DirectPublishConfig:
     retry_window_seconds: float
 
     @classmethod
-    def from_env(cls, environ: Mapping[str, str] | None = None) -> "DirectPublishConfig | None":
+    def from_env(cls, environ: Mapping[str, str] | None = None) -> "DirectPublisherConfig | None":
         """The direct mode settings, or None when HEALTH_PUBLISH_TARGET is unset or blank.
 
         A set target with missing or invalid companion settings raises
@@ -88,35 +91,32 @@ class DirectPublishConfig:
         """
         if environ is None:
             environ = os.environ
-        target = environ.get("HEALTH_PUBLISH_TARGET", "").strip()
+        target = environ.get(TARGET_ENV, "").strip()
         if not target:
             return None
 
-        insecure = _bool_env(environ, "HEALTH_PUBLISH_INSECURE")
-        ca_file = environ.get("HEALTH_PUBLISH_TLS_CA_FILE", "").strip() or None
+        insecure = _bool_env(environ, INSECURE_ENV)
+        ca_file = environ.get(TLS_CA_FILE_ENV, "").strip() or None
         if not insecure and not ca_file:
-            raise ValueError(
-                "HEALTH_PUBLISH_TLS_CA_FILE is required when HEALTH_PUBLISH_TARGET is set "
-                "unless HEALTH_PUBLISH_INSECURE=true"
-            )
+            raise ValueError(f"{TLS_CA_FILE_ENV} is required when {TARGET_ENV} is set unless {INSECURE_ENV}=true")
 
-        token_path = environ.get("HEALTH_PUBLISH_TOKEN_PATH", "").strip()
+        token_path = environ.get(TOKEN_PATH_ENV, "").strip()
         if not token_path:
             # The server authenticates every publish; there is no token-less mode.
-            raise ValueError("HEALTH_PUBLISH_TOKEN_PATH is required when HEALTH_PUBLISH_TARGET is set")
+            raise ValueError(f"{TOKEN_PATH_ENV} is required when {TARGET_ENV} is set")
 
-        retry_window_raw = environ.get("HEALTH_PUBLISH_RETRY_WINDOW", "").strip()
+        retry_window_raw = environ.get(RETRY_WINDOW_ENV, "").strip()
         retry_window_seconds = (
             _parse_duration(retry_window_raw) if retry_window_raw else DEFAULT_PUBLISH_RETRY_WINDOW_SECONDS
         )
         if retry_window_seconds <= 0:
-            raise ValueError(f"invalid HEALTH_PUBLISH_RETRY_WINDOW {retry_window_raw!r}: must be a positive duration")
+            raise ValueError(f"invalid {RETRY_WINDOW_ENV} {retry_window_raw!r}: must be a positive duration")
 
         return cls(
             target=target,
             insecure=insecure,
             ca_file=ca_file,
-            server_name_override=environ.get("HEALTH_PUBLISH_TLS_SERVER_NAME", "").strip() or None,
+            server_name_override=environ.get(TLS_SERVER_NAME_ENV, "").strip() or None,
             token_path=token_path,
             retry_window_seconds=retry_window_seconds,
         )
@@ -160,7 +160,7 @@ class Config:
     pod_name: str
     processing_strategy: int
     token_path: str | None = None
-    publish: DirectPublishConfig | None = None
+    publish: DirectPublisherConfig | None = None
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -210,7 +210,7 @@ class Config:
         except ValueError as err:
             raise ValueError(f"Invalid PROCESSING_STRATEGY: {strategy_str}") from err
 
-        publish = DirectPublishConfig.from_env()
+        publish = DirectPublisherConfig.from_env()
 
         return cls(
             gang_config_dir=gang_config_dir,

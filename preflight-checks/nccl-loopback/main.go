@@ -61,10 +61,9 @@ func run() int {
 		return exitConfigError
 	}
 
-	// The reporter is built before the benchmark so an incomplete or invalid
-	// publishing environment fails as a configuration error, before any GPU
-	// work is done.
-	reporter, err := health.NewReporter(ctx, cfg.ConnectorSocket, cfg.NodeName, cfg.ProcessingStrategy, cfg.TokenPath)
+	// The reporter is built before the benchmark so a bad publishing
+	// environment fails as a configuration error before any GPU work.
+	reporter, err := health.NewReporter(cfg.ConnectorSocket, cfg.NodeName, cfg.ProcessingStrategy, cfg.TokenPath)
 	if err != nil {
 		slog.Error("Platform connector configuration error", "error", err)
 		return exitConfigError

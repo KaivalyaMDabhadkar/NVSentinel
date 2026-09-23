@@ -180,6 +180,7 @@ def _run_benchmark(cfg: Config, rank: int) -> int:
             "threshold_gbps": cfg.bw_threshold_gbps,
             "skip_bandwidth_check": cfg.skip_bandwidth_check,
             "message_sizes": cfg.message_sizes,
+            "publish_target": cfg.publish.target if cfg.publish else None,
         },
     )
 

@@ -51,6 +51,7 @@ def main() -> None:
             "processing_strategy": pb.ProcessingStrategy.Name(cfg.processing_strategy),
             "status_retry_max_attempts": cfg.status_retry_max_attempts,
             "status_retry_interval_seconds": cfg.status_retry_interval_seconds,
+            "publish_target": cfg.publish.target if cfg.publish else None,
         },
     )
 

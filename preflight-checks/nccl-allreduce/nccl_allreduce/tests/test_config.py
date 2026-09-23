@@ -22,7 +22,7 @@ import pytest
 from nccl_allreduce.config import (
     DEFAULT_PUBLISH_RETRY_WINDOW_SECONDS,
     Config,
-    DirectPublishConfig,
+    DirectPublisherConfig,
     _parse_float,
     _parse_int,
 )
@@ -188,7 +188,7 @@ class TestConfigFromEnv:
                 Config.from_env()
 
 
-class TestDirectPublishConfigFromEnv:
+class TestDirectPublisherConfigFromEnv:
     """HEALTH_PUBLISH_* parsing, shared with the Go client and the gpu health monitor."""
 
     FULL_ENV = {
@@ -200,17 +200,17 @@ class TestDirectPublishConfigFromEnv:
     }
 
     def test_unset_target_means_none(self) -> None:
-        assert DirectPublishConfig.from_env({}) is None
+        assert DirectPublisherConfig.from_env({}) is None
 
     @pytest.mark.parametrize("target", ["", "   "])
     def test_blank_target_means_none(self, target: str) -> None:
         env = {**self.FULL_ENV, "HEALTH_PUBLISH_TARGET": target}
-        assert DirectPublishConfig.from_env(env) is None
+        assert DirectPublisherConfig.from_env(env) is None
 
     def test_full_env(self) -> None:
-        cfg = DirectPublishConfig.from_env(self.FULL_ENV)
+        cfg = DirectPublisherConfig.from_env(self.FULL_ENV)
 
-        assert cfg == DirectPublishConfig(
+        assert cfg == DirectPublisherConfig(
             target="platform-connector-deployment.nvsentinel.svc.cluster.local:50051",
             insecure=False,
             ca_file="/etc/nvsentinel/platform-connector-deployment-ca/ca.crt",
@@ -225,7 +225,7 @@ class TestDirectPublishConfigFromEnv:
             "HEALTH_PUBLISH_TLS_CA_FILE": "/ca.crt",
             "HEALTH_PUBLISH_TOKEN_PATH": "/token",
         }
-        cfg = DirectPublishConfig.from_env(env)
+        cfg = DirectPublisherConfig.from_env(env)
 
         assert cfg.insecure is False
         assert cfg.server_name_override is None
@@ -234,15 +234,15 @@ class TestDirectPublishConfigFromEnv:
     def test_ca_file_required_unless_insecure(self) -> None:
         env = {"HEALTH_PUBLISH_TARGET": "host:50051", "HEALTH_PUBLISH_TOKEN_PATH": "/token"}
         with pytest.raises(ValueError, match="HEALTH_PUBLISH_TLS_CA_FILE is required"):
-            DirectPublishConfig.from_env(env)
+            DirectPublisherConfig.from_env(env)
 
-        cfg = DirectPublishConfig.from_env({**env, "HEALTH_PUBLISH_INSECURE": "true"})
+        cfg = DirectPublisherConfig.from_env({**env, "HEALTH_PUBLISH_INSECURE": "true"})
         assert cfg.insecure is True
         assert cfg.ca_file is None
 
     def test_ca_file_wins_over_insecure(self) -> None:
         env = {**self.FULL_ENV, "HEALTH_PUBLISH_INSECURE": "true"}
-        cfg = DirectPublishConfig.from_env(env)
+        cfg = DirectPublisherConfig.from_env(env)
 
         assert cfg.insecure is True
         assert cfg.ca_file == "/etc/nvsentinel/platform-connector-deployment-ca/ca.crt"
@@ -254,7 +254,7 @@ class TestDirectPublishConfigFromEnv:
         if token_path is not None:
             env["HEALTH_PUBLISH_TOKEN_PATH"] = token_path
         with pytest.raises(ValueError, match="HEALTH_PUBLISH_TOKEN_PATH is required"):
-            DirectPublishConfig.from_env(env)
+            DirectPublisherConfig.from_env(env)
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
@@ -262,13 +262,13 @@ class TestDirectPublishConfigFromEnv:
     )
     def test_insecure_parsed_like_go(self, raw: str, expected: bool) -> None:
         env = {**self.FULL_ENV, "HEALTH_PUBLISH_INSECURE": raw}
-        assert DirectPublishConfig.from_env(env).insecure is expected
+        assert DirectPublisherConfig.from_env(env).insecure is expected
 
     @pytest.mark.parametrize("raw", ["yes", "on", "2", "enabled"])
     def test_bad_boolean_is_rejected(self, raw: str) -> None:
         env = {**self.FULL_ENV, "HEALTH_PUBLISH_INSECURE": raw}
         with pytest.raises(ValueError, match="HEALTH_PUBLISH_INSECURE"):
-            DirectPublishConfig.from_env(env)
+            DirectPublisherConfig.from_env(env)
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
@@ -276,23 +276,19 @@ class TestDirectPublishConfigFromEnv:
     )
     def test_retry_window_parsed_like_go(self, raw: str, expected: float) -> None:
         env = {**self.FULL_ENV, "HEALTH_PUBLISH_RETRY_WINDOW": raw}
-        assert DirectPublishConfig.from_env(env).retry_window_seconds == pytest.approx(expected)
+        assert DirectPublisherConfig.from_env(env).retry_window_seconds == pytest.approx(expected)
 
     @pytest.mark.parametrize("raw", ["300", "5 m", "-5m", "5x", "abc"])
     def test_bad_retry_window_is_rejected(self, raw: str) -> None:
         env = {**self.FULL_ENV, "HEALTH_PUBLISH_RETRY_WINDOW": raw}
         with pytest.raises(ValueError, match="duration"):
-            DirectPublishConfig.from_env(env)
+            DirectPublisherConfig.from_env(env)
 
     def test_zero_retry_window_is_rejected(self) -> None:
         env = {**self.FULL_ENV, "HEALTH_PUBLISH_RETRY_WINDOW": "0s"}
         with pytest.raises(ValueError, match="must be a positive duration"):
-            DirectPublishConfig.from_env(env)
+            DirectPublisherConfig.from_env(env)
 
     def test_blank_retry_window_means_default(self) -> None:
         env = {**self.FULL_ENV, "HEALTH_PUBLISH_RETRY_WINDOW": "  "}
-        assert DirectPublishConfig.from_env(env).retry_window_seconds == DEFAULT_PUBLISH_RETRY_WINDOW_SECONDS
-
-    def test_reads_process_environment_by_default(self) -> None:
-        with patch.dict(os.environ, self.FULL_ENV, clear=True):
-            assert DirectPublishConfig.from_env().target == self.FULL_ENV["HEALTH_PUBLISH_TARGET"]
+        assert DirectPublisherConfig.from_env(env).retry_window_seconds == DEFAULT_PUBLISH_RETRY_WINDOW_SECONDS

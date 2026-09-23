@@ -105,7 +105,7 @@ func run() error {
 	// connector CA copies current when the checks verify the deployment over
 	// TLS. The insecure development mode has no CA to copy, so it runs without
 	// a manager, a namespace watch or a metrics listener.
-	if cfg.GangCoordination.Enabled || cfg.HealthPublishCAConfigMap != "" {
+	if cfg.GangCoordination.Enabled || cfg.HealthPublishCAFile != "" {
 		if err := setupManager(ctx, cfg, stop); err != nil {
 			return err
 		}
@@ -149,9 +149,8 @@ func setupManager(ctx context.Context, cfg *config.Config, stop context.CancelFu
 
 	var caSync *controller.CABundleSync
 
-	if cfg.HealthPublishCAConfigMap != "" {
-		caSync = controller.NewCABundleSync(mgr.GetClient(), mgr.GetAPIReader(),
-			cfg.HealthPublishCAFile, cfg.HealthPublishCAConfigMap)
+	if cfg.HealthPublishCAFile != "" {
+		caSync = controller.NewCABundleSync(mgr.GetClient(), mgr.GetAPIReader(), cfg.HealthPublishCAFile)
 
 		if err := mgr.Add(caSync); err != nil {
 			return fmt.Errorf("failed to add CA bundle sync: %w", err)
@@ -167,7 +166,7 @@ func setupManager(ctx context.Context, cfg *config.Config, stop context.CancelFu
 			if err := caSync.Ensure(ensureCtx, namespace); err != nil {
 				slog.Error("Failed to ensure platform connector CA ConfigMap",
 					"namespace", namespace,
-					"configMap", cfg.HealthPublishCAConfigMap,
+					"configMap", webhook.HealthPublishCAConfigMapName,
 					"error", err)
 			}
 		}

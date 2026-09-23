@@ -110,11 +110,10 @@ type FileConfig struct {
 	HealthPublishTarget string `yaml:"healthPublishTarget,omitempty"`
 
 	// HealthPublishCAFile is the CA bundle path inside the preflight
-	// controller pod. The controller copies it into a ConfigMap named
-	// HealthPublishCAConfigMap in every namespace it injects into, and the
-	// checks read that copy to verify the server. Both are set together.
-	HealthPublishCAFile      string `yaml:"healthPublishCAFile,omitempty"`
-	HealthPublishCAConfigMap string `yaml:"healthPublishCAConfigMap,omitempty"`
+	// controller pod. The controller copies it into a ConfigMap in every
+	// namespace it injects into, and the checks read that copy to verify the
+	// server.
+	HealthPublishCAFile string `yaml:"healthPublishCAFile,omitempty"`
 
 	// HealthPublishInsecure lets the checks send plaintext to the target.
 	// Development only; it replaces the CA settings.
@@ -448,17 +447,16 @@ func (c *FileConfig) validateConnectorToken() error {
 // validateHealthPublish checks the direct publishing settings. Without a
 // target none of the other healthPublish* settings may be set. With a target
 // the checks need the projected token, and exactly one way to trust the
-// server: the CA file and ConfigMap pair, or the insecure development mode.
+// server: the CA file, or the insecure development mode.
 func (c *FileConfig) validateHealthPublish() error {
 	caFileSet := c.HealthPublishCAFile != ""
-	caConfigMapSet := c.HealthPublishCAConfigMap != ""
 
 	if c.HealthPublishTarget == "" {
-		if caFileSet || caConfigMapSet || c.HealthPublishInsecure {
+		if caFileSet || c.HealthPublishInsecure {
 			return errors.New(
 				"healthPublish* settings need healthPublishTarget: set it to the deployment " +
-					"platform connector address, or remove healthPublishCAFile, " +
-					"healthPublishCAConfigMap and healthPublishInsecure")
+					"platform connector address, or remove healthPublishCAFile and " +
+					"healthPublishInsecure")
 		}
 
 		return nil
@@ -472,26 +470,9 @@ func (c *FileConfig) validateHealthPublish() error {
 				"connectorTokenMountPath and connectorTokenExpirationSeconds")
 	}
 
-	return c.validateHealthPublishTrust()
-}
-
-// validateHealthPublishTrust checks how the checks trust the server once a
-// target is set: the CA file and ConfigMap pair, or insecure, never both or
-// neither.
-func (c *FileConfig) validateHealthPublishTrust() error {
-	caFileSet := c.HealthPublishCAFile != ""
-	caConfigMapSet := c.HealthPublishCAConfigMap != ""
-
-	if caFileSet != caConfigMapSet {
-		return errors.New(
-			"healthPublishCAFile and healthPublishCAConfigMap must be set together: the " +
-				"controller copies the file into the ConfigMap that the checks read")
-	}
-
 	if caFileSet == c.HealthPublishInsecure {
 		return errors.New(
-			"healthPublishTarget needs exactly one of healthPublishCAFile with " +
-				"healthPublishCAConfigMap, or healthPublishInsecure: true")
+			"healthPublishTarget needs exactly one of healthPublishCAFile or healthPublishInsecure: true")
 	}
 
 	if caFileSet && !strings.HasPrefix(c.HealthPublishCAFile, "/") {
