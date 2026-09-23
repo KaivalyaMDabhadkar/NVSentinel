@@ -112,6 +112,20 @@ func TestCABundleSync_Ensure(t *testing.T) {
 		assert.Equal(t, "true", cm.Labels[caBundleLabel])
 	})
 
+	t.Run("claims an unlabelled ConfigMap of the same name", func(t *testing.T) {
+		c := fake.NewClientBuilder().WithObjects(&corev1.ConfigMap{
+			Name:      webhook.HealthPublishCAConfigMapName,
+			Namespace: "team-a",
+			Data:      map[string]string{webhook.HealthPublishCAKey: caOldPEM},
+		}).Build()
+		s := NewCABundleSync(c, c, writeCAFile(t, t.TempDir(), caOldPEM))
+
+		require.NoError(t, s.Ensure(context.Background(), "team-a"))
+
+		assert.Equal(t, caBundleLabels(), getCM(t, c, "team-a", webhook.HealthPublishCAConfigMapName).Labels,
+			"the copy must carry the labels the rotation sweep selects on")
+	})
+
 	t.Run("AlreadyExists on create is treated as a re-read", func(t *testing.T) {
 		// The reader misses the copy once, so Create hits AlreadyExists; the
 		// sync must then read the real copy and update it.

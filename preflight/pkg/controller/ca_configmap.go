@@ -216,9 +216,11 @@ func (s *CABundleSync) refreshCopies(ctx context.Context, ca []byte) error {
 	return errors.Join(errs...)
 }
 
-// updateIfDiffers writes ca into existing when its ca.crt differs.
+// updateIfDiffers brings an existing ConfigMap of our name to the current
+// bundle and labels. The labels matter as much as the data: refresh only
+// sweeps labelled copies, so an unlabelled one would miss the next rotation.
 func (s *CABundleSync) updateIfDiffers(ctx context.Context, existing *corev1.ConfigMap, ca []byte) error {
-	if existing.Data[webhook.HealthPublishCAKey] == string(ca) {
+	if existing.Data[webhook.HealthPublishCAKey] == string(ca) && hasCABundleLabels(existing) {
 		return nil
 	}
 
@@ -227,6 +229,14 @@ func (s *CABundleSync) updateIfDiffers(ctx context.Context, existing *corev1.Con
 	}
 
 	existing.Data[webhook.HealthPublishCAKey] = string(ca)
+
+	if existing.Labels == nil {
+		existing.Labels = map[string]string{}
+	}
+
+	for k, v := range caBundleLabels() {
+		existing.Labels[k] = v
+	}
 
 	if err := s.client.Update(ctx, existing); err != nil {
 		return fmt.Errorf("failed to update ConfigMap %s/%s: %w", existing.Namespace, existing.Name, err)
@@ -289,6 +299,16 @@ func (s *CABundleSync) readBundle() ([]byte, error) {
 	}
 
 	return ca, nil
+}
+
+func hasCABundleLabels(cm *corev1.ConfigMap) bool {
+	for k, v := range caBundleLabels() {
+		if cm.Labels[k] != v {
+			return false
+		}
+	}
+
+	return true
 }
 
 func caBundleLabels() map[string]string {
