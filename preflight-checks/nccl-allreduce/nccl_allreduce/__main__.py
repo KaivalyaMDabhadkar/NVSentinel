@@ -248,6 +248,7 @@ def _handle_success(cfg: Config, result: BenchmarkResult) -> int:
             node_name=cfg.node_name,
             processing_strategy=cfg.processing_strategy,
             token_path=cfg.token_path,
+            publish=cfg.publish,
         )
         reporter.send_success(message)
     except RuntimeError as err:
@@ -279,6 +280,7 @@ def _handle_failure(cfg: Config, error: NCCLError, message: str) -> int:
             node_name=cfg.node_name,
             processing_strategy=cfg.processing_strategy,
             token_path=cfg.token_path,
+            publish=cfg.publish,
         )
         reporter.send_failure(error, message)
     except RuntimeError as err:

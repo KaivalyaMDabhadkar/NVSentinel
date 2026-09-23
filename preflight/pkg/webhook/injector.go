@@ -50,6 +50,18 @@ const (
 	// ServiceAccount (every pod has one, so no coordination with the workload
 	// is needed).
 	connectorTokenVolumeName = "nvsentinel-connector-token"
+	// healthPublishCAVolumeName holds the per namespace ConfigMap copy of the
+	// deployment platform connector CA bundle. The controller keeps the copy
+	// current; the checks read it to verify the server in direct mode.
+	healthPublishCAVolumeName = "nvsentinel-platform-connector-ca"
+	// healthPublishCAMountPath is where that copy is mounted in the checks.
+	healthPublishCAMountPath = "/etc/nvsentinel/platform-connector-deployment-ca"
+	// healthPublishCAKey is the ConfigMap key and file name of the bundle.
+	healthPublishCAKey = "ca.crt"
+	// healthPublisherLabel marks pods the deployment platform connector's
+	// NetworkPolicy lets through. Injected pods carry it in direct mode.
+	healthPublisherLabel      = "nvsentinel.nvidia.com/health-publisher"
+	healthPublisherLabelValue = "true"
 	// dshmVolumeName is the name for the shared memory volume needed by NCCL
 	dshmVolumeName = "dshm"
 	// ncclTopoVolumeName is the name for the NCCL topology ConfigMap volume
@@ -200,6 +212,10 @@ func (i *Injector) InjectInitContainers(ctx context.Context, pod *corev1.Pod) ([
 		return nil, nil, err
 	}
 
+	if err := i.ValidateHealthPublishCAVolume(pod); err != nil {
+		return nil, nil, err
+	}
+
 	// Check if pod is part of a gang
 	gangCtx := i.gangContextForPod(ctx, pod)
 
@@ -229,6 +245,7 @@ func (i *Injector) InjectInitContainers(ctx context.Context, pod *corev1.Pod) ([
 	patches := i.patchInitContainers(pod, initContainers)
 	patches = append(patches, i.injectVolumes(pod, gangCtx)...)
 	patches = append(patches, i.injectImagePullSecrets(pod)...)
+	patches = append(patches, i.injectHealthPublisherLabel(pod)...)
 
 	return patches, gangCtx, nil
 }
@@ -418,7 +435,9 @@ func (i *Injector) buildInitContainers(
 		}
 
 		i.injectCommonEnv(container)
+		i.injectHealthPublishEnv(container)
 		i.injectConnectorTokenMount(container)
+		i.injectHealthPublishCAMount(container)
 		i.injectGangEnv(container, gangCtx)
 		i.inheritUserConfig(container, tmpl, userEnvVars, userVolumeMounts)
 
@@ -564,6 +583,155 @@ func (i *Injector) injectCommonEnv(container *corev1.Container) {
 	i.mergeEnvVars(container, envVars)
 }
 
+// healthPublishCAConfigured reports whether direct mode verifies the server
+// with the CA ConfigMap copy. Config validation makes the CA file and the
+// ConfigMap name a pair, and one of that pair or insecure mode is set whenever
+// the target is.
+func (i *Injector) healthPublishCAConfigured() bool {
+	return i.cfg.HealthPublishTarget != "" && i.cfg.HealthPublishCAConfigMap != ""
+}
+
+// injectHealthPublishEnv points the check at the deployment platform connector
+// when a target is configured. The token is the same projected token the
+// socket path uses, so the path comes from the connector token settings.
+// Chart env still wins because mergeEnvVars only adds missing names.
+func (i *Injector) injectHealthPublishEnv(container *corev1.Container) {
+	if i.cfg.HealthPublishTarget == "" {
+		return
+	}
+
+	envVars := []corev1.EnvVar{
+		{
+			Name:  "HEALTH_PUBLISH_TARGET",
+			Value: i.cfg.HealthPublishTarget,
+		},
+		{
+			Name:  "HEALTH_PUBLISH_TOKEN_PATH",
+			Value: i.connectorTokenMountPath() + "/token",
+		},
+	}
+
+	if i.healthPublishCAConfigured() {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "HEALTH_PUBLISH_TLS_CA_FILE",
+			Value: healthPublishCAMountPath + "/" + healthPublishCAKey,
+		})
+	} else {
+		envVars = append(envVars, corev1.EnvVar{
+			Name:  "HEALTH_PUBLISH_INSECURE",
+			Value: "true",
+		})
+	}
+
+	i.mergeEnvVars(container, envVars)
+}
+
+// injectHealthPublishCAMount attaches the CA ConfigMap copy to a check
+// container. It runs right after injectConnectorTokenMount so an inherited
+// user mount at the same path is skipped by mergeVolumeMounts. The matching
+// pod-level volume is added by injectVolumes.
+func (i *Injector) injectHealthPublishCAMount(container *corev1.Container) {
+	if !i.healthPublishCAConfigured() {
+		return
+	}
+
+	for _, m := range container.VolumeMounts {
+		if m.Name == healthPublishCAVolumeName {
+			return
+		}
+	}
+
+	container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+		Name:      healthPublishCAVolumeName,
+		MountPath: healthPublishCAMountPath,
+		ReadOnly:  true,
+	})
+}
+
+// healthPublishCAVolume is the ConfigMap volume this webhook injects for the
+// CA bundle copy. It is not optional: a check without the bundle cannot
+// verify the server, and admission is the right place to surface that.
+func (i *Injector) healthPublishCAVolume() corev1.Volume {
+	return corev1.Volume{
+		Name: healthPublishCAVolumeName,
+		ConfigMap: &corev1.ConfigMapVolumeSource{
+			Name: i.cfg.HealthPublishCAConfigMap,
+			Items: []corev1.KeyToPath{{
+				Key:  healthPublishCAKey,
+				Path: healthPublishCAKey,
+			}},
+		},
+	}
+}
+
+// ValidateHealthPublishCAVolume reports an error when the pod already carries
+// a volume by the injected CA volume's name that is not the ConfigMap
+// projection this webhook would have added. A foreign volume there would make
+// the check trust whatever server the workload chose, so the pod is refused
+// at admission, the same way ValidateConnectorTokenVolume refuses a foreign
+// token volume.
+func (i *Injector) ValidateHealthPublishCAVolume(pod *corev1.Pod) error {
+	if !i.healthPublishCAConfigured() {
+		return nil
+	}
+
+	for _, vol := range pod.Spec.Volumes {
+		if vol.Name != healthPublishCAVolumeName {
+			continue
+		}
+
+		if !isOurHealthPublishCAVolume(vol, i.cfg.HealthPublishCAConfigMap) {
+			return fmt.Errorf(
+				"pod declares a volume named %q that is not the CA ConfigMap projection "+
+					"preflight injects; rename it, because injected checks read the "+
+					"platform connector CA bundle from that volume",
+				healthPublishCAVolumeName)
+		}
+	}
+
+	return nil
+}
+
+// isOurHealthPublishCAVolume reports whether an existing pod volume is exactly
+// the ConfigMap projection this webhook would have injected: the configured
+// ConfigMap, only the ca.crt key at the ca.crt path, and not optional.
+func isOurHealthPublishCAVolume(vol corev1.Volume, configMapName string) bool {
+	cm := vol.ConfigMap
+	if cm == nil || cm.Name != configMapName || len(cm.Items) != 1 {
+		return false
+	}
+
+	if cm.Optional != nil && *cm.Optional {
+		return false
+	}
+
+	return cm.Items[0].Key == healthPublishCAKey && cm.Items[0].Path == healthPublishCAKey
+}
+
+// injectHealthPublisherLabel adds the label the deployment platform
+// connector's NetworkPolicy selects, so the injected checks can reach it. The
+// slash in the label key is escaped as "~1" for the JSON pointer. A JSON Patch
+// add on an existing member replaces its value, so a stale value is fixed too.
+func (i *Injector) injectHealthPublisherLabel(pod *corev1.Pod) []PatchOperation {
+	if i.cfg.HealthPublishTarget == "" {
+		return nil
+	}
+
+	if len(pod.Labels) == 0 {
+		return []PatchOperation{{
+			Op:    patchOpAdd,
+			Path:  "/metadata/labels",
+			Value: map[string]string{healthPublisherLabel: healthPublisherLabelValue},
+		}}
+	}
+
+	return []PatchOperation{{
+		Op:    patchOpAdd,
+		Path:  "/metadata/labels/" + strings.ReplaceAll(healthPublisherLabel, "/", "~1"),
+		Value: healthPublisherLabelValue,
+	}}
+}
+
 // connectorTokenMountPath is where the projected token is mounted in injected
 // check containers.
 //
@@ -672,31 +840,12 @@ func isOurConnectorTokenVolume(vol corev1.Volume, audience string, expirationSec
 func (i *Injector) injectVolumes(pod *corev1.Pod, gangCtx *GangContext) []PatchOperation {
 	var patches []PatchOperation
 
-	var volumesToAdd []corev1.Volume
-
 	existingVolumes := make(map[string]bool)
 	for _, vol := range pod.Spec.Volumes {
 		existingVolumes[vol.Name] = true
 	}
 
-	if i.cfg.ConnectorSocket != "" && !existingVolumes[nvsentinelSocketVolumeName] {
-		// Platform-connector mounts /var/run/nvsentinel (host) -> /var/run (container)
-		// and creates socket at /var/run/nvsentinel.sock inside its container.
-		// This is the same hostPath used by gpu-health-monitor.
-		hostPathType := corev1.HostPathDirectoryOrCreate
-
-		volumesToAdd = append(volumesToAdd, corev1.Volume{
-			Name: nvsentinelSocketVolumeName,
-			HostPath: &corev1.HostPathVolumeSource{
-				Path: "/var/run/nvsentinel",
-				Type: &hostPathType,
-			},
-		})
-	}
-
-	if i.cfg.ConnectorTokenAudience != "" && !existingVolumes[connectorTokenVolumeName] {
-		volumesToAdd = append(volumesToAdd, i.connectorTokenVolume())
-	}
+	volumesToAdd := i.collectPublishVolumes(existingVolumes)
 
 	if gangCtx != nil {
 		volumesToAdd = append(volumesToAdd, i.collectGangVolumes(gangCtx, existingVolumes)...)
@@ -723,6 +872,38 @@ func (i *Injector) injectVolumes(pod *corev1.Pod, gangCtx *GangContext) []PatchO
 	}
 
 	return patches
+}
+
+// collectPublishVolumes gathers the volumes every injected check publishes
+// through (socket, projected token, CA ConfigMap copy) that are not already
+// present in the pod.
+func (i *Injector) collectPublishVolumes(existingVolumes map[string]bool) []corev1.Volume {
+	var volumes []corev1.Volume
+
+	if i.cfg.ConnectorSocket != "" && !existingVolumes[nvsentinelSocketVolumeName] {
+		// Platform-connector mounts /var/run/nvsentinel (host) -> /var/run (container)
+		// and creates socket at /var/run/nvsentinel.sock inside its container.
+		// This is the same hostPath used by gpu-health-monitor.
+		hostPathType := corev1.HostPathDirectoryOrCreate
+
+		volumes = append(volumes, corev1.Volume{
+			Name: nvsentinelSocketVolumeName,
+			HostPath: &corev1.HostPathVolumeSource{
+				Path: "/var/run/nvsentinel",
+				Type: &hostPathType,
+			},
+		})
+	}
+
+	if i.cfg.ConnectorTokenAudience != "" && !existingVolumes[connectorTokenVolumeName] {
+		volumes = append(volumes, i.connectorTokenVolume())
+	}
+
+	if i.healthPublishCAConfigured() && !existingVolumes[healthPublishCAVolumeName] {
+		volumes = append(volumes, i.healthPublishCAVolume())
+	}
+
+	return volumes
 }
 
 // injectImagePullSecrets builds JSON Patch operations to add configured

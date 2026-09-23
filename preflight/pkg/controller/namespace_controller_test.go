@@ -138,7 +138,7 @@ func setupNSTestEnv(t *testing.T, ctx context.Context) (*ActiveNamespaces, *nsTe
 	err = ctrl.NewControllerManagedBy(mgr).
 		For(&corev1.Namespace{}).
 		WithOptions(controller.Options{SkipNameValidation: &skipValidation}).
-		Complete(NewNamespaceReconciler(mgr.GetClient(), active))
+		Complete(NewNamespaceReconciler(mgr.GetClient(), active, nil))
 	require.NoError(t, err)
 
 	mgrCtx, mgrCancel := context.WithCancel(ctx)
@@ -287,7 +287,7 @@ func newNSReconcilerWith(t *testing.T, active *ActiveNamespaces, objs ...client.
 	require.NoError(t, corev1.AddToScheme(scheme))
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
 
-	return NewNamespaceReconciler(c, active), c
+	return NewNamespaceReconciler(c, active, nil), c
 }
 
 func reconcileNS(t *testing.T, r *NamespaceReconciler, name string) {

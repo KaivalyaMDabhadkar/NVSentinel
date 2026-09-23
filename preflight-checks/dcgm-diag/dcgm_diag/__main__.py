@@ -59,6 +59,7 @@ def main() -> None:
         node_name=cfg.node_name,
         processing_strategy=cfg.processing_strategy,
         token_path=cfg.token_path,
+        publish=cfg.publish,
     )
 
     diag = DCGMDiagnostic(

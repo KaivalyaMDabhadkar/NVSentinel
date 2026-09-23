@@ -12,14 +12,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+from concurrent import futures
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import grpc
 import pytest
+from google.protobuf.empty_pb2 import Empty
 
-from dcgm_diag.health import BACKOFF_FACTOR, INITIAL_DELAY, MAX_RETRIES, HealthReporter
+from dcgm_diag.config import DirectPublishConfig
+from dcgm_diag.health import (
+    BACKOFF_FACTOR,
+    INITIAL_BACKOFF_SECONDS,
+    INITIAL_DELAY,
+    MAX_BACKOFF_SECONDS,
+    MAX_RECONNECT_BACKOFF_MS,
+    MAX_RETRIES,
+    HealthReporter,
+    RPC_TIMEOUT,
+    SPENT_BUDGET_ATTEMPT_SECONDS,
+)
 from dcgm_diag.protos import health_event_pb2 as pb
+from dcgm_diag.protos import health_event_pb2_grpc as pb_grpc
+
+# The deployment platform connector's rule for the idempotency-key header.
+IDEMPOTENCY_KEY_FORMAT = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 class RpcErrorWithCode(grpc.RpcError):
@@ -314,3 +333,356 @@ class TestTokenAuth:
         # generic authentication error that says nothing about the mount.
         assert token_path in str(raised.value)
         stub.HealthEventOccurredV1.assert_not_called()
+
+
+class RecordingServicer(pb_grpc.PlatformConnectorServicer):
+    """A platform connector that records every request and its call metadata."""
+
+    def __init__(self) -> None:
+        self.received: list[tuple[pb.HealthEvents, dict[str, str]]] = []
+
+    def HealthEventOccurredV1(self, request: pb.HealthEvents, context: Any) -> Empty:
+        self.received.append((request, dict(context.invocation_metadata())))
+        return Empty()
+
+
+class FakeClock:
+    """A monotonic clock that only moves when the reporter sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        assert seconds >= 0
+        self.now += seconds
+
+
+class TestDirectMode:
+    """Publishing straight to the deployment platform connector (HEALTH_PUBLISH_TARGET set)."""
+
+    @staticmethod
+    def _write_token(tmp_path: Path, contents: str) -> str:
+        token_path = tmp_path / "token"
+        token_path.write_text(contents)
+        return str(token_path)
+
+    @staticmethod
+    def _make_config(**overrides: Any) -> DirectPublishConfig:
+        settings: dict[str, Any] = {
+            "target": "127.0.0.1:1",
+            "insecure": True,
+            "ca_file": None,
+            "server_name_override": None,
+            "token_path": "/nonexistent/token",
+            "retry_window_seconds": 10.0,
+        }
+        settings.update(overrides)
+        return DirectPublishConfig(**settings)
+
+    @classmethod
+    def _make_reporter(cls, **overrides: Any) -> HealthReporter:
+        return HealthReporter(
+            socket_path="unix:///var/run/nvsentinel.sock",
+            node_name="test-node",
+            processing_strategy=pb.ProcessingStrategy.Value("EXECUTE_REMEDIATION"),
+            publish=cls._make_config(**overrides),
+        )
+
+    @staticmethod
+    def _send_with_failing_stub(
+        reporter: HealthReporter, error: Exception, clock: FakeClock | None = None
+    ) -> tuple[bool, MagicMock]:
+        """Runs one send whose every attempt raises `error` on a fake clock; returns (result, stub)."""
+        clock = clock or FakeClock()
+        stub = MagicMock()
+        stub.HealthEventOccurredV1.side_effect = error
+        with patch("dcgm_diag.health.sleep", clock.sleep), patch("dcgm_diag.health.monotonic", clock.monotonic), patch(
+            "dcgm_diag.health.random.uniform", return_value=0.0
+        ), patch("dcgm_diag.health.grpc.insecure_channel"), patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            result = reporter._send_with_retries(pb.HealthEvents(version=1))
+        return result, stub
+
+    def test_event_arrives_with_bearer_token_and_idempotency_key(self, tmp_path: Path) -> None:
+        """End to end over a real in-process gRPC server: both headers reach the wire."""
+        servicer = RecordingServicer()
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
+        pb_grpc.add_PlatformConnectorServicer_to_server(servicer, server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        try:
+            reporter = self._make_reporter(
+                target=f"127.0.0.1:{port}", token_path=self._write_token(tmp_path, "wire-token")
+            )
+
+            assert reporter._send_with_retries(pb.HealthEvents(version=1, events=[pb.HealthEvent(version=1)])) is True
+        finally:
+            server.stop(0)
+
+        assert len(servicer.received) == 1
+        request, received_metadata = servicer.received[0]
+        assert len(request.events) == 1
+        assert received_metadata["authorization"] == "Bearer wire-token"
+        assert IDEMPOTENCY_KEY_FORMAT.match(received_metadata["idempotency-key"])
+
+    def test_socket_mode_is_untouched_without_publish(self) -> None:
+        """No publish config means the node-local socket, no idempotency key."""
+        reporter = HealthReporter(
+            socket_path="unix:///var/run/nvsentinel.sock",
+            node_name="test-node",
+            processing_strategy=pb.ProcessingStrategy.Value("EXECUTE_REMEDIATION"),
+        )
+        stub = MagicMock()
+        with patch("dcgm_diag.health.grpc.insecure_channel") as insecure_channel, patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            assert reporter._send_with_retries(pb.HealthEvents(version=1)) is True
+
+        insecure_channel.assert_called_once_with("unix:///var/run/nvsentinel.sock")
+        assert stub.HealthEventOccurredV1.call_args.kwargs["metadata"] is None
+
+    @pytest.mark.parametrize(
+        "code",
+        [grpc.StatusCode.INVALID_ARGUMENT, grpc.StatusCode.PERMISSION_DENIED, grpc.StatusCode.UNIMPLEMENTED],
+    )
+    def test_permanent_rejection_is_not_retried(self, code: grpc.StatusCode, tmp_path: Path) -> None:
+        reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"))
+
+        result, stub = self._send_with_failing_stub(reporter, RpcErrorWithCode(code))
+
+        assert result is False
+        stub.HealthEventOccurredV1.assert_called_once()
+
+    @pytest.mark.parametrize(
+        "error",
+        [
+            RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE),
+            RpcErrorWithCode(grpc.StatusCode.DEADLINE_EXCEEDED),
+            RpcErrorWithCode(grpc.StatusCode.UNAUTHENTICATED),
+            grpc.RpcError(),
+        ],
+    )
+    def test_transient_failure_is_retried_until_the_window_ends_under_one_key(
+        self, error: grpc.RpcError, tmp_path: Path
+    ) -> None:
+        """UNAUTHENTICATED is retried too: the projected token rotates. The key never changes across retries."""
+        reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"), retry_window_seconds=10.0)
+        clock = FakeClock()
+
+        result, stub = self._send_with_failing_stub(reporter, error, clock)
+
+        assert result is False
+        # Attempts at t=0, 2, 6; the last pause is cut to the 4 s left, then the window is over.
+        assert stub.HealthEventOccurredV1.call_count == 3
+        assert clock.now == pytest.approx(1010.0)
+        keys = {dict(call.kwargs["metadata"])["idempotency-key"] for call in stub.HealthEventOccurredV1.call_args_list}
+        assert len(keys) == 1
+        assert IDEMPOTENCY_KEY_FORMAT.match(keys.pop())
+
+    def test_the_retry_window_is_one_budget_for_every_event_of_a_check(self, tmp_path: Path) -> None:
+        """A check that reports many results waits through one outage at most; later events get one short attempt."""
+        reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"), retry_window_seconds=10.0)
+        clock = FakeClock()
+
+        first, stub = self._send_with_failing_stub(reporter, RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE), clock)
+        assert first is False
+        assert stub.HealthEventOccurredV1.call_count == 3
+        assert clock.now == pytest.approx(1010.0)
+
+        second, stub = self._send_with_failing_stub(reporter, RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE), clock)
+        assert second is False
+        # One short attempt, no pause, no further retry.
+        assert stub.HealthEventOccurredV1.call_count == 1
+        assert stub.HealthEventOccurredV1.call_args.kwargs["timeout"] == SPENT_BUDGET_ATTEMPT_SECONDS
+        assert clock.now == pytest.approx(1010.0)
+
+    def test_a_delivered_event_leaves_the_retry_budget_intact(self, tmp_path: Path) -> None:
+        """An event delivered on its first attempt spends nothing; the next event still gets the full window."""
+        reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"), retry_window_seconds=10.0)
+        clock = FakeClock()
+
+        with patch("dcgm_diag.health.sleep", clock.sleep), patch("dcgm_diag.health.monotonic", clock.monotonic), patch(
+            "dcgm_diag.health.grpc.insecure_channel"
+        ), patch("dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=MagicMock()):
+            assert reporter._send_with_retries(pb.HealthEvents(version=1)) is True
+
+        result, stub = self._send_with_failing_stub(reporter, RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE), clock)
+        assert result is False
+        assert stub.HealthEventOccurredV1.call_count == 3
+        assert clock.now == pytest.approx(1010.0)
+
+    def test_backoff_doubles_to_the_cap(self, tmp_path: Path) -> None:
+        reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"), retry_window_seconds=200.0)
+        clock = FakeClock()
+        pauses: list[float] = []
+
+        def sleep(seconds: float) -> None:
+            pauses.append(seconds)
+            clock.sleep(seconds)
+
+        stub = MagicMock()
+        stub.HealthEventOccurredV1.side_effect = RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE)
+        with patch("dcgm_diag.health.sleep", sleep), patch("dcgm_diag.health.monotonic", clock.monotonic), patch(
+            "dcgm_diag.health.random.uniform", return_value=0.0
+        ), patch("dcgm_diag.health.grpc.insecure_channel"), patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            assert reporter._send_with_retries(pb.HealthEvents(version=1)) is False
+
+        expected = [INITIAL_BACKOFF_SECONDS]
+        while expected[-1] < MAX_BACKOFF_SECONDS:
+            expected.append(min(expected[-1] * 2, MAX_BACKOFF_SECONDS))
+        assert pauses[: len(expected)] == expected
+        assert max(pauses) == MAX_BACKOFF_SECONDS
+        assert sum(pauses) == pytest.approx(200.0)
+
+    def test_each_attempt_gets_a_fresh_token_and_timeout_within_the_window(self, tmp_path: Path) -> None:
+        token_path = self._write_token(tmp_path, "token-one")
+        reporter = self._make_reporter(token_path=token_path, retry_window_seconds=40.0)
+        clock = FakeClock()
+        stub = MagicMock()
+
+        def fail_then_rotate(*_args: Any, **_kwargs: Any) -> None:
+            self._write_token(tmp_path, "token-two")
+            raise RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE)
+
+        stub.HealthEventOccurredV1.side_effect = fail_then_rotate
+        with patch("dcgm_diag.health.sleep", clock.sleep), patch("dcgm_diag.health.monotonic", clock.monotonic), patch(
+            "dcgm_diag.health.random.uniform", return_value=0.0
+        ), patch("dcgm_diag.health.grpc.insecure_channel"), patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            reporter._send_with_retries(pb.HealthEvents(version=1))
+
+        calls = stub.HealthEventOccurredV1.call_args_list
+        assert dict(calls[0].kwargs["metadata"])["authorization"] == "Bearer token-one"
+        assert dict(calls[1].kwargs["metadata"])["authorization"] == "Bearer token-two"
+        # Attempts at t=0, 2, 6, 14, 30: the per attempt timeout is 30 s until less is left in the window.
+        assert [call.kwargs["timeout"] for call in calls] == [30.0, 30.0, 30.0, 26.0, 10.0]
+
+    def test_the_first_attempt_is_bounded_by_the_window(self, tmp_path: Path) -> None:
+        """A 10 s window gives the first attempt a 10 s timeout, not the 30 s per attempt cap."""
+        reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"), retry_window_seconds=10.0)
+
+        _result, stub = self._send_with_failing_stub(reporter, RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE))
+
+        assert stub.HealthEventOccurredV1.call_args_list[0].kwargs["timeout"] == 10.0
+
+    def test_unreadable_token_raises_instead_of_retrying(self, tmp_path: Path) -> None:
+        reporter = self._make_reporter(token_path=str(tmp_path / "does-not-exist"))
+        stub = MagicMock()
+        with patch("dcgm_diag.health.sleep"), patch("dcgm_diag.health.grpc.insecure_channel"), patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            with pytest.raises(RuntimeError) as raised:
+                reporter._send_with_retries(pb.HealthEvents(version=1))
+
+        assert "does-not-exist" in str(raised.value)
+        stub.HealthEventOccurredV1.assert_not_called()
+
+    def test_unreadable_ca_file_is_retried(self, tmp_path: Path) -> None:
+        """A failed channel construction is not a verdict; the CA may be mounted a moment later."""
+        reporter = self._make_reporter(
+            insecure=False,
+            ca_file=str(tmp_path / "missing-ca.crt"),
+            token_path=self._write_token(tmp_path, "token"),
+            retry_window_seconds=10.0,
+        )
+        clock = FakeClock()
+        with patch("dcgm_diag.health.sleep", clock.sleep), patch("dcgm_diag.health.monotonic", clock.monotonic), patch(
+            "dcgm_diag.health.random.uniform", return_value=0.0
+        ), patch("dcgm_diag.health.grpc.secure_channel") as secure_channel:
+            assert reporter._send_with_retries(pb.HealthEvents(version=1)) is False
+
+        secure_channel.assert_not_called()
+        assert clock.now == pytest.approx(1010.0)
+
+    def test_plaintext_channel_caps_the_reconnect_backoff(self, tmp_path: Path) -> None:
+        reporter = self._make_reporter(target="host:50051", token_path=self._write_token(tmp_path, "token"))
+        stub = MagicMock()
+        with patch("dcgm_diag.health.grpc.insecure_channel") as insecure_channel, patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            assert reporter._send_with_retries(pb.HealthEvents(version=1)) is True
+
+        args, kwargs = insecure_channel.call_args
+        assert args == ("host:50051",)
+        assert ("grpc.max_reconnect_backoff_ms", MAX_RECONNECT_BACKOFF_MS) in kwargs["options"]
+
+    def test_tls_channel_uses_the_ca_bundle_and_the_name_override(self, tmp_path: Path) -> None:
+        ca_path = tmp_path / "ca.crt"
+        ca_path.write_bytes(b"not really a certificate")
+        reporter = self._make_reporter(
+            target="host:50051",
+            insecure=False,
+            ca_file=str(ca_path),
+            server_name_override="platform-connector-deployment.nvsentinel.svc",
+            token_path=self._write_token(tmp_path, "token"),
+        )
+        stub = MagicMock()
+        with patch("dcgm_diag.health.grpc.ssl_channel_credentials", return_value="creds") as ssl_credentials, patch(
+            "dcgm_diag.health.grpc.secure_channel"
+        ) as secure_channel, patch("dcgm_diag.health.grpc.insecure_channel") as insecure_channel, patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            assert reporter._send_with_retries(pb.HealthEvents(version=1)) is True
+
+        insecure_channel.assert_not_called()
+        ssl_credentials.assert_called_once_with(root_certificates=b"not really a certificate")
+        args, kwargs = secure_channel.call_args
+        assert args == ("host:50051", "creds")
+        assert ("grpc.max_reconnect_backoff_ms", MAX_RECONNECT_BACKOFF_MS) in kwargs["options"]
+        assert ("grpc.ssl_target_name_override", "platform-connector-deployment.nvsentinel.svc") in kwargs["options"]
+
+    def test_tls_channel_has_no_name_override_by_default(self, tmp_path: Path) -> None:
+        ca_path = tmp_path / "ca.crt"
+        ca_path.write_bytes(b"ca")
+        reporter = self._make_reporter(
+            insecure=True, ca_file=str(ca_path), token_path=self._write_token(tmp_path, "token")
+        )
+        stub = MagicMock()
+        with patch("dcgm_diag.health.grpc.ssl_channel_credentials"), patch(
+            "dcgm_diag.health.grpc.secure_channel"
+        ) as secure_channel, patch("dcgm_diag.health.grpc.insecure_channel") as insecure_channel, patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            assert reporter._send_with_retries(pb.HealthEvents(version=1)) is True
+
+        # A CA file wins over the insecure flag, as in the Go client.
+        insecure_channel.assert_not_called()
+        option_names = [name for name, _ in secure_channel.call_args.kwargs["options"]]
+        assert "grpc.ssl_target_name_override" not in option_names
+
+    def test_send_event_names_the_rejection_status_on_a_permanent_code(self, tmp_path: Path) -> None:
+        reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"))
+        stub = MagicMock()
+        stub.HealthEventOccurredV1.side_effect = RpcErrorWithCode(grpc.StatusCode.PERMISSION_DENIED)
+        with patch("dcgm_diag.health.sleep"), patch("dcgm_diag.health.grpc.insecure_channel"), patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            with pytest.raises(
+                RuntimeError,
+                match=r"Failed to send health event: the platform connector rejected it \(PERMISSION_DENIED\)",
+            ):
+                reporter.send_event(gpu_uuid="GPU-0", is_healthy=False, is_fatal=True, message="Error")
+
+        stub.HealthEventOccurredV1.assert_called_once()
+
+    def test_send_event_names_the_window_when_the_retries_run_out(self, tmp_path: Path) -> None:
+        reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"), retry_window_seconds=10.0)
+        clock = FakeClock()
+        stub = MagicMock()
+        stub.HealthEventOccurredV1.side_effect = RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE)
+        with patch("dcgm_diag.health.sleep", clock.sleep), patch("dcgm_diag.health.monotonic", clock.monotonic), patch(
+            "dcgm_diag.health.random.uniform", return_value=0.0
+        ), patch("dcgm_diag.health.grpc.insecure_channel"), patch(
+            "dcgm_diag.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            with pytest.raises(RuntimeError, match="Failed to send health event: the retry window ended"):
+                reporter.send_event(gpu_uuid="GPU-0", is_healthy=False, is_fatal=True, message="Error")
+
+        assert stub.HealthEventOccurredV1.call_count == 3

@@ -15,11 +15,14 @@
 """Health event reporting to Platform Connector."""
 
 import logging
-from time import sleep
+import random
+import uuid
+from time import monotonic, sleep
 
 import grpc
 from google.protobuf.timestamp_pb2 import Timestamp
 
+from .config import DirectPublishConfig
 from .errors import NCCLError
 from .protos import health_event_pb2 as pb
 from .protos import health_event_pb2_grpc as pb_grpc
@@ -39,6 +42,37 @@ RETRYABLE_STATUS_CODES = frozenset(
     {
         grpc.StatusCode.UNAVAILABLE,
         grpc.StatusCode.DEADLINE_EXCEEDED,
+    }
+)
+
+# Direct mode (HEALTH_PUBLISH_TARGET set) retries within a time window instead
+# of a fixed number of attempts. The pause after a failed attempt starts at
+# INITIAL_BACKOFF_SECONDS and doubles up to MAX_BACKOFF_SECONDS, with
+# +/-JITTER_FRACTION of spread so a fleet of retrying checks does not hit the
+# server in lockstep. Same pacing as the Go client in commons/pkg/healthpub.
+INITIAL_BACKOFF_SECONDS = 2.0
+MAX_BACKOFF_SECONDS = 30.0
+BACKOFF_MULTIPLIER = 2.0
+JITTER_FRACTION = 0.1
+# Cap on the pause between the channel's own attempts to reconnect, so the
+# channel is connected within seconds of the server returning. Mirrors the Go
+# client.
+MAX_RECONNECT_BACKOFF_MS = 10_000
+# Once the budget is spent, later events of the same run get one short attempt
+# so a connector that came back still receives them, without adding half a
+# minute per event against a black hole.
+SPENT_BUDGET_ATTEMPT_SECONDS = 5.0
+# Status codes the deployment platform connector would answer the same way on
+# every retry of the same event, so retrying only spends the window: the event
+# failed validation (INVALID_ARGUMENT), the caller may not publish what it sent
+# (PERMISSION_DENIED), or the server does not serve this RPC (UNIMPLEMENTED).
+# UNAUTHENTICATED is deliberately not here: the projected token rotates, so
+# the next attempt reads a fresh one. Same set as the Go client.
+PERMANENT_STATUS_CODES = frozenset(
+    {
+        grpc.StatusCode.INVALID_ARGUMENT,
+        grpc.StatusCode.PERMISSION_DENIED,
+        grpc.StatusCode.UNIMPLEMENTED,
     }
 )
 
@@ -70,6 +104,7 @@ class HealthReporter:
         node_name: str,
         processing_strategy: int,
         token_path: str | None = None,
+        publish: DirectPublishConfig | None = None,
     ) -> None:
         """Initialize the reporter.
 
@@ -79,6 +114,8 @@ class HealthReporter:
             processing_strategy: ProcessingStrategy enum value.
             token_path: Optional file path of a projected ServiceAccount token
                 presented as a bearer credential on every send.
+            publish: Set when the check publishes straight to the deployment
+                platform connector; None keeps the node-local socket.
         """
         self._socket_path = socket_path.removeprefix("unix://")
         self._node_name = node_name
@@ -88,6 +125,18 @@ class HealthReporter:
         # PLATFORM_CONNECTOR_TOKEN_PATH; resolving it again here would let
         # ambient process state override an explicitly empty argument.
         self._token_path = token_path
+        # Set when the check publishes straight to the deployment platform
+        # connector over the network; None keeps the node-local socket. The
+        # config layer resolves HEALTH_PUBLISH_* for the same reason as above.
+        self._publish = publish
+        # Seconds this reporter may still spend retrying against an
+        # unreachable deployment platform connector, shared by every event it
+        # sends: each event may retry for what is left, so a check that
+        # reports many results waits through one outage at most, and every
+        # later event still gets one short attempt.
+        self._retry_budget = publish.retry_window_seconds if publish is not None else 0.0
+        # Why the last direct send failed, in words for the RuntimeError.
+        self._direct_failure = ""
 
     def send_success(self, message: str) -> None:
         """Send a successful health event.
@@ -196,6 +245,8 @@ class HealthReporter:
         )
 
         if not self._send_with_retries(health_events):
+            if self._publish is not None:
+                raise RuntimeError("Failed to send health event: " + self._direct_failure)
             raise RuntimeError(f"Failed to send health event after {MAX_RETRIES} retries")
 
     def _token_metadata(self) -> list[tuple[str, str]] | None:
@@ -209,27 +260,36 @@ class HealthReporter:
         """
         if not self._token_path:
             return None
+        return [("authorization", "Bearer " + self._read_token(self._token_path))]
+
+    @staticmethod
+    def _read_token(token_path: str) -> str:
+        """The bearer token read fresh from ``token_path``, exactly as written."""
         try:
-            with open(self._token_path) as token_file:
+            with open(token_path) as token_file:
                 token = token_file.read()
         except OSError as e:
-            log.error("Failed to read platform-connector token from %s: %s", self._token_path, e)
+            log.error("Failed to read platform-connector token from %s: %s", token_path, e)
             # Raised as RuntimeError because that is the failure mode the public
             # send methods document and the only one callers catch. Letting OSError
             # escape would bypass their handling and end the check with a traceback
             # instead of the mapped exit code.
-            raise RuntimeError(f"cannot read platform-connector token from {self._token_path}: {e}") from e
+            raise RuntimeError(f"cannot read platform-connector token from {token_path}: {e}") from e
         # An empty file is a broken mount, not a credential. Sending "Bearer "
         # gets a generic authentication error back from the server and sends
         # whoever debugs it looking at RBAC and audiences; failing here names
         # the actual problem.
         if not token:
-            log.error("Platform-connector token file %s is empty", self._token_path)
-            raise RuntimeError(f"platform-connector token file {self._token_path} is empty")
-        return [("authorization", "Bearer " + token)]
+            log.error("Platform-connector token file %s is empty", token_path)
+            raise RuntimeError(f"platform-connector token file {token_path} is empty")
+        return token
 
     def _send_with_retries(self, health_events: pb.HealthEvents) -> bool:
         """Send health events with exponential backoff retries.
+
+        In direct mode (``publish`` given) the event goes straight to the
+        deployment platform connector, see ``_send_direct``. Otherwise it goes
+        over the node-local socket as described below.
 
         When a token path is configured, every attempt re-reads the projected
         token file and attaches it as bearer metadata; a failed token read
@@ -245,6 +305,9 @@ class HealthReporter:
         Returns:
             True if sent successfully, False otherwise.
         """
+        if self._publish is not None:
+            return self._send_direct(health_events)
+
         delay = INITIAL_DELAY
 
         for attempt in range(MAX_RETRIES):
@@ -286,3 +349,130 @@ class HealthReporter:
                     delay *= BACKOFF_FACTOR
 
         return False
+
+    def _send_direct(self, health_events: pb.HealthEvents) -> bool:
+        """Send health events straight to the deployment platform connector.
+
+        The event is retried with jittered exponential backoff, every attempt
+        on a fresh channel and under one idempotency key generated here, so a
+        retry of an event the server already stored is not stored twice. The
+        projected token is re-read on every attempt; an unreadable or empty
+        token raises RuntimeError as in socket mode.
+
+        A status the server would repeat on every retry
+        (``PERMANENT_STATUS_CODES``) ends the attempts at once. Everything
+        else, UNAUTHENTICATED and a failed channel construction included, is
+        retried within the event's window. The window is what is left of the
+        reporter's retry budget, the retry window shared by every event this
+        reporter sends, so a check that reports many results waits through one
+        outage at most. Every attempt, the first included, is bounded by the
+        window, as in the Go client. Time spent on an event that needed more
+        than one attempt comes off the budget; once the budget is spent, every
+        later event gets one attempt of ``SPENT_BUDGET_ATTEMPT_SECONDS``. A
+        one-shot check never retries across process restarts.
+
+        On failure ``_direct_failure`` says why, for the RuntimeError raised
+        to the caller.
+        """
+        publish = self._publish
+        idempotency_key = uuid.uuid4().hex
+        backoff = INITIAL_BACKOFF_SECONDS
+        attempt = 0
+        # Seconds of the shared budget this event may spend; the window of
+        # this event ends at the deadline.
+        allowance = self._retry_budget
+        start = monotonic()
+        deadline = start + allowance
+
+        while True:
+            if allowance <= 0:
+                timeout = SPENT_BUDGET_ATTEMPT_SECONDS
+            else:
+                remaining = deadline - monotonic()
+                if remaining <= 0:
+                    log.error(
+                        "Retry budget over; abandoning the health event",
+                        extra={"attempts": attempt, "retry_window_seconds": publish.retry_window_seconds},
+                    )
+                    self._direct_failure = "the retry window ended"
+                    self._spend_retry_budget(start)
+                    return False
+                timeout = min(RPC_TIMEOUT, remaining)
+
+            attempt += 1
+            try:
+                with self._direct_channel() as channel:
+                    stub = pb_grpc.PlatformConnectorStub(channel)
+                    stub.HealthEventOccurredV1(
+                        health_events,
+                        timeout=timeout,
+                        metadata=[
+                            ("idempotency-key", idempotency_key),
+                            ("authorization", "Bearer " + self._read_token(publish.token_path)),
+                        ],
+                    )
+                    log.info("Health event sent successfully")
+                    # An event delivered on its first attempt spends nothing.
+                    if attempt > 1:
+                        self._spend_retry_budget(start)
+                    return True
+            except grpc.RpcError as e:
+                code = _rpc_status_code(e)
+                if code in PERMANENT_STATUS_CODES:
+                    log.error(
+                        "Platform-connector rejected the health event; abandoning retries",
+                        extra={"status": code.name, "attempt": attempt, "target": publish.target},
+                    )
+                    self._direct_failure = f"the platform connector rejected it ({code.name})"
+                    self._spend_retry_budget(start)
+                    return False
+                log.warning(
+                    "Failed to send health event",
+                    extra={"attempt": attempt, "target": publish.target, "error": str(e)},
+                )
+            except RuntimeError:
+                # The token could not be read: the failure mode the callers
+                # handle, not something another attempt would fix in time.
+                self._spend_retry_budget(start)
+                raise
+            except Exception as e:  # noqa: BLE001
+                # Channel construction can fail outside gRPC, for example on
+                # an unreadable CA file; another attempt may find it in place.
+                log.warning(
+                    "Failed to send health event",
+                    extra={"attempt": attempt, "target": publish.target, "error": str(e)},
+                )
+
+            if allowance <= 0:
+                log.error(
+                    "Retry budget spent; abandoning the health event after one attempt",
+                    extra={"retry_window_seconds": publish.retry_window_seconds, "target": publish.target},
+                )
+                self._direct_failure = "the retry budget is spent"
+                self._spend_retry_budget(start)
+                return False
+            # Pause, but not past the deadline: the loop then gives the event up.
+            remaining = deadline - monotonic()
+            if remaining > 0:
+                sleep(min(backoff * (1.0 + random.uniform(-JITTER_FRACTION, JITTER_FRACTION)), remaining))
+                backoff = min(backoff * BACKOFF_MULTIPLIER, MAX_BACKOFF_SECONDS)
+
+    def _spend_retry_budget(self, start: float) -> None:
+        """Takes the time one event spent since ``start`` out of the shared retry budget."""
+        self._retry_budget = max(0.0, self._retry_budget - (monotonic() - start))
+
+    def _direct_channel(self) -> grpc.Channel:
+        """A fresh channel to the deployment platform connector for one attempt."""
+        publish = self._publish
+        options = [("grpc.max_reconnect_backoff_ms", MAX_RECONNECT_BACKOFF_MS)]
+        # As in the Go client, a CA file wins over the insecure flag.
+        if publish.insecure and not publish.ca_file:
+            return grpc.insecure_channel(publish.target, options=options)
+        with open(publish.ca_file, "rb") as ca_file:
+            credentials = grpc.ssl_channel_credentials(root_certificates=ca_file.read())
+        # gRPC already checks the certificate against the host part of the
+        # target; the override is only needed when the certificate names
+        # something else.
+        if publish.server_name_override:
+            options.append(("grpc.ssl_target_name_override", publish.server_name_override))
+        return grpc.secure_channel(publish.target, credentials, options=options)
