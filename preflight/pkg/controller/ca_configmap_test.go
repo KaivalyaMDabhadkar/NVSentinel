@@ -20,11 +20,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -373,23 +375,34 @@ func TestCABundleSync_Pending(t *testing.T) {
 	})
 }
 
+// The reconciler runs under a manager against a real API server here: the
+// copy goes through the same uncached read and Create as in production.
 func TestNamespaceReconciler_EnsuresCACopyForActiveNamespaces(t *testing.T) {
-	active := NewActiveNamespaces()
-	scheme := pfcTestScheme(t)
-	require.NoError(t, corev1.AddToScheme(scheme))
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(
-		preflightNamespace("team-a"),
-		&corev1.Namespace{Name: "team-b"},
-	).Build()
-	s := NewCABundleSync(c, c, writeCAFile(t, t.TempDir(), caOldPEM), caTestName)
-	r := NewNamespaceReconciler(c, active, s)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
 
-	reconcileNS(t, r, "team-a")
-	reconcileNS(t, r, "team-b")
+	active, te := setupNSTestEnv(t, ctx, writeCAFile(t, t.TempDir(), caOldPEM))
+	defer te.teardown()
 
+	_, err := te.kubeClient.CoreV1().Namespaces().Create(ctx, preflightNamespace("team-a"), metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = te.kubeClient.CoreV1().Namespaces().Create(ctx, &corev1.Namespace{Name: "team-b"}, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	var cm *corev1.ConfigMap
+
+	require.Eventually(t, func() bool {
+		cm, err = te.kubeClient.CoreV1().ConfigMaps("team-a").Get(ctx, caTestName, metav1.GetOptions{})
+		return err == nil
+	}, 10*time.Second, 100*time.Millisecond, "the labelled namespace gets a copy of the CA bundle")
 	assert.True(t, active.Contains("team-a"))
-	assert.Equal(t, caOldPEM, getCM(t, c, "team-a", caTestName).Data[caBundleKey])
+	assert.Equal(t, caOldPEM, cm.Data[caBundleKey])
+	assert.Equal(t, caBundleLabels(), cm.Labels)
 
-	err := c.Get(context.Background(), client.ObjectKey{Namespace: "team-b", Name: caTestName}, &corev1.ConfigMap{})
-	assert.True(t, apierrors.IsNotFound(err), "an unlabelled namespace gets no copy from the reconciler")
+	require.Never(t, func() bool {
+		_, err := te.kubeClient.CoreV1().ConfigMaps("team-b").Get(ctx, caTestName, metav1.GetOptions{})
+		return err == nil
+	}, 2*time.Second, 100*time.Millisecond, "an unlabelled namespace gets no copy from the reconciler")
+	assert.False(t, active.Contains("team-b"))
 }

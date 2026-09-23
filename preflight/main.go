@@ -42,6 +42,12 @@ import (
 	ctrllog "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
+// caEnsureTimeout bounds the CA ConfigMap copy on the admission path. It stays
+// well under the webhook timeout (10 s in the chart) so a slow API server
+// cannot turn this fail-open step into a rejected admission; a namespace whose
+// copy timed out is retried by the sync on its next tick.
+const caEnsureTimeout = 3 * time.Second
+
 var (
 	version = "dev"
 	commit  = "none"
@@ -155,7 +161,10 @@ func setupManager(ctx context.Context, cfg *config.Config, stop context.CancelFu
 		// written; Ensure records the namespace and the sync retries it on
 		// its next tick.
 		ensureCA = func(reqCtx context.Context, namespace string) {
-			if err := caSync.Ensure(reqCtx, namespace); err != nil {
+			ensureCtx, cancel := context.WithTimeout(reqCtx, caEnsureTimeout)
+			defer cancel()
+
+			if err := caSync.Ensure(ensureCtx, namespace); err != nil {
 				slog.Error("Failed to ensure platform connector CA ConfigMap",
 					"namespace", namespace,
 					"configMap", cfg.HealthPublishCAConfigMap,

@@ -310,8 +310,10 @@ class HealthReporter:
         reporter's retry budget, the retry window shared by every event this
         reporter sends, so a check that reports many results waits through one
         outage at most. Every attempt, the first included, is bounded by the
-        window, as in the Go client. Time spent on an event that needed more
-        than one attempt comes off the budget; once the budget is spent, every
+        window, as in the Go client, except that the first attempt gets at
+        least ``SPENT_BUDGET_ATTEMPT_SECONDS`` so a nearly spent budget is not
+        worse than a spent one. Time spent on an event that needed more than
+        one attempt comes off the budget; once the budget is spent, every
         later event gets one attempt of ``SPENT_BUDGET_ATTEMPT_SECONDS``. A
         one-shot check never retries across process restarts.
 
@@ -342,6 +344,11 @@ class HealthReporter:
                     self._spend_retry_budget(start)
                     return False
                 timeout = min(RPC_TIMEOUT, remaining)
+                if attempt == 0:
+                    # A nearly spent budget must not give this event less than
+                    # a spent budget would: the first attempt gets at least the
+                    # short timeout.
+                    timeout = max(timeout, SPENT_BUDGET_ATTEMPT_SECONDS)
 
             attempt += 1
             try:

@@ -472,6 +472,28 @@ class TestDirectMode:
         assert stub.HealthEventOccurredV1.call_args.kwargs["timeout"] == SPENT_BUDGET_ATTEMPT_SECONDS
         assert clock.now == pytest.approx(1010.0)
 
+    def test_a_nearly_spent_budget_still_gives_the_first_attempt_the_short_timeout(self, tmp_path: Path) -> None:
+        """An event that leaves 0.5 s of the budget behind must not hand the next event a sub-second attempt."""
+        reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"), retry_window_seconds=2.5)
+        clock = FakeClock()
+        stub = MagicMock()
+        stub.HealthEventOccurredV1.side_effect = [RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE), None]
+        with patch("nccl_allreduce.health.sleep", clock.sleep), patch(
+            "nccl_allreduce.health.monotonic", clock.monotonic
+        ), patch("nccl_allreduce.health.random.uniform", return_value=0.0), patch(
+            "nccl_allreduce.health.grpc.insecure_channel"
+        ), patch(
+            "nccl_allreduce.health.pb_grpc.PlatformConnectorStub", return_value=stub
+        ):
+            assert reporter._send_with_retries(pb.HealthEvents(version=1)) is True
+        # One 2 s pause came off the 2.5 s budget.
+        assert clock.now == pytest.approx(1002.0)
+
+        result, stub = self._send_with_failing_stub(reporter, RpcErrorWithCode(grpc.StatusCode.UNAVAILABLE), clock)
+        assert result is False
+        assert stub.HealthEventOccurredV1.call_count == 1
+        assert stub.HealthEventOccurredV1.call_args.kwargs["timeout"] == SPENT_BUDGET_ATTEMPT_SECONDS
+
     def test_a_delivered_event_leaves_the_retry_budget_intact(self, tmp_path: Path) -> None:
         """An event delivered on its first attempt spends nothing; the next event still gets the full window."""
         reporter = self._make_reporter(token_path=self._write_token(tmp_path, "token"), retry_window_seconds=10.0)
