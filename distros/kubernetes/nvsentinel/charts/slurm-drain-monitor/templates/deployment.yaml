@@ -34,6 +34,9 @@ spec:
         {{- end }}
       labels:
         {{- include "slurm-drain-monitor.labels" . | nindent 8 }}
+        {{- if include "slurm-drain-monitor.publish.enabled" . }}
+        nvsentinel.nvidia.com/health-publisher: "true"
+        {{- end }}
     spec:
       {{- if .Values.global }}
       {{- with .Values.global.imagePullSecrets }}
@@ -85,6 +88,9 @@ spec:
           env:
             - name: LOG_LEVEL
               value: "{{ .Values.logLevel }}"
+            {{- with include "slurm-drain-monitor.publish.envVars" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
           volumeMounts:
             - name: config
               mountPath: /config
@@ -94,12 +100,18 @@ spec:
             {{- if include "slurm-drain-monitor.pcAuth.enabled" . }}
             {{- include "slurm-drain-monitor.pcAuth.volumeMount" . | nindent 12 }}
             {{- end }}
+            {{- with include "slurm-drain-monitor.publish.volumeMounts" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "slurm-drain-monitor.fullname" . }}
         {{- if include "slurm-drain-monitor.pcAuth.enabled" . }}
         {{- include "slurm-drain-monitor.pcAuth.volume" . | nindent 8 }}
+        {{- end }}
+        {{- with include "slurm-drain-monitor.publish.volumes" . }}
+        {{- . | nindent 8 }}
         {{- end }}
         {{- range .Values.volumes }}
         - {{- toYaml . | nindent 10 }}

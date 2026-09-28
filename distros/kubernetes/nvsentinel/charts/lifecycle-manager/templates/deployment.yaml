@@ -37,6 +37,9 @@ spec:
         {{- end }}
       labels:
         {{- include "lifecycle-manager.selectorLabels" . | nindent 8 }}
+        {{- if and .Values.controllers.maintenanceRequest.enabled (include "lifecycle-manager.publish.enabled" .) }}
+        nvsentinel.nvidia.com/health-publisher: "true"
+        {{- end }}
     spec:
       {{- with ((.Values.global).imagePullSecrets | default .Values.imagePullSecrets) }}
       imagePullSecrets:
@@ -88,6 +91,9 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            {{- if and .Values.controllers.maintenanceRequest.enabled (include "lifecycle-manager.publish.enabled" .) }}
+            {{- include "lifecycle-manager.publish.envVars" . | nindent 12 }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -140,6 +146,9 @@ spec:
             {{- if include "lifecycle-manager.pcAuth.enabled" . }}
             {{- include "lifecycle-manager.pcAuth.volumeMount" . | nindent 12 }}
             {{- end }}
+            {{- with include "lifecycle-manager.publish.volumeMounts" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
             {{- end }}
             {{- if .Values.metrics.tls.enabled }}
             - name: metrics-certs
@@ -163,6 +172,9 @@ spec:
             type: DirectoryOrCreate
         {{- if include "lifecycle-manager.pcAuth.enabled" . }}
         {{- include "lifecycle-manager.pcAuth.volume" . | nindent 8 }}
+        {{- end }}
+        {{- with include "lifecycle-manager.publish.volumes" . }}
+        {{- . | nindent 8 }}
         {{- end }}
         {{- end }}
         - name: webhook-certs

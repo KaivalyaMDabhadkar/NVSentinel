@@ -39,6 +39,9 @@ spec:
         {{- end }}
       labels:
         {{- include "csp-health-monitor.selectorLabels" . | nindent 8 }}
+        {{- if include "nvsentinel.publish.enabled" . }}
+        nvsentinel.nvidia.com/health-publisher: "true"
+        {{- end }}
     spec:
       {{- $pgClientCert := eq (include "nvsentinel.datastore.postgresClientCertEnabled" .) "true" }}
       {{- with ((.Values.global).imagePullSecrets | default .Values.imagePullSecrets) }}
@@ -99,6 +102,9 @@ spec:
           type: DirectoryOrCreate
       {{- if include "nvsentinel.pcAuth.enabled" . }}
       {{- include "nvsentinel.pcAuth.volume" . | nindent 6 }}
+      {{- end }}
+      {{- with include "nvsentinel.publish.volumes" . }}
+      {{- . | nindent 6 }}
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
@@ -247,12 +253,18 @@ spec:
           {{- if include "nvsentinel.pcAuth.enabled" . }}
           {{- include "nvsentinel.pcAuth.volumeMount" . | nindent 10 }}
           {{- end }}
+          {{- with include "nvsentinel.publish.volumeMounts" . }}
+          {{- . | nindent 10 }}
+          {{- end }}
           env:
             - name: LOG_LEVEL
               value: "{{ .Values.quarantineTriggerEngine.logLevel | default .Values.logLevel }}"
             # App name for connection identification in logs and currentOp
             - name: APP_NAME
               value: "maintenance-notifier"
+            {{- with include "nvsentinel.publish.envVars" . }}
+            {{- . | nindent 12 }}
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ if .Values.global.datastore }}{{ .Release.Name }}-datastore-config{{ else }}mongodb-config{{ end }}
