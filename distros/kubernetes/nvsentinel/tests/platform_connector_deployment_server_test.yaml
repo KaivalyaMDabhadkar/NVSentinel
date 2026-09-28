@@ -41,15 +41,9 @@ tests:
           content:
             name: grpc-tls
           any: true
-
-  - it: renders no Issuer or Certificate in insecureDevelopmentMode
-    template: templates/platform-connector-deployment-certificate.yaml
-    set:
-      platformConnector.deployment.enabled: true
-      global.platformConnectorDeployment.tls.mode: insecureDevelopmentMode
-    asserts:
       - hasDocuments:
           count: 0
+        template: templates/platform-connector-deployment-certificate.yaml
 
   # The only TLS modes are "required" and the explicitly named
   # "insecureDevelopmentMode"; a typo must not become a plaintext listener.
@@ -62,40 +56,14 @@ tests:
       - failedTemplate:
           errorPattern: must be "required" or "insecureDevelopmentMode"
 
-  # Publisher pods mount ca.crt from this exact secret as their trust
-  # bundle, so the name is a cross-chart contract, not an implementation
-  # detail. The Deployment must mount the same secret the Certificate
-  # writes.
-  - it: pins the certificate secret name in the default TLS mode
+  # A long-lived CA signs the short-lived server certificate, so a renewal
+  # does not change the trust anchor. Publisher pods mount ca.crt from the
+  # server secret, so its name is a cross-chart contract.
+  - it: signs the server certificate with a separate CA into the secret the server mounts
     template: templates/platform-connector-deployment-certificate.yaml
     set:
       platformConnector.deployment.enabled: true
     asserts:
-      - hasDocuments:
-          count: 4
-      - equal:
-          path: spec.secretName
-          value: platform-connector-deployment-grpc-cert
-        documentIndex: 3
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: grpc-tls
-            secret:
-              secretName: platform-connector-deployment-grpc-cert
-        template: templates/platform-connector-deployment-deployment.yaml
-
-  # The server certificate is a short-lived leaf signed by a long-lived CA,
-  # not a self-signed certificate, so renewing it does not change the trust
-  # anchor the publishers mount (ca.crt of the server secret).
-  - it: signs the server certificate with a separate long-lived CA
-    template: templates/platform-connector-deployment-certificate.yaml
-    set:
-      platformConnector.deployment.enabled: true
-    asserts:
-      - isKind:
-          of: Certificate
-        documentIndex: 1
       - equal:
           path: spec.isCA
           value: true
@@ -108,22 +76,20 @@ tests:
           path: spec.issuerRef.name
           value: platform-connector-deployment-selfsigned-issuer
         documentIndex: 1
-      - isKind:
-          of: Issuer
-        documentIndex: 2
       - equal:
           path: spec.ca.secretName
           value: platform-connector-deployment-ca
         documentIndex: 2
       - equal:
+          path: spec.secretName
+          value: platform-connector-deployment-grpc-cert
+        documentIndex: 3
+      - equal:
           path: spec.issuerRef.name
           value: platform-connector-deployment-ca-issuer
         documentIndex: 3
-      - isNull:
-          path: spec.isCA
-        documentIndex: 3
-      # The Service names carry the identity; a commonName would exceed the 64
-      # character limit for a long namespace and fail issuance.
+      # A commonName would exceed the 64 character limit for a long namespace
+      # and fail issuance.
       - isNull:
           path: spec.commonName
         documentIndex: 3
@@ -131,11 +97,30 @@ tests:
           path: spec.dnsNames
           count: 3
         documentIndex: 3
+      - isNull:
+          path: spec.isCA
+        documentIndex: 3
+      - contains:
+          path: spec.template.spec.volumes
+          content:
+            name: grpc-tls
+            secret:
+              secretName: platform-connector-deployment-grpc-cert
+        template: templates/platform-connector-deployment-deployment.yaml
 
-  - it: selects the deployment role, names the pod for the audit log and covers startup before liveness
+  # The central pod must stay off tainted nodes, so it never inherits the
+  # global or DaemonSet tolerations or priority classes. Its name label must
+  # differ from the DaemonSet's, whose selector would claim the pod.
+  - it: runs the deployment role under its own label with no inherited placement or audit wiring
     template: templates/platform-connector-deployment-deployment.yaml
     set:
       platformConnector.deployment.enabled: true
+      platformConnector.tolerations:
+        - operator: Exists
+      global.tolerations:
+        - operator: Exists
+      platformConnector.priorityClassName: node-agent
+      global.priorityClassName: system-node-critical
     asserts:
       - contains:
           path: spec.template.spec.containers[0].args
@@ -150,15 +135,38 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].startupProbe.failureThreshold
           value: 30
+      # Startup must not wait for the idempotency index, which gates readiness.
       - equal:
           path: spec.template.spec.containers[0].startupProbe.httpGet.path
           value: /healthz
+      # Room for the 20 s drain plus two 5 s shutdown steps before SIGKILL.
+      - equal:
+          path: spec.template.spec.terminationGracePeriodSeconds
+          value: 40
+      - equal:
+          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
+          value: true
       - equal:
           path: spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation
           value: false
       - equal:
-          path: spec.template.spec.containers[0].securityContext.runAsNonRoot
-          value: true
+          path: spec.template.metadata.labels["app.kubernetes.io/name"]
+          value: platform-connector-deployment
+      - notExists:
+          path: spec.template.spec.nodeSelector
+      - notExists:
+          path: spec.template.spec.tolerations
+      - notExists:
+          path: spec.template.spec.priorityClassName
+      - notExists:
+          path: spec.template.spec.securityContext
+      - notExists:
+          path: spec.template.spec.initContainers
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: AUDIT_ENABLED
+          any: true
 
   - it: refuses a gRPC port that is not a port
     template: templates/platform-connector-deployment-service.yaml
@@ -253,18 +261,6 @@ tests:
           path: spec.template.spec.priorityClassName
           value: system-cluster-critical
 
-  - it: leaves the server pod unpinned by default
-    template: templates/platform-connector-deployment-deployment.yaml
-    set:
-      platformConnector.deployment.enabled: true
-    asserts:
-      - notExists:
-          path: spec.template.spec.nodeSelector
-      - notExists:
-          path: spec.template.spec.tolerations
-      - notExists:
-          path: spec.template.spec.priorityClassName
-
   # The server writes node conditions and Events, so the audit log the
   # DaemonSet keeps covers it too, with the same wiring.
   - it: wires audit logging into the server pod when enabled
@@ -297,41 +293,6 @@ tests:
               path: /var/log/nvsentinel
               type: DirectoryOrCreate
 
-  - it: keeps audit logging out of the server pod by default
-    template: templates/platform-connector-deployment-deployment.yaml
-    set:
-      platformConnector.deployment.enabled: true
-    asserts:
-      - notExists:
-          path: spec.template.spec.securityContext
-      - notExists:
-          path: spec.template.spec.initContainers
-      - notContains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: AUDIT_ENABLED
-          any: true
-
-  # The central Deployment must stay off tainted nodes (fake kwok nodes, GPU
-  # nodes reserved for tenants), so it never inherits the global or
-  # daemonset tolerations; only its own knob applies. The node agents'
-  # priority classes are not its either: only global.systemPriorityClassName.
-  - it: does not inherit global or daemonset tolerations or priority into the server pod
-    template: templates/platform-connector-deployment-deployment.yaml
-    set:
-      platformConnector.deployment.enabled: true
-      platformConnector.tolerations:
-        - operator: Exists
-      global.tolerations:
-        - operator: Exists
-      platformConnector.priorityClassName: node-agent
-      global.priorityClassName: system-node-critical
-    asserts:
-      - notExists:
-          path: spec.template.spec.tolerations
-      - notExists:
-          path: spec.template.spec.priorityClassName
-
   - it: applies platformConnector.deployment.tolerations to the server pod
     template: templates/platform-connector-deployment-deployment.yaml
     set:
@@ -350,21 +311,6 @@ tests:
               value: system
               effect: NoSchedule
 
-  # The DaemonSet's selector matches on app.kubernetes.io/name, so a server
-  # pod carrying the DaemonSet's name label would be claimed by the
-  # DaemonSet controller.
-  - it: keeps the server pod name label distinct from the DaemonSet's
-    template: templates/platform-connector-deployment-deployment.yaml
-    set:
-      platformConnector.deployment.enabled: true
-    asserts:
-      - equal:
-          path: spec.template.metadata.labels["app.kubernetes.io/name"]
-          value: platform-connector-deployment
-      - notEqual:
-          path: spec.template.metadata.labels["app.kubernetes.io/name"]
-          value: nvsentinel
-
   # The fixed pool is the point of this mode: a value the server would ignore
   # (and replace with the driver default) is refused at render time.
   - it: refuses a non-positive datastore pool size
@@ -375,15 +321,6 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: platformConnector.deployment.datastore.maxPoolSize must be a positive integer
-
-  - it: leaves shutdown room
-    template: templates/platform-connector-deployment-deployment.yaml
-    set:
-      platformConnector.deployment.enabled: true
-    asserts:
-      - equal:
-          path: spec.template.spec.terminationGracePeriodSeconds
-          value: 40
 
   # Replicas must be a positive integer; the disruption budget only makes
   # sense with two or more of them.

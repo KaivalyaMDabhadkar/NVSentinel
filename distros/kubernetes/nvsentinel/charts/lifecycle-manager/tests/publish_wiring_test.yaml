@@ -70,11 +70,6 @@ tests:
               items:
                 - key: ca.crt
                   path: ca.crt
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: platform-connector-token
-          any: true
 
   - it: sends no CA and marks the connection insecure in the TLS development mode
     template: templates/deployment.yaml
@@ -110,19 +105,11 @@ tests:
             name: HEALTH_PUBLISH_TARGET
             value: platform-connector-deployment.nvsentinel.svc.cluster.local:15055
 
-  # The default keeps today's wiring byte for byte: socket mount, socket token
-  # and its flag, no direct-publish environment and no publisher label.
+  # The default keeps the socket, no direct-publish environment and no label.
+  # deployment_test.yaml covers the socket token and its flag.
   - it: keeps the socket wiring and no publisher label by default
     template: templates/deployment.yaml
     asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: "--platform-connector-token-path=/var/run/secrets/nvsentinel/platform-connector/token"
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: platform-connector-token
-          any: true
       - contains:
           path: spec.template.spec.volumes
           content:

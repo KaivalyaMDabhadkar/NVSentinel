@@ -88,28 +88,16 @@ tests:
                 - key: ca.crt
                   path: ca.crt
 
-  # The publisher-side view of the deployment platform connector comes from
-  # global.platformConnectorDeployment, since a subchart cannot read the
-  # umbrella's platformConnector.deployment values.
-  - it: follows global.platformConnectorDeployment overrides
-    template: templates/deployment.yaml
-    set:
-      publishTo: deployment
-      global.platformConnectorDeployment.grpcPort: 51000
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: HEALTH_PUBLISH_TARGET
-            value: "platform-connector-deployment.nvsentinel.svc.cluster.local:51000"
-
   # The explicitly named insecure development mode swaps the CA file for
-  # HEALTH_PUBLISH_INSECURE and renders no cert resources.
-  - it: swaps to HEALTH_PUBLISH_INSECURE in insecure development mode
+  # HEALTH_PUBLISH_INSECURE and renders no cert resources. The target port
+  # comes from global.platformConnectorDeployment, since a subchart cannot
+  # read the umbrella's platformConnector.deployment values.
+  - it: swaps to HEALTH_PUBLISH_INSECURE and follows global.platformConnectorDeployment
     template: templates/deployment.yaml
     set:
       publishTo: deployment
       global.platformConnectorDeployment.tls.mode: insecureDevelopmentMode
+      global.platformConnectorDeployment.grpcPort: 51000
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -126,6 +114,11 @@ tests:
           content:
             name: platform-connector-deployment-ca
           any: true
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: HEALTH_PUBLISH_TARGET
+            value: "platform-connector-deployment.nvsentinel.svc.cluster.local:51000"
 
   - it: refuses an unknown publishTo value
     template: templates/deployment.yaml

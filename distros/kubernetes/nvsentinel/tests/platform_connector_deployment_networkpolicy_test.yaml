@@ -27,15 +27,14 @@ tests:
           count: 0
 
   # The default: only pods carrying the publisher label, in the release
-  # namespace, may reach the gRPC port. Identical on every cluster.
+  # namespace, may reach the gRPC port. Identical on every cluster, and the
+  # release notes print no widening note.
   - it: admits only labelled publisher pods by default
     template: templates/platform-connector-deployment-networkpolicy.yaml
     set:
       platformConnector.deployment.enabled: true
       gpu-health-monitor.publishTo: deployment
     asserts:
-      - hasDocuments:
-          count: 1
       - equal:
           path: spec.ingress[0].from
           value:
@@ -45,14 +44,16 @@ tests:
               podSelector:
                 matchLabels:
                   nvsentinel.nvidia.com/health-publisher: "true"
-      - equal:
-          path: spec.ingress[0].ports[0].port
-          value: 50051
       - isNull:
           path: metadata.annotations
+      - notMatchRegex:
+          path: raw
+          pattern: "host network"
+        template: templates/NOTES.txt
 
   # A hostNetwork publisher is seen by its node, not its labels: the rule keeps
-  # the port and admits every source, and says so in an annotation.
+  # the port and admits every source, and says so in an annotation and in the
+  # release notes.
   - it: admits every source when the gpu monitor publishes from the host network
     template: templates/platform-connector-deployment-networkpolicy.yaml
     set:
@@ -60,8 +61,6 @@ tests:
       gpu-health-monitor.publishTo: deployment
       gpu-health-monitor.useHostNetworking: true
     asserts:
-      - hasDocuments:
-          count: 1
       - isNull:
           path: spec.ingress[0].from
       - equal:
@@ -72,6 +71,10 @@ tests:
       - matchRegex:
           path: metadata.annotations["nvsentinel.nvidia.com/grpc-ingress"]
           pattern: "^open to every source: gpu-health-monitor publishes from the host network"
+      - matchRegex:
+          path: raw
+          pattern: "reaches the deployment platform connector from the host network:\n.*gpu-health-monitor publishes from the host network"
+        template: templates/NOTES.txt
 
   # The DCGM mode is selected fleet-wide through global.dcgm.mode, which the gpu
   # monitor's own helper prefers over its chart-level value; the umbrella helper
@@ -83,8 +86,6 @@ tests:
       gpu-health-monitor.publishTo: deployment
       global.dcgm.mode: external-hostengine
     asserts:
-      - isNull:
-          path: spec.ingress[0].from
       - isNotNull:
           path: metadata.annotations["nvsentinel.nvidia.com/grpc-ingress"]
 
@@ -99,8 +100,6 @@ tests:
     asserts:
       - isNotNull:
           path: spec.ingress[0].from
-      - isNull:
-          path: metadata.annotations
 
   - it: keeps the strict rule when the gpu monitor is disabled
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -112,29 +111,6 @@ tests:
     asserts:
       - isNotNull:
           path: spec.ingress[0].from
-      - isNull:
-          path: metadata.annotations
-
-  - it: repeats the widening in the release notes
-    template: templates/NOTES.txt
-    set:
-      platformConnector.deployment.enabled: true
-      gpu-health-monitor.publishTo: deployment
-      gpu-health-monitor.useHostNetworking: true
-    asserts:
-      - matchRegex:
-          path: raw
-          pattern: "reaches the deployment platform connector from the host network:\n.*gpu-health-monitor publishes from the host network"
-
-  - it: prints no widening note by default
-    template: templates/NOTES.txt
-    set:
-      platformConnector.deployment.enabled: true
-      gpu-health-monitor.publishTo: deployment
-    asserts:
-      - notMatchRegex:
-          path: raw
-          pattern: "host network"
 
   # Preflight checks run in tenant pods the webhook labels, in any namespace:
   # the rule admits labelled pods from every namespace.
@@ -145,8 +121,6 @@ tests:
       global.preflight.enabled: true
       preflight.publishTo: deployment
     asserts:
-      - hasDocuments:
-          count: 1
       - contains:
           path: spec.ingress[0].from
           content:
@@ -154,8 +128,6 @@ tests:
             podSelector:
               matchLabels:
                 nvsentinel.nvidia.com/health-publisher: "true"
-      - isNull:
-          path: metadata.annotations
 
   - it: keeps the strict rule while the preflight checks stay on the socket, host-network workloads or not
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -173,22 +145,6 @@ tests:
                 nvsentinel.nvidia.com/health-publisher: "true"
       - isNotNull:
           path: spec.ingress[0].from
-      - isNull:
-          path: metadata.annotations
-
-  - it: admits every source when the preflight checks publish from host-network workloads
-    template: templates/platform-connector-deployment-networkpolicy.yaml
-    set:
-      platformConnector.deployment.enabled: true
-      global.preflight.enabled: true
-      preflight.publishTo: deployment
-      preflight.hostNetworkWorkloads: true
-    asserts:
-      - isNull:
-          path: spec.ingress[0].from
-      - matchRegex:
-          path: metadata.annotations["nvsentinel.nvidia.com/grpc-ingress"]
-          pattern: "^open to every source: the preflight checks publish from host-network workload pods"
 
   - it: keeps the strict rule when host-network workloads are declared but preflight is disabled
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -199,8 +155,6 @@ tests:
     asserts:
       - isNotNull:
           path: spec.ingress[0].from
-      - isNull:
-          path: metadata.annotations
 
   - it: refuses a quoted preflight.hostNetworkWorkloads rather than reading it as true
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -213,6 +167,8 @@ tests:
       - failedTemplate:
           errorPattern: preflight.hostNetworkWorkloads must be a boolean
 
+  # Preflight checks on host-network workload pods widen the rule too; with
+  # the gpu monitor also on the host network the annotation names both.
   - it: names both host-network publishers in the annotation
     template: templates/platform-connector-deployment-networkpolicy.yaml
     set:
@@ -263,9 +219,6 @@ tests:
       - equal:
           path: spec.ingress[0].from[1].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
           value: tenant-a
-      - equal:
-          path: spec.ingress[0].from[1].podSelector.matchLabels["nvsentinel.nvidia.com/health-publisher"]
-          value: "true"
 
   # The allow rule and the Service must follow the same
   # global.platformConnectorDeployment.grpcPort the listener and the

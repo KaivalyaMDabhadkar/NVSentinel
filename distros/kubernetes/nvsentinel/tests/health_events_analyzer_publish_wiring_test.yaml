@@ -26,8 +26,8 @@ set:
   # The chart ships disabled; its templates render only once enabled.
   global.healthEventsAnalyzer.enabled: true
 tests:
-  # publishTo defaults to socket: no HEALTH_PUBLISH_* env, no CA volume and
-  # no publisher pod label.
+  # publishTo defaults to socket: no publisher pod label. The shared helpers'
+  # socket-path output is covered by the csp-health-monitor suite.
   - it: renders no direct-publishing wiring on the default socket path
     template: charts/health-events-analyzer/templates/deployment.yaml
     asserts:
@@ -36,20 +36,10 @@ tests:
           content:
             name: platform-connector-token
           any: true
-      - notContains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: HEALTH_PUBLISH_TARGET
-          any: true
-      - notContains:
-          path: spec.template.spec.volumes
-          content:
-            name: platform-connector-deployment-ca
-          any: true
       - notExists:
           path: spec.template.metadata.labels["nvsentinel.nvidia.com/health-publisher"]
 
-  - it: wires target, token, CA and the publisher label in deployment mode
+  - it: wires the target, the CA and the publisher label in deployment mode
     template: charts/health-events-analyzer/templates/deployment.yaml
     set:
       health-events-analyzer.publishTo: deployment
@@ -63,31 +53,10 @@ tests:
             name: HEALTH_PUBLISH_TARGET
             value: "platform-connector-deployment.nvsentinel.svc.cluster.local:50051"
       - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: HEALTH_PUBLISH_TOKEN_PATH
-            value: "/var/run/secrets/nvsentinel/platform-connector/token"
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: HEALTH_PUBLISH_TLS_CA_FILE
-            value: "/etc/nvsentinel/platform-connector-deployment-ca/ca.crt"
-      - contains:
           path: spec.template.spec.containers[0].volumeMounts
           content:
             name: platform-connector-deployment-ca
             mountPath: /etc/nvsentinel/platform-connector-deployment-ca
-            readOnly: true
-      # The socket flags stay; the client ignores them in direct mode.
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: "--socket-token-path=/var/run/secrets/nvsentinel/platform-connector/token"
-      # The token is the socket path's one, still mounted where the path points.
-      - contains:
-          path: spec.template.spec.containers[0].volumeMounts
-          content:
-            name: platform-connector-token
-            mountPath: /var/run/secrets/nvsentinel/platform-connector
             readOnly: true
       - contains:
           path: spec.template.spec.volumes

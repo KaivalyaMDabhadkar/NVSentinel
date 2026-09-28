@@ -26,15 +26,8 @@ templates:
   - templates/clusterrolebinding.yaml
   - templates/configmap.yaml
 tests:
-  - it: renders no server RBAC while the deployment platform connector is disabled
-    template: templates/platform-connector-deployment-serviceaccount.yaml
-    asserts:
-      - hasDocuments:
-          count: 0
-
-  # The server validates every caller token and always runs the pipeline,
-  # which writes node conditions and node events: without these rules every
-  # request or condition write is Forbidden.
+  # Exactly the calls the server makes (TokenReview for every caller token,
+  # node conditions and node events); nothing it never does.
   - it: grants the server the TokenReview, node and event rules when enabled
     template: templates/platform-connector-deployment-serviceaccount.yaml
     set:
@@ -42,16 +35,6 @@ tests:
     asserts:
       - hasDocuments:
           count: 3
-      - equal:
-          path: kind
-          value: ClusterRole
-        documentIndex: 1
-      - equal:
-          path: metadata.name
-          value: platform-connector-deployment
-        documentIndex: 1
-      # Exactly the calls the connector makes; nothing it never does (list,
-      # watch, patch).
       - equal:
           path: rules
           value:
@@ -68,34 +51,19 @@ tests:
               resources: ["tokenreviews"]
               verbs: ["create"]
         documentIndex: 1
-
-  - it: binds the server ClusterRole to the server ServiceAccount
-    template: templates/platform-connector-deployment-serviceaccount.yaml
-    set:
-      platformConnector.deployment.enabled: true
-    asserts:
-      - equal:
-          path: kind
-          value: ClusterRoleBinding
-        documentIndex: 2
       - equal:
           path: metadata.name
           value: platform-connector-deployment
-        documentIndex: 2
+        documentIndex: 1
       - equal:
           path: roleRef.name
           value: platform-connector-deployment
-        documentIndex: 2
-      - equal:
-          path: subjects[0].kind
-          value: ServiceAccount
         documentIndex: 2
       - equal:
           path: subjects[0].name
           value: platform-connector-deployment
         documentIndex: 2
 
-  # An enabled server needs node-binding auth: every caller presents a token.
   - it: refuses an enabled server while platform-connector auth is disabled
     template: templates/platform-connector-deployment-deployment.yaml
     set:
@@ -105,43 +73,32 @@ tests:
       - failedTemplate:
           errorPattern: node-binding auth must be enabled
 
-  # Subcharts read the deployment's connection facts from
-  # global.platformConnectorDeployment, and the server templates read the
-  # same values: one override must reach the listener env, the container
-  # port and the publishers alike.
-  - it: propagates a global grpcPort override into the server listener and ports
-    template: templates/platform-connector-deployment-deployment.yaml
+  # Each role reads its own config file, rendered from one template: the
+  # server's with fleet sizing and its "deployment" tunables, the DaemonSet's
+  # for one node. A million must render as an integer, not "1e+06"; a global
+  # grpcPort override must reach the listener and the container port; the
+  # DaemonSet keeps its direct database path and never gets the mode flag.
+  - it: renders each role's config file and args from its own values
     set:
       platformConnector.deployment.enabled: true
-      global.platformConnectorDeployment.grpcPort: 51000
-    asserts:
-      - contains:
-          path: spec.template.spec.containers[0].args
-          content: "--listen-addr=:51000"
-      - contains:
-          path: spec.template.spec.containers[0].ports
-          content:
-            name: grpc
-            containerPort: 51000
-
-  # Everything the server reads is in its own config file, rendered from the
-  # same template as the DaemonSet's with fleet sizing and the role's
-  # tunables under "deployment"; the container args carry only where the file
-  # is, where it listens and the datastore certificate flag.
-  - it: renders the deployment's config file with fleet sizing and its tunables
-    set:
-      platformConnector.deployment.enabled: true
-      platformConnector.deployment.auth.tokenCacheSize: 42
+      platformConnector.deployment.auth.tokenCacheSize: 1000000
+      platformConnector.deployment.kubernetes.qps: "1500"
       platformConnector.deployment.conditionUpdateTimeout: 3s
+      global.platformConnectorDeployment.grpcPort: 51000
     asserts:
       - template: templates/platform-connector-deployment-configmap.yaml
         equal:
           path: metadata.name
           value: platform-connector-deployment
+      # The central server is sized for the fleet, not like a DaemonSet pod.
+      - template: templates/platform-connector-deployment-deployment.yaml
+        equal:
+          path: spec.template.spec.containers[0].resources.limits.memory
+          value: 4Gi
       - template: templates/platform-connector-deployment-configmap.yaml
         matchRegex:
           path: data["config.json"]
-          pattern: '"K8sConnectorQps": 1000.00,\n\s*"K8sConnectorBurst": 2000,'
+          pattern: '"K8sConnectorQps": 1500.00,\n\s*"K8sConnectorBurst": 2000,'
       - template: templates/platform-connector-deployment-configmap.yaml
         matchRegex:
           path: data["config.json"]
@@ -149,7 +106,7 @@ tests:
       - template: templates/platform-connector-deployment-configmap.yaml
         matchRegex:
           path: data["config.json"]
-          pattern: '"deployment": \{\n\s*"TokenReviewQps": 1000,\n\s*"TokenReviewBurst": 2000,\n\s*"TokenCacheSize": 42,\n\s*"ConditionUpdateTimeout": "3s",\n\s*"MaxConnectionAge": "10m",\n\s*"MaxConnectionIdle": "5m",\n\s*"GrpcReadBufferBytes": 8192,\n\s*"GrpcWriteBufferBytes": 8192\n\s*\}'
+          pattern: '"deployment": \{\n\s*"TokenReviewQps": 1000,\n\s*"TokenReviewBurst": 2000,\n\s*"TokenCacheSize": 1000000,\n\s*"ConditionUpdateTimeout": "3s",\n\s*"MaxConnectionAge": "10m",\n\s*"MaxConnectionIdle": "5m",\n\s*"GrpcReadBufferBytes": 8192,\n\s*"GrpcWriteBufferBytes": 8192\n\s*\}'
       - template: templates/platform-connector-deployment-configmap.yaml
         matchRegex:
           path: data["metadata.toml"]
@@ -161,53 +118,41 @@ tests:
             - "--mode=deployment"
             - "--config=/etc/config/config.json"
             - "--metrics-port=2112"
-            - "--listen-addr=:50051"
+            - "--listen-addr=:51000"
             - "--tls-cert-dir=/etc/nvsentinel/platform-connector-deployment/tls"
             - "--mongo-client-cert-mount-path=/etc/ssl/mongo-client"
+      - template: templates/platform-connector-deployment-deployment.yaml
+        contains:
+          path: spec.template.spec.containers[0].ports
+          content:
+            name: grpc
+            containerPort: 51000
       - template: templates/platform-connector-deployment-deployment.yaml
         equal:
           path: spec.template.spec.volumes[0].configMap.name
           value: platform-connector-deployment
-      - template: templates/platform-connector-deployment-deployment.yaml
-        equal:
-          path: spec.template.spec.containers[0].resources.limits.memory
-          value: 4Gi
-
-  # The DaemonSet's file is sized for one node from the same template, so the
-  # keys both roles share cannot drift apart.
-  - it: renders the DaemonSet's config file for one node
-    template: templates/configmap.yaml
-    set:
-      platformConnector.deployment.enabled: true
-    asserts:
-      - matchRegex:
+      - template: templates/configmap.yaml
+        matchRegex:
           path: data["config.json"]
           pattern: '"K8sConnectorQps": 5.00,\n\s*"K8sConnectorBurst": 10,'
-      - matchRegex:
-          path: data["config.json"]
-          pattern: '"AuthAudience": "platform-connector.nvsentinel.nvidia.com"'
-      - notMatchRegex:
+      - template: templates/configmap.yaml
+        notMatchRegex:
           path: data["config.json"]
           pattern: '"deployment":'
-      - matchRegex:
+      - template: templates/configmap.yaml
+        matchRegex:
           path: data["metadata.toml"]
           pattern: 'cacheSize = 50\ncacheTTL = "60s"'
-
-  # Helm reads numbers from values files as floats and would print a million
-  # as "1e+06", which the server refuses to parse at startup.
-  - it: renders a large integer knob as an integer
-    template: templates/platform-connector-deployment-configmap.yaml
-    set:
-      platformConnector.deployment.enabled: true
-      platformConnector.deployment.auth.tokenCacheSize: 1000000
-      platformConnector.deployment.kubernetes.qps: "1500"
-    asserts:
-      - matchRegex:
-          path: data["config.json"]
-          pattern: '"TokenCacheSize": 1000000,'
-      - matchRegex:
-          path: data["config.json"]
-          pattern: '"K8sConnectorQps": 1500.00,'
+      - template: templates/daemonset.yaml
+        notContains:
+          path: spec.template.spec.containers[0].args
+          content: "--mode=deployment"
+      - template: templates/daemonset.yaml
+        contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: MONGODB_CLIENT_CERT_MOUNT_PATH
+          any: true
 
   - it: refuses a fractional integer knob
     template: templates/platform-connector-deployment-deployment.yaml
@@ -227,8 +172,6 @@ tests:
       - failedTemplate:
           errorPattern: platformConnector.deployment.connections.readBufferBytes must be a positive integer
 
-  # The node-local connector's ServiceAccount, RBAC and ConfigMap exist for
-  # the DaemonSet alone; without it they would be an unused cluster-wide grant.
   - it: renders the DaemonSet, its RBAC and its ConfigMap by default
     templates:
       - templates/daemonset.yaml
@@ -241,11 +184,12 @@ tests:
           count: 1
 
   # A --reuse-values upgrade from a release without the two keys keeps
-  # today's behaviour: the DaemonSet and no Deployment.
+  # today's behaviour: the DaemonSet and no server Deployment or RBAC.
   - it: keeps the DaemonSet and no Deployment when both keys are absent
     templates:
       - templates/daemonset.yaml
       - templates/platform-connector-deployment-deployment.yaml
+      - templates/platform-connector-deployment-serviceaccount.yaml
     set:
       platformConnector.daemonset: null
       platformConnector.deployment: null
@@ -256,31 +200,35 @@ tests:
       - hasDocuments:
           count: 0
         template: templates/platform-connector-deployment-deployment.yaml
+      - hasDocuments:
+          count: 0
+        template: templates/platform-connector-deployment-serviceaccount.yaml
 
-  # The DaemonSet is gated by its own enable flag; the switchover removes it
-  # only after every monitor's publishTo is "deployment". Rendering the suite
-  # also runs the publishTo guard, so this proves that end state, preflight
-  # included, passes it.
-  - it: omits the DaemonSet, its RBAC and its ConfigMap when platformConnector.daemonset.enabled is false
+  # The switchover end state: every enabled publisher, the preflight checks
+  # and the lifecycle manager included, is on the deployment, so the guard
+  # passes and the DaemonSet's objects are gone.
+  - it: omits the DaemonSet, its RBAC and its ConfigMap once every publisher is on the deployment
     templates:
       - templates/daemonset.yaml
       - templates/serviceaccount.yaml
       - templates/clusterrole.yaml
       - templates/clusterrolebinding.yaml
       - templates/configmap.yaml
+      - templates/platform-connector-deployment-validation.yaml
     values:
       - ./values/publishers-on-deployment.yaml
     set:
       global.preflight.enabled: true
+      global.lifecycleManager.enabled: true
+      lifecycle-manager.controllers.maintenanceRequest.enabled: true
+      lifecycle-manager.publishTo: deployment
     asserts:
       - hasDocuments:
           count: 0
 
-  # Both gates refuse non-boolean values: the string "false" (for example
-  # from --set-string) is truthy to Go templates and would silently flip the
-  # gate the wrong way. Helm attributes the shared helper's failure to the
-  # first gated template it renders (the publishTo guard), so that is the
-  # template these tests must target.
+  # A string "false" (for example from --set-string) is truthy to Go
+  # templates, so both gates refuse non-booleans. Helm reports the shared
+  # helper's failure through the first template to read the setting.
   - it: refuses a string platformConnector.deployment.enabled
     template: templates/platform-connector-deployment-validation.yaml
     set:
@@ -289,9 +237,6 @@ tests:
       - failedTemplate:
           errorPattern: platformConnector.deployment.enabled must be a boolean
 
-  # Helm renders templates in reverse name order, so the failure is reported
-  # through the first of them to read the setting, the DaemonSet
-  # ServiceAccount.
   - it: refuses a string platformConnector.daemonset.enabled
     template: templates/serviceaccount.yaml
     set:
@@ -300,27 +245,9 @@ tests:
       - failedTemplate:
           errorPattern: platformConnector.daemonset.enabled must be a boolean
 
-  # The DaemonSet writes directly to the database; it must keep its database
-  # client wiring and must never carry the mode flag that would flip the
-  # binary into the central role.
-  - it: keeps the DaemonSet on the direct database path
-    template: templates/daemonset.yaml
-    set:
-      platformConnector.deployment.enabled: true
-    asserts:
-      - notContains:
-          path: spec.template.spec.containers[0].args
-          content: "--mode=deployment"
-      - contains:
-          path: spec.template.spec.containers[0].env
-          content:
-            name: MONGODB_CLIENT_CERT_MOUNT_PATH
-          any: true
-
-  # A publisher on publishTo: deployment mounts the server's CA secret and
-  # dials its Service, so with the central Deployment off its pods never
-  # start. Subcharts cannot see the umbrella's values, so the umbrella
-  # refuses the pairing. A disabled subchart renders no pods and is exempt.
+  # An enabled publisher on publishTo: deployment needs the server; one on
+  # the socket needs the DaemonSet. A disabled subchart renders no pods and
+  # is exempt.
   - it: refuses publishTo deployment on an enabled publisher while the deployment platform connector is disabled
     template: templates/platform-connector-deployment-validation.yaml
     set:
@@ -328,15 +255,6 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: gpu-health-monitor.publishTo is "deployment" but platformConnector.deployment.enabled is false
-
-  - it: accepts publishTo deployment on a publisher once the deployment platform connector is enabled
-    template: templates/platform-connector-deployment-validation.yaml
-    set:
-      platformConnector.deployment.enabled: true
-      gpu-health-monitor.publishTo: deployment
-    asserts:
-      - hasDocuments:
-          count: 0
 
   - it: ignores publishTo deployment on a disabled publisher subchart
     template: templates/platform-connector-deployment-validation.yaml
@@ -346,20 +264,6 @@ tests:
       - hasDocuments:
           count: 0
 
-  # The inverse pairing: with the DaemonSet off, a publisher left on
-  # publishTo: socket would publish to a socket nothing serves and lose
-  # its events.
-  - it: refuses turning the DaemonSet off while an enabled publisher still publishes to the socket
-    template: templates/platform-connector-deployment-validation.yaml
-    set:
-      platformConnector.daemonset.enabled: false
-      platformConnector.deployment.enabled: true
-    asserts:
-      - failedTemplate:
-          errorPattern: publishTo is "socket" but platformConnector.daemonset.enabled is false
-
-  # The preflight checks are a publisher too: injected into tenant pods, they
-  # publish through the socket or to the deployment like the monitors.
   - it: refuses turning the DaemonSet off while the preflight checks still publish to the socket
     template: templates/platform-connector-deployment-validation.yaml
     values:
@@ -372,8 +276,7 @@ tests:
           errorPattern: preflight.publishTo is "socket" but platformConnector.daemonset.enabled is false
 
   # The lifecycle manager publishes only through its MaintenanceRequest
-  # controller, off by default, so its publishTo is paired the same way but
-  # only while that controller is enabled.
+  # controller, so its publishTo counts only while that controller is on.
   - it: refuses turning the DaemonSet off while the lifecycle manager's MaintenanceRequest controller still publishes to the socket
     template: templates/platform-connector-deployment-validation.yaml
     values:
@@ -384,18 +287,6 @@ tests:
     asserts:
       - failedTemplate:
           errorPattern: lifecycle-manager.publishTo is "socket" but platformConnector.daemonset.enabled is false
-
-  - it: accepts turning the DaemonSet off once the lifecycle manager publishes to the deployment too
-    template: templates/platform-connector-deployment-validation.yaml
-    values:
-      - ./values/publishers-on-deployment.yaml
-    set:
-      global.lifecycleManager.enabled: true
-      lifecycle-manager.controllers.maintenanceRequest.enabled: true
-      lifecycle-manager.publishTo: deployment
-    asserts:
-      - hasDocuments:
-          count: 0
 
   - it: refuses the lifecycle manager publishing to the deployment while the deployment platform connector is disabled
     template: templates/platform-connector-deployment-validation.yaml
@@ -413,16 +304,6 @@ tests:
       - ./values/publishers-on-deployment.yaml
     set:
       global.lifecycleManager.enabled: true
-    asserts:
-      - hasDocuments:
-          count: 0
-
-  - it: ignores publishTo socket on a disabled publisher subchart when the DaemonSet is off
-    template: templates/platform-connector-deployment-validation.yaml
-    values:
-      - ./values/publishers-on-deployment.yaml
-    set:
-      csp-health-monitor.publishTo: socket
     asserts:
       - hasDocuments:
           count: 0

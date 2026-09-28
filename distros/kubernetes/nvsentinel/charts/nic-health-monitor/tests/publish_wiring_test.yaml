@@ -27,16 +27,10 @@ set:
   global.initContainerImage.tag: "12-debian-12-r30"
   global.initContainerImage.pullPolicy: IfNotPresent
 tests:
-  # publishTo defaults to socket: the node-local path must render as before,
-  # with the socket token and no HEALTH_PUBLISH_* env, CA volume or
-  # publisher pod label.
+  # publishTo defaults to socket: no HEALTH_PUBLISH_* env, CA volume or
+  # publisher pod label. daemonset_test.yaml covers the socket token.
   - it: renders no direct-publishing wiring on the default socket path
     asserts:
-      - contains:
-          path: spec.template.spec.volumes
-          content:
-            name: platform-connector-token
-          any: true
       - notContains:
           path: spec.template.spec.containers[0].env
           content:
@@ -89,11 +83,14 @@ tests:
                   path: ca.crt
 
   # The explicitly named insecure development mode swaps the CA file for
-  # HEALTH_PUBLISH_INSECURE and renders no cert resources.
-  - it: swaps to HEALTH_PUBLISH_INSECURE in insecure development mode
+  # HEALTH_PUBLISH_INSECURE and renders no cert resources. The target port
+  # comes from global.platformConnectorDeployment, since a subchart cannot
+  # read the umbrella's platformConnector.deployment values.
+  - it: swaps to HEALTH_PUBLISH_INSECURE and follows global.platformConnectorDeployment
     set:
       publishTo: deployment
       global.platformConnectorDeployment.tls.mode: insecureDevelopmentMode
+      global.platformConnectorDeployment.grpcPort: 51000
     asserts:
       - contains:
           path: spec.template.spec.containers[0].env
@@ -110,15 +107,6 @@ tests:
           content:
             name: platform-connector-deployment-ca
           any: true
-
-  # The publisher-side view of the deployment platform connector comes from
-  # global.platformConnectorDeployment, since a subchart cannot read the
-  # umbrella's platformConnector.deployment values.
-  - it: follows global.platformConnectorDeployment overrides
-    set:
-      publishTo: deployment
-      global.platformConnectorDeployment.grpcPort: 51000
-    asserts:
       - contains:
           path: spec.template.spec.containers[0].env
           content:

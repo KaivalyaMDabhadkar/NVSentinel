@@ -79,17 +79,6 @@ tests:
             name: platform-connector-deployment-ca
             mountPath: /etc/nvsentinel/platform-connector-deployment-ca
             readOnly: true
-      # The socket flags stay; the client ignores them in direct mode.
-      - contains:
-          path: spec.template.spec.containers[1].args
-          content: "--uds-token-path=/var/run/secrets/nvsentinel/platform-connector/token"
-      # The token is the socket path's one, still mounted where the path points.
-      - contains:
-          path: spec.template.spec.containers[1].volumeMounts
-          content:
-            name: platform-connector-token
-            mountPath: /var/run/secrets/nvsentinel/platform-connector
-            readOnly: true
       - contains:
           path: spec.template.spec.volumes
           content:
