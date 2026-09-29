@@ -27,22 +27,18 @@ tests:
           count: 0
 
   # The default: every pod in the release namespace may reach the gRPC port,
-  # the metrics port stays open for scraping, and the release notes print no
-  # widening note.
-  - it: admits the release namespace to gRPC and anyone to metrics by default
+  # and the release notes print no widening note.
+  - it: admits the release namespace to gRPC by default
     template: templates/platform-connector-deployment-networkpolicy.yaml
     set:
       platformConnector.deployment.enabled: true
       gpu-health-monitor.publishTo: deployment
     asserts:
+      - lengthEqual:
+          path: spec.ingress
+          count: 1
       - equal:
-          path: spec.ingress[0]
-          value:
-            ports:
-              - protocol: TCP
-                port: 2112
-      - equal:
-          path: spec.ingress[1].from
+          path: spec.ingress[0].from
           value:
             - namespaceSelector:
                 matchLabels:
@@ -65,9 +61,9 @@ tests:
       gpu-health-monitor.useHostNetworking: true
     asserts:
       - isNull:
-          path: spec.ingress[1].from
+          path: spec.ingress[0].from
       - equal:
-          path: spec.ingress[1].ports
+          path: spec.ingress[0].ports
           value:
             - protocol: TCP
               port: 50051
@@ -102,7 +98,7 @@ tests:
       gpu-health-monitor.useHostNetworking: true
     asserts:
       - isNotNull:
-          path: spec.ingress[1].from
+          path: spec.ingress[0].from
 
   - it: keeps the strict rule when the gpu monitor is disabled
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -113,7 +109,7 @@ tests:
       gpu-health-monitor.useHostNetworking: true
     asserts:
       - isNotNull:
-          path: spec.ingress[1].from
+          path: spec.ingress[0].from
 
   # Preflight checks run in tenant pods the webhook labels, in the namespaces
   # the webhook injects into: the rule reuses the webhook's namespaceSelector.
@@ -125,7 +121,7 @@ tests:
       preflight.publishTo: deployment
     asserts:
       - contains:
-          path: spec.ingress[1].from
+          path: spec.ingress[0].from
           content:
             namespaceSelector:
               matchLabels:
@@ -142,10 +138,10 @@ tests:
       preflight.hostNetworkWorkloads: true
     asserts:
       - lengthEqual:
-          path: spec.ingress[1].from
+          path: spec.ingress[0].from
           count: 1
       - isNotNull:
-          path: spec.ingress[1].from
+          path: spec.ingress[0].from
 
   - it: keeps the strict rule when host-network workloads are declared but preflight is disabled
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -155,7 +151,7 @@ tests:
       preflight.hostNetworkWorkloads: true
     asserts:
       - isNotNull:
-          path: spec.ingress[1].from
+          path: spec.ingress[0].from
 
   - it: refuses a quoted preflight.hostNetworkWorkloads rather than reading it as true
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -212,7 +208,7 @@ tests:
         - system:serviceaccount:nvsentinel:other-monitor
     asserts:
       - equal:
-          path: spec.ingress[1].from
+          path: spec.ingress[0].from
           value:
             - namespaceSelector:
                 matchLabels:
@@ -234,7 +230,7 @@ tests:
       global.platformConnectorDeployment.grpcPort: 51000
     asserts:
       - equal:
-          path: spec.ingress[1].ports[0].port
+          path: spec.ingress[0].ports[0].port
           value: 51000
       - equal:
           path: spec.ports[0].port

@@ -14,13 +14,13 @@
 
 {{- if and (include "nvsentinel.pcDeployment.enabled" .) .Values.networkPolicy.enabled }}
 {{- $openReason := include "nvsentinel.pcDeployment.hostNetworkPublisherReason" . }}
-# Ingress to the deployment platform connector. The metrics port is open, as for
-# the other components. The gRPC port admits every pod in the release namespace,
-# labelled publisher pods in the namespaces of cross-node publishers, and, while
-# the preflight checks publish here, labelled pods in the namespaces the preflight
-# webhook injects into (preflight.namespaceSelector). A publisher on the host
-# network cannot be matched by any selector, so the gRPC port is then open to
-# every source and the caller token decides.
+# gRPC ingress to the deployment platform connector; the chart's metrics-access
+# policy already opens the metrics port. It admits every pod in the release
+# namespace, labelled publisher pods in the namespaces of cross-node publishers,
+# and, while the preflight checks publish here, labelled pods in the namespaces
+# the preflight webhook injects into (preflight.namespaceSelector). A publisher
+# on the host network cannot be matched by any selector, so the gRPC port is
+# then open to every source and the caller token decides.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -38,9 +38,6 @@ spec:
   policyTypes:
     - Ingress
   ingress:
-    - ports:
-        - protocol: TCP
-          port: {{ .Values.global.metricsPort }}
     {{- if $openReason }}
     - ports:
         - protocol: TCP
