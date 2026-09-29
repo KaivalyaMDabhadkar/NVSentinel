@@ -34,9 +34,6 @@ spec:
         {{- end }}
       labels:
         {{- include "slurm-drain-monitor.labels" . | nindent 8 }}
-        {{- if include "slurm-drain-monitor.publish.enabled" . }}
-        nvsentinel.nvidia.com/health-publisher: "true"
-        {{- end }}
     spec:
       {{- if .Values.global }}
       {{- with .Values.global.imagePullSecrets }}

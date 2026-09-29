@@ -26,24 +26,27 @@ tests:
       - hasDocuments:
           count: 0
 
-  # The default: only pods carrying the publisher label, in the release
-  # namespace, may reach the gRPC port. Identical on every cluster, and the
-  # release notes print no widening note.
-  - it: admits only labelled publisher pods by default
+  # The default: every pod in the release namespace may reach the gRPC port,
+  # the metrics port stays open for scraping, and the release notes print no
+  # widening note.
+  - it: admits the release namespace to gRPC and anyone to metrics by default
     template: templates/platform-connector-deployment-networkpolicy.yaml
     set:
       platformConnector.deployment.enabled: true
       gpu-health-monitor.publishTo: deployment
     asserts:
       - equal:
-          path: spec.ingress[0].from
+          path: spec.ingress[0]
+          value:
+            ports:
+              - protocol: TCP
+                port: 2112
+      - equal:
+          path: spec.ingress[1].from
           value:
             - namespaceSelector:
                 matchLabels:
                   kubernetes.io/metadata.name: nvsentinel
-              podSelector:
-                matchLabels:
-                  nvsentinel.nvidia.com/health-publisher: "true"
       - isNull:
           path: metadata.annotations
       - notMatchRegex:
@@ -62,9 +65,9 @@ tests:
       gpu-health-monitor.useHostNetworking: true
     asserts:
       - isNull:
-          path: spec.ingress[0].from
+          path: spec.ingress[1].from
       - equal:
-          path: spec.ingress[0].ports
+          path: spec.ingress[1].ports
           value:
             - protocol: TCP
               port: 50051
@@ -99,7 +102,7 @@ tests:
       gpu-health-monitor.useHostNetworking: true
     asserts:
       - isNotNull:
-          path: spec.ingress[0].from
+          path: spec.ingress[1].from
 
   - it: keeps the strict rule when the gpu monitor is disabled
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -110,11 +113,11 @@ tests:
       gpu-health-monitor.useHostNetworking: true
     asserts:
       - isNotNull:
-          path: spec.ingress[0].from
+          path: spec.ingress[1].from
 
-  # Preflight checks run in tenant pods the webhook labels, in any namespace:
-  # the rule admits labelled pods from every namespace.
-  - it: admits labelled pods from every namespace when the preflight checks publish to the deployment
+  # Preflight checks run in tenant pods the webhook labels, in the namespaces
+  # the webhook injects into: the rule reuses the webhook's namespaceSelector.
+  - it: admits labelled pods from the preflight namespaces when the preflight checks publish to the deployment
     template: templates/platform-connector-deployment-networkpolicy.yaml
     set:
       platformConnector.deployment.enabled: true
@@ -122,9 +125,11 @@ tests:
       preflight.publishTo: deployment
     asserts:
       - contains:
-          path: spec.ingress[0].from
+          path: spec.ingress[1].from
           content:
-            namespaceSelector: {}
+            namespaceSelector:
+              matchLabels:
+                nvsentinel.nvidia.com/preflight: enabled
             podSelector:
               matchLabels:
                 nvsentinel.nvidia.com/health-publisher: "true"
@@ -136,15 +141,11 @@ tests:
       global.preflight.enabled: true
       preflight.hostNetworkWorkloads: true
     asserts:
-      - notContains:
-          path: spec.ingress[0].from
-          content:
-            namespaceSelector: {}
-            podSelector:
-              matchLabels:
-                nvsentinel.nvidia.com/health-publisher: "true"
+      - lengthEqual:
+          path: spec.ingress[1].from
+          count: 1
       - isNotNull:
-          path: spec.ingress[0].from
+          path: spec.ingress[1].from
 
   - it: keeps the strict rule when host-network workloads are declared but preflight is disabled
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -154,7 +155,7 @@ tests:
       preflight.hostNetworkWorkloads: true
     asserts:
       - isNotNull:
-          path: spec.ingress[0].from
+          path: spec.ingress[1].from
 
   - it: refuses a quoted preflight.hostNetworkWorkloads rather than reading it as true
     template: templates/platform-connector-deployment-networkpolicy.yaml
@@ -200,8 +201,8 @@ tests:
           pattern: "host network"
         template: templates/NOTES.txt
 
-  # A cross-node publisher in another namespace gets its own peer; one in
-  # the release namespace adds nothing.
+  # A cross-node publisher in another namespace gets a peer for its labelled
+  # pods; one in the release namespace is already admitted.
   - it: admits cross-node publishers from the namespaces they are declared in
     template: templates/platform-connector-deployment-networkpolicy.yaml
     set:
@@ -210,15 +211,18 @@ tests:
         - system:serviceaccount:tenant-a:custom-monitor
         - system:serviceaccount:nvsentinel:other-monitor
     asserts:
-      - lengthEqual:
-          path: spec.ingress[0].from
-          count: 2
       - equal:
-          path: spec.ingress[0].from[0].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: nvsentinel
-      - equal:
-          path: spec.ingress[0].from[1].namespaceSelector.matchLabels["kubernetes.io/metadata.name"]
-          value: tenant-a
+          path: spec.ingress[1].from
+          value:
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: nvsentinel
+            - namespaceSelector:
+                matchLabels:
+                  kubernetes.io/metadata.name: tenant-a
+              podSelector:
+                matchLabels:
+                  nvsentinel.nvidia.com/health-publisher: "true"
 
   # The allow rule and the Service must follow the same
   # global.platformConnectorDeployment.grpcPort the listener and the
@@ -230,7 +234,7 @@ tests:
       global.platformConnectorDeployment.grpcPort: 51000
     asserts:
       - equal:
-          path: spec.ingress[0].ports[0].port
+          path: spec.ingress[1].ports[0].port
           value: 51000
       - equal:
           path: spec.ports[0].port

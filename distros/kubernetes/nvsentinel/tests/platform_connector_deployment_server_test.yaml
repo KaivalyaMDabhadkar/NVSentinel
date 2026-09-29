@@ -97,6 +97,11 @@ tests:
           path: spec.dnsNames
           count: 3
         documentIndex: 3
+      # The name the publishers dial must be one of them.
+      - contains:
+          path: spec.dnsNames
+          content: platform-connector-deployment.nvsentinel.svc.cluster.local
+        documentIndex: 3
       - isNull:
           path: spec.isCA
         documentIndex: 3

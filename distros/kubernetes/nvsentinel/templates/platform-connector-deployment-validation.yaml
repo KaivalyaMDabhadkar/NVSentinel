@@ -12,20 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{/*
-Renders nothing; only validates the pairing of each publisher's publishTo with
-the two ingestion paths. Subcharts cannot read the umbrella's values, so it is
-checked here, keyed on the same global toggles that enable the subcharts: a
-disabled chart renders no pods and is exempt.
-
-- publishTo "deployment" while the deployment platform connector is off: the
-  pods mount its CA secret and dial its Service, so they never start.
-- publishTo "socket" while the DaemonSet is off: the pods publish to a
-  node-local socket nothing serves, so their events are dropped. For the
-  preflight checks, injected into tenant pods, this means a check that
-  cannot send its report either fails its init container, so the workload
-  pod never starts, or drops the report.
-*/}}
+# Renders nothing; only validates the pairing of each publisher's publishTo with
+# the two ingestion paths. Subcharts cannot read the umbrella's values, so it is
+# checked here, keyed on the same global toggles that enable the subcharts: a
+# disabled chart renders no pods and is exempt.
+#
+# - publishTo "deployment" while the deployment platform connector is off: the
+# pods mount its CA secret and dial its Service, so they never start.
+# - publishTo "socket" while the DaemonSet is off: the pods publish to a
+# node-local socket nothing serves, so their events are dropped. For the
+# preflight checks, injected into tenant pods, this means a check that
+# cannot send its report either fails its init container, so the workload
+# pod never starts, or drops the report.
 {{- $deploymentEnabled := include "nvsentinel.pcDeployment.enabled" . }}
 {{- $daemonsetEnabled := include "nvsentinel.pcDaemonset.enabled" . }}
 {{- range $chart, $toggle := dict "gpu-health-monitor" "gpuHealthMonitor" "syslog-health-monitor" "syslogHealthMonitor" "nic-health-monitor" "nicHealthMonitor" "kubernetes-object-monitor" "kubernetesObjectMonitor" "slurm-drain-monitor" "slurmDrainMonitor" "csp-health-monitor" "cspHealthMonitor" "nvcre-certification-monitor" "nvcreCertificationMonitor" "health-events-analyzer" "healthEventsAnalyzer" "preflight" "preflight" }}
@@ -38,11 +36,9 @@ disabled chart renders no pods and is exempt.
 {{- fail (printf "%s.publishTo is \"socket\" but platformConnector.daemonset.enabled is false, so its pods would publish to a node-local socket that nothing serves and their events would be dropped. Enable platformConnector.daemonset or set %s.publishTo to \"deployment\"." $chart $chart) }}
 {{- end }}
 {{- end }}
-{{- /*
-The lifecycle manager publishes only through its MaintenanceRequest controller,
-which is off by default, so its publishTo counts only while that controller is
-enabled as well.
-*/}}
+# The lifecycle manager publishes only through its MaintenanceRequest controller,
+# which is off by default, so its publishTo counts only while that controller is
+# enabled as well.
 {{- $lm := (index .Values "lifecycle-manager") | default dict }}
 {{- $lmEnabled := and (((.Values.global | default dict).lifecycleManager | default dict).enabled) ((($lm.controllers | default dict).maintenanceRequest | default dict).enabled) }}
 {{- $lmPublishTo := $lm.publishTo | default "socket" }}

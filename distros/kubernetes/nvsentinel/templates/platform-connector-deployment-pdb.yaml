@@ -12,14 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{/*
-Covers Eviction-API disruptions (node drains): at most one replica of the
-write path is taken down at a time, so monitors always have replicas to
-reconnect to. Rendered only from two replicas up: a budget that kept a sole
-replica from ever being evicted would block node drains instead, so a single
-replica runs without disruption protection, as its values comment says.
-*/}}
 {{- if and (include "nvsentinel.pcDeployment.enabled" .) (ge (.Values.platformConnector.deployment.replicas | int) 2) }}
+# Covers Eviction-API disruptions (node drains): at most one replica of the
+# write path is taken down at a time, so monitors always have replicas to
+# reconnect to. Rendered only from two replicas up: a budget that kept a sole
+# replica from ever being evicted would block node drains instead, so a single
+# replica runs without disruption protection, as its values comment says.
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

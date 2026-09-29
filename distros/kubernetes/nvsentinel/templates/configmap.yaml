@@ -13,8 +13,6 @@
 # limitations under the License.
 
 {{ if include "nvsentinel.pcDaemonset.enabled" . -}}
-{{- /* Trimmed on the right only: the rendered file, and so the DaemonSet's
-     checksum/config, stays as it was before this gate. */ -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:

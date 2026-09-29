@@ -37,9 +37,6 @@ spec:
         {{- end }}
       labels:
         {{- include "lifecycle-manager.selectorLabels" . | nindent 8 }}
-        {{- if and .Values.controllers.maintenanceRequest.enabled (include "lifecycle-manager.publish.enabled" .) }}
-        nvsentinel.nvidia.com/health-publisher: "true"
-        {{- end }}
     spec:
       {{- with ((.Values.global).imagePullSecrets | default .Values.imagePullSecrets) }}
       imagePullSecrets:

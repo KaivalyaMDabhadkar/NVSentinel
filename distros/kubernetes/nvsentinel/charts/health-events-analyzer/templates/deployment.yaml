@@ -35,9 +35,6 @@ spec:
         {{- end }}
       labels:
         {{- include "health-events-analyzer.labels" . | nindent 8 }}
-        {{- if include "nvsentinel.publish.enabled" . }}
-        nvsentinel.nvidia.com/health-publisher: "true"
-        {{- end }}
     spec:
       {{- $pgClientCert := eq (include "nvsentinel.datastore.postgresClientCertEnabled" .) "true" }}
       {{- with .Values.global.imagePullSecrets }}

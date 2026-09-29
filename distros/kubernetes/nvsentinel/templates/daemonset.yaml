@@ -12,13 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{/*
-The node-local platform connector: the Unix-socket ingestion path, writing
-directly to the database. Gated by its own flag: it is removed by
-turning platformConnector.daemonset.enabled off once every publisher's
-publishTo is "deployment"; the validation template refuses it otherwise.
-*/}}
-{{- if include "nvsentinel.pcDaemonset.enabled" . -}}
+{{ if include "nvsentinel.pcDaemonset.enabled" . -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:

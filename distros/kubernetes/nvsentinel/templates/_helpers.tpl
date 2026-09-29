@@ -748,8 +748,8 @@ enabled, so its helper is called behind the same toggle.
 "true" when the preflight checks publish to the deployment platform
 connector: preflight is enabled and its publishTo is "deployment". The
 webhook then stamps the health-publisher label on the tenant pods it injects
-into, in whatever namespace they live, so the gRPC rule admits labelled pods
-from every namespace.
+into, so the gRPC rule admits labelled pods in the namespaces that
+preflight.namespaceSelector selects.
 */}}
 {{- define "nvsentinel.pcDeployment.preflightPublisher" -}}
 {{- $enabled := ((((.Values.global) | default dict).preflight) | default dict).enabled -}}

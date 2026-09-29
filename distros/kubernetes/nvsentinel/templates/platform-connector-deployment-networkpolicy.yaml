@@ -12,16 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{/*
-The gRPC allow rule. Only pods labelled nvsentinel.nvidia.com/health-publisher
-may reach the port, from the release namespace, the namespaces of the
-cross-node allowlist, and every namespace while the preflight checks publish
-here. While a host-network publisher targets the Deployment, the rule admits
-every source (see nvsentinel.pcDeployment.hostNetworkPublisherReason); the
-caller token still decides who may publish.
-*/}}
 {{- if and (include "nvsentinel.pcDeployment.enabled" .) .Values.networkPolicy.enabled }}
 {{- $openReason := include "nvsentinel.pcDeployment.hostNetworkPublisherReason" . }}
+# Ingress to the deployment platform connector. The metrics port is open, as for
+# the other components. The gRPC port admits every pod in the release namespace,
+# labelled publisher pods in the namespaces of cross-node publishers, and, while
+# the preflight checks publish here, labelled pods in the namespaces the preflight
+# webhook injects into (preflight.namespaceSelector). A publisher on the host
+# network cannot be matched by any selector, so the gRPC port is then open to
+# every source and the caller token decides.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -39,15 +38,24 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.global.metricsPort }}
     {{- if $openReason }}
     - ports:
         - protocol: TCP
           port: {{ include "nvsentinel.pcDeployment.grpcPort" . }}
     {{- else }}
     - from:
-        {{- $namespaces := list .Release.Namespace }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace | quote }}
+        {{- $namespaces := list }}
         {{- range $sa := include "nvsentinel.pcAuth.crossNodeUsernames" . | fromJsonArray }}
-        {{- $namespaces = append $namespaces (index (splitList ":" $sa) 2) }}
+        {{- $ns := index (splitList ":" $sa) 2 }}
+        {{- if ne $ns $.Release.Namespace }}
+        {{- $namespaces = append $namespaces $ns }}
+        {{- end }}
         {{- end }}
         {{- range $ns := uniq $namespaces }}
         - namespaceSelector:
@@ -58,8 +66,8 @@ spec:
               nvsentinel.nvidia.com/health-publisher: "true"
         {{- end }}
         {{- if include "nvsentinel.pcDeployment.preflightPublisher" . }}
-        # Preflight checks run in tenant pods the webhook labels, in any namespace.
-        - namespaceSelector: {}
+        - namespaceSelector:
+            {{- toYaml (((.Values.preflight).namespaceSelector) | default dict) | nindent 12 }}
           podSelector:
             matchLabels:
               nvsentinel.nvidia.com/health-publisher: "true"

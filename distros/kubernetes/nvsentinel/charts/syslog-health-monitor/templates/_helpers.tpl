@@ -74,9 +74,6 @@ spec:
       labels:
         {{- include "syslog-health-monitor.selectorLabels" $root | nindent 8 }}
         nvsentinel.dgxc.nvidia.com/kata: {{ $kataLabel | quote }}
-        {{- if include "syslog-health-monitor.publish.enabled" $root }}
-        nvsentinel.nvidia.com/health-publisher: "true"
-        {{- end }}
     spec:
       {{- with $root.Values.global.imagePullSecrets }}
       imagePullSecrets:

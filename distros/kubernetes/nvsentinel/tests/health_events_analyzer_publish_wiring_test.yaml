@@ -36,17 +36,12 @@ tests:
           content:
             name: platform-connector-token
           any: true
-      - notExists:
-          path: spec.template.metadata.labels["nvsentinel.nvidia.com/health-publisher"]
 
-  - it: wires the target, the CA and the publisher label in deployment mode
+  - it: wires the target and the CA in deployment mode
     template: charts/health-events-analyzer/templates/deployment.yaml
     set:
       health-events-analyzer.publishTo: deployment
     asserts:
-      - equal:
-          path: spec.template.metadata.labels["nvsentinel.nvidia.com/health-publisher"]
-          value: "true"
       - contains:
           path: spec.template.spec.containers[0].env
           content:

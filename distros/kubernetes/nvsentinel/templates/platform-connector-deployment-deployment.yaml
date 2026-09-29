@@ -12,19 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{/*
-The deployment platform connector: the platform connector binary in its
-central role (--mode=deployment). It runs the pipeline, the node condition
-update and the datastore write inside each request and acknowledges a batch
-only once it is stored, so a replica holds nothing between requests and
-needs no drain: a plain rolling update is enough.
-*/}}
 {{- if include "nvsentinel.pcDeployment.enabled" . }}
 {{- $d := .Values.platformConnector.deployment }}
 {{- $tlsMode := include "nvsentinel.pcDeployment.tlsMode" . }}
 {{- if not (include "nvsentinel.pcAuth.enabled" .) }}
 {{- fail "platformConnector.deployment.enabled is true but global.platformConnectorAuth.enabled is false. Every caller of the deployment platform connector presents a token, so node-binding auth must be enabled." }}
 {{- end }}
+# The deployment platform connector: the platform connector binary in its
+# central role (--mode=deployment). It runs the pipeline, the node condition
+# update and the datastore write inside each request and acknowledges a batch
+# only once it is stored, so a replica holds nothing between requests and
+# needs no drain: a plain rolling update is enough.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,8 +30,8 @@ metadata:
   labels:
     {{- include "nvsentinel.pcDeployment.labels" . | nindent 4 }}
 spec:
-  {{- /* Zero is refused: with no replica every monitor on publishTo
-       "deployment" retries until its window ends and then drops its batches. */}}
+  # Zero is refused: with no replica every monitor on publishTo
+  # "deployment" retries until its window ends and then drops its batches.
   replicas: {{ include "nvsentinel.positiveInt" (list "platformConnector.deployment.replicas" $d.replicas) }}
   selector:
     matchLabels:
@@ -66,8 +64,8 @@ spec:
         {{- if .Values.global.auditLogging.enabled }}
         {{- include "nvsentinel.auditLogging.initContainer" . | nindent 8 }}
         {{- end }}
-        {{- /* As the server's user (the image's non-root uid), so the key
-             the copy makes private stays readable by the container. */}}
+        # As the server's user (the image's non-root uid), so the key
+        # the copy makes private stays readable by the container.
         {{- include "nvsentinel.platformConnector.pgCertInitContainer" (dict "context" . "runAsUser" 65532 "runAsGroup" 65532) | nindent 8 }}
       {{- end }}
       containers:
@@ -189,9 +187,9 @@ spec:
                   matchLabels:
                     {{- include "nvsentinel.pcDeployment.selectorLabels" . | nindent 20 }}
                 topologyKey: kubernetes.io/hostname
-      {{- /* The system pool when the global system placement is set, else the
-           Deployment's own values; never the DaemonSet's tolerate-everything
-           list, so a central pod stays off tainted nodes. */}}
+      # The system pool when the global system placement is set, else the
+      # Deployment's own values; never the DaemonSet's tolerate-everything
+      # list, so a central pod stays off tainted nodes.
       {{- with (((.Values.global).systemNodeSelector) | default $d.nodeSelector) }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

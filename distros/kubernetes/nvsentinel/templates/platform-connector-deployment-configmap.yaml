@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{- /* Fleet-sized; every tunable the server reads is in this file. */}}
 {{- if include "nvsentinel.pcDeployment.enabled" . }}
 {{- $d := .Values.platformConnector.deployment }}
 {{- $int := "nvsentinel.positiveInt" }}
+# Fleet-sized; every tunable the server reads is in this file.
 apiVersion: v1
 kind: ConfigMap
 metadata:

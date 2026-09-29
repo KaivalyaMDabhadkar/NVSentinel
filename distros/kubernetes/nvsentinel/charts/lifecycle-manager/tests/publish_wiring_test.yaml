@@ -37,9 +37,6 @@ tests:
     set:
       publishTo: deployment
     asserts:
-      - equal:
-          path: spec.template.metadata.labels["nvsentinel.nvidia.com/health-publisher"]
-          value: "true"
       - contains:
           path: spec.template.spec.containers[0].env
           content:
@@ -107,7 +104,7 @@ tests:
 
   # The default keeps the socket, no direct-publish environment and no label.
   # deployment_test.yaml covers the socket token and its flag.
-  - it: keeps the socket wiring and no publisher label by default
+  - it: keeps the socket wiring by default
     template: templates/deployment.yaml
     asserts:
       - contains:
@@ -122,8 +119,6 @@ tests:
           content:
             name: HEALTH_PUBLISH_TARGET
           any: true
-      - isNull:
-          path: spec.template.metadata.labels["nvsentinel.nvidia.com/health-publisher"]
 
   # The switch belongs to the MaintenanceRequest controller; with it off the
   # chart publishes nothing and the value is ignored.
@@ -138,8 +133,6 @@ tests:
           content:
             name: HEALTH_PUBLISH_TARGET
           any: true
-      - isNull:
-          path: spec.template.metadata.labels["nvsentinel.nvidia.com/health-publisher"]
 
   - it: refuses an unknown publishTo
     template: templates/deployment.yaml

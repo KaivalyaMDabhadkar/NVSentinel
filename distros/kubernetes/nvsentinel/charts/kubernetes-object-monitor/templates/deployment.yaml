@@ -34,9 +34,6 @@ spec:
         {{- end }}
       labels:
         {{- include "kubernetes-object-monitor.labels" . | nindent 8 }}
-        {{- if include "kubernetes-object-monitor.publish.enabled" . }}
-        nvsentinel.nvidia.com/health-publisher: "true"
-        {{- end }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

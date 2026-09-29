@@ -36,9 +36,6 @@ spec:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
       labels:
         {{- include "gpu-health-monitor.selectorLabels" . | nindent 8 }}
-        {{- if include "gpu-health-monitor.publish.enabled" . }}
-        nvsentinel.nvidia.com/health-publisher: "true"
-        {{- end }}
     spec:
       {{- with .Values.global.imagePullSecrets }}
       imagePullSecrets:
@@ -140,7 +137,7 @@ spec:
         - name: var-run-vol
           hostPath:
             path: /var/run/nvsentinel
-            type: DirectoryOrCreate
+            type: Directory
         - name: gpu-metadata
           hostPath:
             path: /var/lib/nvsentinel

@@ -12,17 +12,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-{{/*
-TLS for the deployment platform connector gRPC listener. A long-lived CA is
-bootstrapped from the self-signed issuer and signs the short-lived server
-certificate through a CA issuer. cert-manager writes that CA into ca.crt of
-the server secret, and publisher pods mount this key as their trust bundle,
-so a routine renewal of the server certificate changes nothing they trust.
-Renewing the CA itself is rare (once a decade by default) and is felt once:
-the server takes the new CA with its next certificate, and each publisher
-picks it up when its mounted secret refreshes, inside its retry window.
-*/}}
 {{- if and (include "nvsentinel.pcDeployment.enabled" .) (eq (include "nvsentinel.pcDeployment.tlsMode" .) "required") }}
+# TLS for the deployment platform connector gRPC listener. A long-lived CA is
+# bootstrapped from the self-signed issuer and signs the short-lived server
+# certificate through a CA issuer. cert-manager writes that CA into ca.crt of
+# the server secret, and publisher pods mount this key as their trust bundle,
+# so a routine renewal of the server certificate changes nothing they trust.
+# Renewing the CA itself is rare (once a decade by default) and is felt once:
+# the server takes the new CA with its next certificate, and each publisher
+# picks it up when its mounted secret refreshes, inside its retry window.
 apiVersion: cert-manager.io/v1
 kind: Issuer
 metadata:

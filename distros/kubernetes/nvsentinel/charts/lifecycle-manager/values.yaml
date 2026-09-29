@@ -217,9 +217,7 @@ controllers:
 #                (the default node-local path)
 #   deployment - directly to the central platform-connector-deployment gRPC
 #                service (requires platformConnector.deployment.enabled on
-#                the umbrella chart). The pod then carries the
-#                nvsentinel.nvidia.com/health-publisher label the connector's
-#                network policy admits.
+#                the umbrella chart).
 # Read only while controllers.maintenanceRequest.enabled is true; the
 # validation controller publishes nothing.
 publishTo: socket

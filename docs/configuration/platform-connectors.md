@@ -440,7 +440,7 @@ The deployment platform connector is off by default. To move to it, do these ste
    1. Set `publishTo: deployment` on each enabled monitor subchart: `gpu-health-monitor`, `syslog-health-monitor`, `nic-health-monitor`, `kubernetes-object-monitor`, `slurm-drain-monitor`, `csp-health-monitor`, `nvcre-certification-monitor` and `health-events-analyzer`.
    2. If the MaintenanceRequest controller of the lifecycle manager is on, set `lifecycle-manager.publishTo: deployment`. See [Lifecycle Manager](lifecycle-manager.md#maintenancerequest-controller).
    3. If preflight is on, set `preflight.publishTo: deployment`. The webhook then gives each injected check the target, the token path and the CA bundle, and puts the publisher label on the tenant pod. The preflight controller keeps a copy of the CA bundle in a ConfigMap named `nvsentinel-platform-connector-ca`, in each namespace that it injects into. It updates the copies when cert-manager rotates the CA. See [Preflight](preflight.md#publishing-to-the-deployment-platform-connector).
-   4. Set `platformConnector.daemonset.enabled: false` last. This removes the DaemonSet and its RBAC. The chart refuses this value while an enabled publisher still uses `publishTo: socket`.
+   4. Set `platformConnector.daemonset.enabled: false` last. This removes the DaemonSet and its RBAC. The chart refuses this value while an enabled publisher still uses `publishTo: socket`. The gpu monitor still mounts the socket directory `/var/run/nvsentinel` of the node, and this directory must exist. The DaemonSet creates it, and it is gone after a node restart because `/var/run` is not persistent. Thus keep the DaemonSet while the gpu monitor runs, or create the directory on each node in another way.
 
 A publisher on `publishTo: deployment` gets its connection settings from the chart as `HEALTH_PUBLISH_*` environment variables: the target, the token path and the CA bundle. With `global.platformConnectorDeployment.tls.mode: insecureDevelopmentMode`, the publisher gets `HEALTH_PUBLISH_INSECURE=true` instead of the CA bundle. The token is the same projected token that the publisher uses on the socket path. See [Authentication](authentication.md#deployment-platform-connector). The client in the publisher works as follows:
 
@@ -454,11 +454,11 @@ A publisher on `publishTo: deployment` gets its connection settings from the cha
 - The deployment platform connector can refuse a batch for good. It does this when the batch is invalid or names a node that the monitor may not report on. The client then reports the batch as rejected at once and does not retry. The syslog monitor skips such a journal entry. The NIC monitor and the health events analyzer drop the event and count it.
 - `nvsentinel_health_events_publisher_dropped_total` counts the drops by reason. See [METRICS.md](../METRICS.md#health-event-publisher).
 
-The deployment platform connector has its own network policy for the gRPC port. The policy admits only pods with the label `nvsentinel.nvidia.com/health-publisher: "true"`. Each publisher subchart puts this label on its pods when its `publishTo` is `deployment`. A publisher that this chart does not ship must put the label on its pods itself. The policy admits labelled pods from these namespaces:
+The deployment platform connector has its own network policy. The policy keeps the metrics port open, like the other components. The gRPC port admits these pods:
 
-- The release namespace.
-- The namespace of each entry in `global.platformConnectorAuth.crossNodeServiceAccounts`.
-- Every namespace, while `preflight.publishTo` is `deployment`. The webhook puts the label on tenant pods in any namespace.
+- Every pod in the release namespace.
+- Pods with the label `nvsentinel.nvidia.com/health-publisher: "true"` in the namespace of each entry in `global.platformConnectorAuth.crossNodeServiceAccounts`. A publisher that this chart does not ship must put the label on its pods itself.
+- Pods with the same label in the namespaces that the preflight webhook injects into, while `preflight.publishTo` is `deployment`. The policy uses `preflight.namespaceSelector`, so the webhook and the policy select the same namespaces. The webhook puts the label on the tenant pods.
 
 Two publishers can run on the host network:
 
