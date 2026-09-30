@@ -142,19 +142,30 @@ func (f *PlatformConnectorDeploymentFacts) readAudience(
 	f.Audience, _ = raw["AuthAudience"].(string)
 }
 
-// SkipWithoutPlatformConnectorDeployment skips a test that needs the deployment
-// platform connector when the run deployed only the node-local DaemonSet (tilt
-// without USE_DEPLOYMENT_PLATFORM_CONNECTOR=1).
-func SkipWithoutPlatformConnectorDeployment(t *testing.T, client klient.Client) {
+// PlatformConnectorDeploymentDeployed reports whether the run deployed the
+// deployment platform connector (tilt with USE_DEPLOYMENT_PLATFORM_CONNECTOR=1).
+func PlatformConnectorDeploymentDeployed(t *testing.T, client klient.Client) bool {
 	t.Helper()
 
 	err := client.Resources().Get(context.Background(), PlatformConnectorDeploymentName, NVSentinelNamespace,
 		&appsv1.Deployment{})
 	if apierrors.IsNotFound(err) {
-		t.Skipf("the %s Deployment is not deployed in this run", PlatformConnectorDeploymentName)
+		return false
 	}
 
 	require.NoError(t, err, "failed to look up the %s Deployment", PlatformConnectorDeploymentName)
+
+	return true
+}
+
+// SkipWithoutPlatformConnectorDeployment skips a test that needs the deployment
+// platform connector when the run deployed only the node-local DaemonSet.
+func SkipWithoutPlatformConnectorDeployment(t *testing.T, client klient.Client) {
+	t.Helper()
+
+	if !PlatformConnectorDeploymentDeployed(t, client) {
+		t.Skipf("the %s Deployment is not deployed in this run", PlatformConnectorDeploymentName)
+	}
 }
 
 // GetPlatformConnectorDeploymentFacts reads the connector's audience, ports,

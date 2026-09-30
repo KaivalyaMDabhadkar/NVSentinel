@@ -149,6 +149,10 @@ func TestPreflightEndToEnd(t *testing.T) {
 
 			target, withCA := helpers.PreflightHealthPublish(ctx, t, client)
 			if target == "" {
+				// tilt's deployment mode points preflight at the Deployment, so
+				// an empty target there is broken wiring, not the socket path.
+				require.False(t, helpers.PlatformConnectorDeploymentDeployed(t, client),
+					"the deployment platform connector is deployed but preflight has no healthPublishTarget")
 				t.Log("preflight publishes through the node-local socket; nothing to check here")
 
 				return ctx
