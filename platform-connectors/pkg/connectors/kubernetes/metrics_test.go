@@ -79,6 +79,20 @@ func TestInitMetrics_BeforeAnyEvent_CountersArePresentAtZero(t *testing.T) {
 	}
 }
 
+// A parent that reached its deadline is a retry timeout, not a shutdown: the
+// deployment platform connector bounds every batch with one.
+func TestWriteDropReason_ParentDeadlineIsARetryTimeout(t *testing.T) {
+	expired, cancelExpired := context.WithTimeout(context.Background(), 0)
+	defer cancelExpired()
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	require.Equal(t, DropReasonRetryTimeout, writeDropReason(expired, context.DeadlineExceeded))
+	require.Equal(t, DropReasonRetryTimeout, writeDropReason(expired, errors.New("write failed")))
+	require.Equal(t, DropReasonShutdown, writeDropReason(cancelled, errors.New("write failed")))
+}
+
 // The reasons initMetrics pre-creates must be exactly what writeDropReason can return.
 // Without this, adding a branch there silently leaves that series uninitialised again.
 //
