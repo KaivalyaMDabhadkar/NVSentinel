@@ -51,6 +51,7 @@ jobs:
             arch_name: "AMD64"
             datastore: "mongodb"
             datastore_name: "MongoDB"
+            platform_connector: "deployment"
           - arch: arm64
             runner: ${{ vars.RUNNER_ARCH_LARGE_ARM64 || 'linux-arm64-cpu32' }}
             arch_name: "ARM64"
@@ -86,8 +87,9 @@ jobs:
             arch_name: "ARM64"
             datastore: "postgresql"
             datastore_name: "PostgreSQL"
+            platform_connector: "deployment"
 
-    name: "E2E Tests (${{ matrix.arch_name }} + ${{ matrix.datastore_name }})"
+    name: "E2E Tests (${{ matrix.arch_name }} + ${{ matrix.datastore_name }}${{ matrix.platform_connector == 'deployment' && ' + Deployment PC' || '' }})"
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
@@ -182,7 +184,7 @@ jobs:
           USE_PERCONA: ${{ matrix.datastore == 'mongodb-percona' && '1' || '0' }}
           # Publish to the deployment platform connector on one datastore per arch (MongoDB with TLS on AMD64,
           # PostgreSQL on ARM64); the other jobs keep the node-local socket path, which is still the default.
-          USE_DEPLOYMENT_PLATFORM_CONNECTOR: ${{ ((matrix.arch == 'amd64' && matrix.datastore == 'mongodb') || (matrix.arch == 'arm64' && matrix.datastore == 'postgresql')) && '1' || '0' }}
+          USE_DEPLOYMENT_PLATFORM_CONNECTOR: ${{ matrix.platform_connector == 'deployment' && '1' || '0' }}
           # Set architecture-specific test tags (mongodb tag applies to all MongoDB variants)
           TEST_TAGS: ${{ matrix.arch }}_group${{ contains(matrix.datastore, 'mongodb') && ',mongodb' || '' }}
         run: |
