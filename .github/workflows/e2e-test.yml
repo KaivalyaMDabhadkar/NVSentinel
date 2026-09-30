@@ -180,6 +180,9 @@ jobs:
           DISABLE_TLS: ${{ matrix.datastore == 'mongodb-no-tls' && '1' || '0' }}
           # Use Percona operator instead of Bitnami for Percona MongoDB tests
           USE_PERCONA: ${{ matrix.datastore == 'mongodb-percona' && '1' || '0' }}
+          # Publish to the deployment platform connector on one datastore per arch (MongoDB with TLS on AMD64,
+          # PostgreSQL on ARM64); the other jobs keep the node-local socket path, which is still the default.
+          USE_DEPLOYMENT_PLATFORM_CONNECTOR: ${{ ((matrix.arch == 'amd64' && matrix.datastore == 'mongodb') || (matrix.arch == 'arm64' && matrix.datastore == 'postgresql')) && '1' || '0' }}
           # Set architecture-specific test tags (mongodb tag applies to all MongoDB variants)
           TEST_TAGS: ${{ matrix.arch }}_group${{ contains(matrix.datastore, 'mongodb') && ',mongodb' || '' }}
         run: |
