@@ -73,6 +73,3 @@ fault-remediation:
 
 node-drainer:
   partialDrainEnabled: true
-
-labeler:
-  assumeDriverInstalled: true
