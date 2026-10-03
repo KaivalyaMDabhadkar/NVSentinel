@@ -34,6 +34,18 @@ global:
   mongodbStore:
     enabled: true
 
+  systemNodeSelector:
+    nodeGroup: system-worker
+  systemNodeTolerations:
+    - key: dedicated
+      operator: Equal
+      value: system-workload
+      effect: NoSchedule
+    - key: dedicated
+      operator: Equal
+      value: system-workload
+      effect: NoExecute
+
 janitor-provider:
   auth:
     allowedUsernames: []
@@ -43,9 +55,8 @@ janitor-provider:
 fault-quarantine:
   circuitBreaker:
     enabled: false
-  # enable after https://github.com/NVIDIA/nodewright/issues/759 is fixed
-  # validation:
-  #   enabled: true
+  validation:
+    enabled: true
 
 fault-remediation:
   maintenance:
@@ -75,20 +86,28 @@ fault-remediation:
 node-drainer:
   partialDrainEnabled: true
 
-labeler:
-  assumeDriverInstalled: true
-
-# GPU reset on GKE Container-Optimized OS (COS) with a host-installed driver.
-# COS installs the driver under /home/kubernetes/bin/nvidia (bin/ and lib64/
-# only). That tree has no dynamic loader, so the reset job cannot chroot into
-# it. driverRoot "/" skips the chroot and runs nvidia-smi from the reset
-# container image, and the job then does not mount hostDriverRootPath.
-janitor:
-  config:
-    controllers:
-      gpuReset:
-        enabled: true
-        resetJob:
-          hostDriverRootPath: "/home/kubernetes/bin/nvidia"
-          driverRoot: "/"
-          runtimeClassName: "nvidia"
+mongodb-store:
+  mongodb:
+    nodeSelector:
+      nodeGroup: system-worker
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: system-workload
+        effect: NoSchedule
+      - key: dedicated
+        operator: Equal
+        value: system-workload
+        effect: NoExecute
+  job:
+    nodeSelector:
+      nodeGroup: system-worker
+    tolerations:
+      - key: dedicated
+        operator: Equal
+        value: system-workload
+        effect: NoSchedule
+      - key: dedicated
+        operator: Equal
+        value: system-workload
+        effect: NoExecute
