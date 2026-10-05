@@ -1093,12 +1093,17 @@ func TestTransform_CachedOptOutHoldsWhenTheReadFails(t *testing.T) {
 	createTestNode(t, node)
 	t.Cleanup(func() { deleteTestNode(t, node.Name) })
 
-	var failReads atomic.Bool
+	var (
+		failReads   atomic.Bool
+		failedReads atomic.Int32
+	)
 
 	restCfg := rest.CopyConfig(testEnv.Config)
 	restCfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
 		return roundTripFunc(func(req *http.Request) (*http.Response, error) {
 			if failReads.Load() && strings.HasSuffix(req.URL.Path, "/nodes/"+node.Name) {
+				failedReads.Add(1)
+
 				return nil, errors.New("api server unavailable")
 			}
 
@@ -1124,6 +1129,7 @@ func TestTransform_CachedOptOutHoldsWhenTheReadFails(t *testing.T) {
 
 	event := &pb.HealthEvent{NodeName: node.Name, ProcessingStrategy: pb.ProcessingStrategy_EXECUTE_REMEDIATION}
 	require.NoError(t, augmentor.Transform(ctx, event))
+	require.Positive(t, failedReads.Load(), "the event read the opted-out node again")
 	require.Equal(t, pb.ProcessingStrategy_STORE_ONLY, event.ProcessingStrategy,
 		"a failed read keeps the node opted out")
 }
