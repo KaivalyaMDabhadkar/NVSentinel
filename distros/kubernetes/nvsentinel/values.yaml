@@ -451,7 +451,8 @@ platformConnector:
       # Nodes whose metadata is cached per replica.
       nodeMetadataCacheSize: 200000
       # How long a node's cached metadata is reused. A node opted out with
-      # the skip label takes up to this long to be honored by the replicas.
+      # the skip label takes up to this long to be honored by the replicas;
+      # removing the label takes effect on the node's next event.
       nodeMetadataCacheTtl: "10m"
 
   # The node-local platform connector DaemonSet (the Unix-socket ingestion
@@ -574,8 +575,9 @@ platformConnector:
     MetadataAugmentor:
       cacheSize: 50
       # How long cached node metadata is considered fresh. Lower values mean
-      # label changes (e.g. managed=false) take effect faster, at the cost of
-      # more Kubernetes API GET calls. Failed lookups proceed ungated, so the
+      # a new managed=false label takes effect faster, at the cost of more
+      # Kubernetes API GET calls; removing the label takes effect on the
+      # node's next event. Failed lookups proceed ungated, so the
       # gating window can exceed this during a Kubernetes API outage.
       cacheTTLSeconds: 60
       # Managed-label gate: when a node carries this label, its events are set
