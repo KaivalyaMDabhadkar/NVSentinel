@@ -5,7 +5,7 @@
 - **Remediation without a database, as an opt-in mode.** In NodeHealth mode, fault-quarantine, node-drainer and fault-remediation read one small Kubernetes object per node, a `NodeHealth` object, instead of MongoDB or PostgreSQL. No database runs in this mode. The mode is off by default, and existing installs do not change.
 - **A NodeHealth object keeps only the faults that are open now, not a history of events.** Only a node with faults has one. A repeated event updates a counter on its open fault, and a cleared fault is removed, so the object never keeps past events. Each consumer records its progress in its own part.
 - **Only changes reach the API server.** Monitors keep sending every event, as today. The platform connector creates and updates the NodeHealth objects, and it compares each event with the node's open faults. A repeat of an open fault only raises the fault's count, and the connector saves the counts every 10 minutes by default. So a GPU that logs an XID (a GPU driver error) 600 times a second causes about as few writes as a GPU that logs it once. Each node also has a fixed limit on how much it can write.
-- **It works with either platform connector** Everything that matters is stored in the NodeHealth object, and the connector keeps only short-lived data in memory, such as counts that it has not saved yet. So the DaemonSet connector and the deployment platform connector of [ADR-052](052-deployment-platform-connector.md) run the same code, and customers can turn the DaemonSet off.
+- **It works with either platform connector.** Everything that matters is stored in the NodeHealth object, and the connector keeps only short-lived data in memory, such as counts that it has not saved yet. So the DaemonSet connector and the deployment platform connector of [ADR-052](052-deployment-platform-connector.md) run the same code, and customers can turn the DaemonSet off.
 - **A node is released only on evidence.** Before fault-quarantine removes a node's cordon and taint, a newer write must show that the fault cleared. Most clears must also hold for a short delay, so a fault that keeps coming back keeps the node quarantined. Missing data never releases a node. The existing circuit breaker still limits how many nodes are quarantined.
 - **What we give up.** Quarantine rules can no longer match a few rarely used event details. The health-events-analyzer is not supported, and the event exporter and csp-health-monitor need changes before they can run in this mode. In the worst case, one 16 GB etcd that also holds the Node objects supports about 20,000 nodes, or about 35,000 when the circuit breaker's standing limit is set to 10% of GPU nodes (estimate).
 
@@ -35,8 +35,8 @@ Other projects that kept a lot of state in custom resources hit etcd and API ser
 
 | Project | What went wrong | What this design does instead |
 |---|---|---|
-| Kyverno | It created report objects at the rate of events. 1.6 million objects (9.4 GB) made etcd read-only | The number of NodeHealth objects can never exceed the number of Nodes, and every writer has a write limit |
-| Crossplane | Hundreds of CRDs overloaded API servers. Two controllers that fought over one field raised API server load fourfold | One CRD, and one writer for each part of the object |
+| Kyverno | It created report objects at the rate of events. 1.6 million objects (9.4 GB) made etcd read-only | The number of NodeHealth objects can never exceed the number of Nodes, and the connector has a write limit for each node |
+| Crossplane | Hundreds of CRDs overloaded API servers. Two controllers that fought over one field raised API server load fourfold | Two CRDs in total, and one writer for each part of a NodeHealth object |
 | Dex | It created more than 500,000 objects in under 24 hours, and its cleanup, which listed them all, timed out | Each idle object is deleted by name, without listing |
 | Rancher Fleet | A status list with 7,200 entries hit the 1.5 MiB request limit. An empty cache read as "not found" and uninstalled workloads | No list of nodes inside one shared object. An empty or unsynced cache never releases a node |
 
@@ -82,13 +82,13 @@ The modules still do not call each other. They meet only in the NodeHealth objec
 | Health monitors | Their events do not change. They keep sending every event in today's format |
 | csp-health-monitor | Keeps the maintenance events that it gets from the cloud provider in a new `CSPMaintenanceEvent` custom resource instead of the database. Its existing store interface gets an implementation on these objects, so its logic does not change |
 | Platform connector, both roles | A new writer creates and updates the NodeHealth objects. It compares each event with the node's open faults. It writes new faults, changes and clears with a conditional write, within the node's write limit, and marks cleared devices as `Clearing`. For a repeated event it only raises the fault's count, and it saves counts every 10 minutes by default. In both roles it replies to the monitor only after it has written new faults, changes and clears. It handles each event before the optional deduplication stage of ADR-039, which stays as it is for the other connectors. In `enabled` mode it replaces the database writer. Node conditions and Events stay as today |
-| fault-quarantine | Reads the NodeHealth objects instead of the database and builds events for its existing rules. It records each quarantine in its own section, times the clear delays, applies the loop limits, and deletes idle objects. Its matching code moves to a shared package. Partial recovery ([ADR-062](062-fault-quarantine-partial-recovery-release.md)) and post-remediation validation ([ADR-049](049-node-validation.md)) keep working |
-| node-drainer | Drains the scope that fault-quarantine records, and records each drain in its own section |
+| fault-quarantine | Reads the NodeHealth objects instead of the database and builds events for its existing rules. It records each quarantine in its own section, times the clear delays, applies the loop limits, and deletes idle objects. Its matching code moves to a shared package. Partial recovery ([ADR-062](https://github.com/NVIDIA/NVSentinel/pull/2010)) and post-remediation validation ([ADR-049](049-node-validation.md)) keep working |
+| node-drainer | Drains for the devices that fault-quarantine holds, using the action of each matching fault, and records each drain in its own section |
 | fault-remediation | Starts a remediation only after the drain finished, and records each maintenance request in its own section |
 | janitor | No change. It still carries out the maintenance requests |
 | Event exporter | Watches the NodeHealth objects and sends each change, instead of reading the database |
 | health-events-analyzer | Not supported in this mode |
-| Helm chart | Adds the `global.nodeHealth.mode` key, the NodeHealth and CSPMaintenanceEvent CRDs, RBAC and admission policies. In `enabled` mode it runs no database and does not install the analyzer |
+| Helm chart | Adds the `global.nodeHealth.mode` and `global.nodeHealth.countSaveInterval` keys, the NodeHealth and CSPMaintenanceEvent CRDs, RBAC and admission policies. In `enabled` mode it runs no database and does not install the analyzer |
 
 ### The NodeHealth object
 
@@ -103,6 +103,8 @@ An object with one fault is about 2 KB. The connectors limit the metadata and th
 
 1. GPU 3 logged XID 48, a fatal memory error that calls for a GPU reset. The node is quarantined, the pods that use GPU 3 are evicted, and the GPU reset is running.
 2. The cross-node monitor lifecycle-manager reported planned host maintenance for the node, which fault-quarantine has not handled yet.
+
+The example leaves out fields that exist only when an event sets them, such as override flags.
 
 ```yaml
 apiVersion: healthevents.dgxc.nvidia.com/v1alpha1
@@ -220,7 +222,7 @@ sequenceDiagram
   PC->>NH: Create the object with the fault
   PC-->>Mon: Reply after the write
   Mon->>PC: The same XID again, many times
-  Note over PC: A repeat only raises the count. Counts are saved every 10 minutes
+  Note over PC: A repeat only raises the count. Counts are saved every 10 minutes by default
   NH-->>FQ: New fault
   FQ->>FQ: A rule matches, so cordon and taint the Node
   FQ->>NH: Record the quarantine
@@ -288,8 +290,8 @@ The connector applies each monitor's events in the order they arrive, not by the
 
 Two fault-quarantine features change when a node's cordon and taints come off. Both keep working in NodeHealth mode:
 
-- **Releasing actions on partial recovery ([ADR-062](062-fault-quarantine-partial-recovery-release.md)).** With this opt-in setting, when one fault clears and others stay open, fault-quarantine removes each taint and the cordon that no open fault needs. In NodeHealth mode it evaluates its rules on the faults that are still open in the NodeHealth object, and a `Clearing` fault still counts as open. As in ADR-062, nothing comes off early when an evaluation fails or when the quarantine needs validation. If the cordon comes off, fault-quarantine starts a new session, so drains that finished before no longer count, and node-drainer drains the node again before any later reboot or reset.
-- **Post-remediation validation ([ADR-049](049-node-validation.md)).** A NodeHealth object drops a fault once it clears, so fault-quarantine records, while the quarantine runs, which faults need validation. When the last fault clears, it creates the `ValidationRequest` and leaves the cordon and taints for lifecycle-manager, which removes them after validation passes, as today.
+- **Releasing actions on partial recovery ([ADR-062](https://github.com/NVIDIA/NVSentinel/pull/2010)).** With this opt-in setting, when one fault clears and others stay open, fault-quarantine removes each taint and the cordon that no open fault needs. In NodeHealth mode it evaluates its rules on the faults that are still open in the NodeHealth object, and a `Clearing` fault still counts as open. As in ADR-062, nothing comes off early when an evaluation fails or when the quarantine needs validation. If the cordon comes off, fault-quarantine starts a new session, so drains that finished before no longer count, and node-drainer drains the node again before any later reboot or reset.
+- **Post-remediation validation ([ADR-049](049-node-validation.md)).** A NodeHealth object drops a fault once it clears, so fault-quarantine keeps recording which faults need validation in its Node annotation, as today. When the last fault clears, it creates the `ValidationRequest` and leaves the cordon and taints for lifecycle-manager, which removes them after validation passes, as today.
 
 ### Changes for fault-quarantine rules
 
@@ -328,8 +330,8 @@ Each row gives the largest cluster whose worst case fits in half of the etcd spa
 ### Turning the mode on and off
 
 - **A new install without a database** sets the mode to `enabled` directly.
-- **An existing install with a database** moves in two steps. In `shadow`, the connectors write NodeHealth objects next to the database, which stays the source of truth. A Job copies today's open faults, and fault-quarantine reports where its decisions would differ. When the differences are explained and the rule owners signed off, `enabled` switches the consumers to the NodeHealth objects. Quarantined nodes stay quarantined. After the switch nothing reads the database, so it can be removed.
-- **Rollback** needs a database again. The consumers switch back to it, and a Job publishes every open fault to it.
+- **An existing install with a database** moves in two steps. In `shadow`, the connectors write NodeHealth objects next to the database, which stays the source of truth. A Job copies today's open faults, and fault-quarantine reports where its decisions would differ. When the differences are explained and the rule owners signed off, `enabled` switches the consumers to the NodeHealth objects, and a Job copies csp-health-monitor's open maintenance events into `CSPMaintenanceEvent` objects. Quarantined nodes stay quarantined. After the switch nothing reads the database, so it can be removed.
+- **Rollback** needs a database again. The consumers switch back to it, and a Job publishes every open fault to it and copies the open maintenance events back.
 
 ## Rationale
 
@@ -361,7 +363,7 @@ Each row gives the largest cluster whose worst case fits in half of the etcd spa
 - A node that has many faults and has used its write limit must wait before it writes again. In the worst case a clear waits up to about 36 minutes, which keeps the node quarantined longer, and a new fatal fault waits up to about 6 minutes before fault-quarantine sees it (estimate).
 - After someone else uncordons a node, fault-quarantine quarantines it again only when the fault is reported again.
 - One etcd cannot hold the worst case for 100,000 nodes, and large clusters need the circuit breaker's standing limit to stay within the support table. The API server's memory use is unknown until the scale test.
-- The NodeHealth object type becomes a public interface that must stay backwards compatible.
+- The NodeHealth and CSPMaintenanceEvent types become public interfaces that must stay backwards compatible.
 - The consumers must support both the database and the NodeHealth objects, because database mode stays.
 - When the DaemonSet is off, every write goes through the deployment platform connector, which ADR-052 still marks experimental.
 
@@ -386,7 +388,7 @@ Each row gives the largest cluster whose worst case fits in half of the etcd spa
 ## References
 
 - NVSentinel: [issue #1950](https://github.com/NVIDIA/NVSentinel/issues/1950); [ADR-027](027-kubernetes-data-store.md) (superseded by this record) and its series [#640](https://github.com/NVIDIA/NVSentinel/pull/640), [#787](https://github.com/NVIDIA/NVSentinel/pull/787), [#882](https://github.com/NVIDIA/NVSentinel/pull/882), [#970](https://github.com/NVIDIA/NVSentinel/pull/970); [ADR-012](012-health-events-exporter.md); [ADR-052](052-deployment-platform-connector.md); issues [#798](https://github.com/NVIDIA/NVSentinel/issues/798), [#1705](https://github.com/NVIDIA/NVSentinel/issues/1705); the `HealthEvent` prototype [#795](https://github.com/NVIDIA/NVSentinel/pull/795)
-- Related records: [ADR-022](022-circuit-breaker-reset-mechanism.md), [ADR-039](039-health-event-deduplication.md), [ADR-049](049-node-validation.md) and [ADR-062](062-fault-quarantine-partial-recovery-release.md) keep working in NodeHealth mode. In NodeHealth mode, per-node work replaces the priority queue of [ADR-041](041-node-drainer-priority-queue.md), and database mode keeps it as it is.
+- Related records: [ADR-022](022-circuit-breaker-reset-mechanism.md), [ADR-039](039-health-event-deduplication.md), [ADR-049](049-node-validation.md) and [ADR-062](https://github.com/NVIDIA/NVSentinel/pull/2010) keep working in NodeHealth mode. In NodeHealth mode, per-node work replaces the priority queue of [ADR-041](041-node-drainer-priority-queue.md), and database mode keeps it as it is.
 - Kubernetes: [custom resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/); [KEP-2527](https://github.com/kubernetes/enhancements/tree/master/keps/sig-architecture/2527-clarify-status-observations-vs-rbac); [KEP-383](https://github.com/kubernetes/enhancements/tree/master/keps/sig-instrumentation/383-new-event-api-ga-graduation); [event spam filter #47367](https://github.com/kubernetes/kubernetes/pull/47367); stalled node-health proposals [KEP-4212](https://github.com/kubernetes/enhancements/issues/4212), [KEP-5233](https://github.com/kubernetes/enhancements/issues/5233), [KEP-5283](https://github.com/kubernetes/enhancements/issues/5283), [KEP-5770](https://github.com/kubernetes/enhancements/issues/5770)
 - Lessons from other projects: [Kyverno #8974](https://github.com/kyverno/kyverno/issues/8974) and [reports-server](https://github.com/kyverno/reports-server); [Crossplane #2649](https://github.com/crossplane/crossplane/issues/2649) and [#5458](https://github.com/crossplane/crossplane/issues/5458); [Dex #1292](https://github.com/dexidp/dex/issues/1292); [Rancher Fleet #3482](https://github.com/rancher/fleet/issues/3482) and [#5406](https://github.com/rancher/fleet/issues/5406); [Sieve](https://www.usenix.org/system/files/osdi22-sun.pdf); [Velero restore reference](https://velero.io/docs/main/restore-reference/)
 - Storage and scale: [EKS Provisioned Control Plane](https://docs.aws.amazon.com/eks/latest/userguide/eks-provisioned-control-plane.html); [EKS ultra-scale](https://aws.amazon.com/blogs/containers/under-the-hood-amazon-eks-ultra-scale-clusters/)
