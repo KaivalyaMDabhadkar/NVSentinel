@@ -7,7 +7,7 @@
 - **Only changes are written to the NodeHealth objects.** Monitors keep sending every event, as today. The platform connector compares each event with the node's open faults, and a repeat causes no write. So a GPU that logs an XID (a GPU driver error) 600 times a second causes as few writes as a GPU that logs it once. Each node also has a fixed limit on how much it can write.
 - **It works with either platform connector.** Everything that matters is stored in the NodeHealth object, and the connector keeps nothing in memory that it needs after a restart. As a result, the DaemonSet connector and the deployment platform connector of [ADR-052](052-deployment-platform-connector.md) run the same code, and customers can turn the DaemonSet off.
 - **A node is released only on evidence.** Before fault-quarantine removes a node's cordon and taints, a newer write must show that the fault cleared. Each clear must also hold for a short delay, so a fault that keeps coming back keeps the node quarantined. Missing data never releases a node. The existing circuit breaker still limits how many nodes are quarantined.
-- **What we give up.** Quarantine rules can no longer match a few rarely used event details that a NodeHealth object does not keep, such as the text of later messages ([list](#changes-for-fault-quarantine-rules)). The health-events-analyzer is not supported, and the event exporter and csp-health-monitor need changes before they can run in this mode. In the worst case, one 16 GB etcd that also holds the Node objects supports more than 21,000 nodes (estimate). If the circuit breaker caps quarantined nodes at 10% of GPU nodes, it supports more than 36,000 (estimate).
+- **What we give up.** Quarantine rules can no longer match a few rarely used event details that a NodeHealth object does not keep, such as the event message ([list](#changes-for-fault-quarantine-rules)). The health-events-analyzer is not supported, and the event exporter and csp-health-monitor need changes before they can run in this mode. In the worst case, one 16 GB etcd that also holds the Node objects supports more than 21,000 nodes (estimate). If the circuit breaker caps quarantined nodes at 10% of GPU nodes, it supports more than 36,000 (estimate).
 
 Numbers marked "(estimate)" are calculated from the design's fixed write limits, not measured. A scale test will measure them.
 
@@ -80,8 +80,7 @@ The object stores nothing that can be derived from other data. There is no summa
 | `metadata.generation` and each device's `generation` | The API server raises the object's generation by 1 on every change to `spec`. The connector writes the generation of each device's latest change into the device, and fault-quarantine records the last generation it handled in `observedGeneration` when it writes for a decision. So the consumers can order changes without comparing clocks |
 | `bootID`, `bootGeneration` | Node section only. `bootID` is the node's boot ID at the connector's last write, and `bootGeneration` is the generation of the first change in that boot. With them the connector finds the first report of an open fault after a reboot, which it writes once ([how](#handling-repeated-errors)) |
 | `allowance` | How much of each part of the [write limit](#the-write-limit) is left. The central section has only `urgentBytes`, for all its writes |
-| `message` | The message of the fault's first occurrence, cut to at most 128 bytes. It goes into the cordon reason of a forced quarantine, and custom drain and maintenance request templates can use it, as today |
-| `entities` | The entities of the device's first report, at most 8. Only identifying entities, such as `GPU_UUID` or `PCI`, name the device. So a report that differs only in other entities, such as XID 74's register values, is a repeat |
+| `entities` | The entities of the device's first event, at most 8. Only identifying entities, such as `GPU_UUID` or `PCI`, name the device. So a report that differs only in other entities, such as XID 74's register values, is a repeat |
 | `flaps`, `recentlyClosed` | `flaps` counts how often the fault came back after a clear. `recentlyClosed` keeps each cleared device's clear time and flap count for 60 minutes |
 | `sessionID` | Names the current quarantine session ([ADR-062](062-fault-quarantine-release-at-session-end.md)). A new one starts when fault-quarantine quarantines the node. The other two consumers copy it, so their records from an earlier session no longer count |
 | `faultRemediation.remediations` | One entry per remediation target, with the attempt number, the generation at which it started, and whether it finished. The name of the maintenance request is derived from the session, the target and the attempt, so fault-remediation can find the request again after a restart |
@@ -118,7 +117,6 @@ spec:
       errorCode: "48"
       isFatal: true                             # stays true while the fault is open
       recommendedAction: COMPONENT_RESET        # the most severe action seen while open
-      message: "NVRM: Xid (PCI:0002:00:01): 48, pid=4123, name=python, DBE (0x00000002)"
       devices:
       - entities:
         - {type: GPU_UUID, value: GPU-67fec4a7-a3e1-385c-0c98-4361b4a372ca}
@@ -138,7 +136,6 @@ spec:
       isFatal: true
       recommendedAction: RESTART_VM
       attributes: {maintenanceRequestName: mr-gpu-node-17-7f3a}   # allow-listed metadata only
-      message: "Scheduled host maintenance"
       devices:
       - {generation: 13, flaps: 0, since: "2026-09-16T13:10:00Z"}   # no entities: the whole node
 status:
@@ -171,13 +168,15 @@ The consumers keep the code that decides what to do with an event: fault-quarant
 | `nodeName` | The object's name |
 | `agent`, `componentClass`, `checkName`, `version`, `isFatal`, `recommendedAction`, `customRecommendedAction`, `quarantineOverrides`, `drainOverrides` | The fault |
 | `errorCode` | The fault's error code |
-| `message` | The fault's first message, at most 128 bytes |
+| `message` | Empty, because the object keeps no message (see below) |
 | `entitiesImpacted` | The device's entities |
 | `metadata` | The fault's allow-listed attributes |
 | `generatedTimestamp` | `since`, when the fault opened on the device |
 | `isHealthy` | Always false, because the object keeps only open faults |
 | `processingStrategy` | Always `EXECUTE_REMEDIATION`, because [other events never change the object](#handling-repeated-errors) |
 | `id` | Built from the object's UID, the fault, the device and `since`, so it stays the same after a restart |
+
+**No event message.** The object keeps no event message, because a stored message would go stale. Repeats are not written, and one fault can cover several devices, so a stored message could even name the wrong device. The `HealthEvent` that the consumers get therefore has an empty `message`. The `cordon-reason` Node label of a forced quarantine gets the check name instead. Templates that read `.HealthEvent.Message` get an empty string, so a custom drain, a maintenance request or an ExternalRemediationRequest ([ADR-040](040-external-remediation-request.md)) made from one has no message. The `quarantineHealthEvent` Node annotation and the changes that the event exporter sends have no message either. Operators still see the messages in Node conditions and Events, as today.
 
 The code around those decisions changes. The consumers watch the NodeHealth objects with an informer instead of a database change stream. Each cache keeps only the fields that its consumer uses. Each consumer acts on the faults in `spec` and on live state: the Node, its pods and the maintenance requests. It records what it did in its own section of `status`, instead of in status fields on each event. The next consumer reads that section to pick up the work, as the Deployment controller reads ReplicaSet status. As today, fault-quarantine also lists the faults that hold the node in its `quarantineHealthEvent` Node annotation, which it writes with the cordon, and the other two consumers read them there. After a restart the consumers read the current objects instead of replaying events.
 
@@ -237,30 +236,30 @@ For each event, the connector looks for a matching open fault in its copy of the
 - **A new or worse fault**, one that is newly fatal or needs a more severe action, is written to the object before the connector replies to the monitor.
 - **A repeat of an open fault** causes no write. The one exception is a report that a consumer waits for: the first report of an open fault after a reboot, after a remediation attempt for it finished, or after someone uncordoned the node. The connector writes that report once, as a new `generation` on the device, so fault-remediation can try again or escalate, and fault-quarantine can quarantine the node again, as today. The connector knows of a reboot from the node's boot ID, as described below, and of the other two from the consumer sections.
 
-For example, a node that floods XID 137 and 145 at 120 to 600 events per second costs at most 2 writes when the flood starts and none after that. That is at most about 4.7 KB of etcd history in total (estimate).
+For example, a node that floods XID 137 and 145 at 120 to 600 events per second costs at most 2 writes when the flood starts and none after that. That is at most about 4.3 KB of etcd history in total (estimate).
 
-The connector's own writes keep its copy current. It reads the object and the Node's boot ID again when a monitor connects, because the monitor's earlier events may have gone through another connector. It also reads them when a repeat finds the copy more than a minute old, so it sees the consumers' records and reboots without one read per event. Neither read comes from a cache, because a cache can miss a clear that another connector wrote. Both are reads by name: the connector never lists or watches NodeHealth objects or Nodes, and today it already reads the Node by name for event metadata.
+The connector's own writes keep its copy current. It reads the object again when a monitor connects, because the monitor's earlier events may have gone through another connector. It also reads it when a repeat finds the copy more than a minute old, so it sees the consumers' records without one read per event. These reads do not come from a cache, because a cache can miss a clear that another connector wrote. They are reads by name: the connector never lists or watches NodeHealth objects or Nodes.
 
-**How the connector detects a reboot.** Database mode needs no boot ID, because it stores every report. Here a repeat causes no write, so the connector must know which boot the open faults were last written in, also after a restart or on another replica. The object stores it, and the connector never watches Nodes:
+**How the connector detects a reboot.** Database mode needs no boot ID, because it stores every event. Here a repeat causes no write, so the connector must know which boot the open faults were last written in, also after a restart or on another replica. The object stores it, and the connector never watches Nodes:
 
 1. Each write to `spec.node` stores the boot ID that the connector last read from the Node (`status.nodeInfo.bootID`). The first write in a new boot also sets `bootGeneration`.
-2. A reboot restarts the node's monitors, so each of them connects again, and the connector reads the Node's boot ID.
-3. If that boot ID differs from `bootID`, the next report of each open fault is its first report after the reboot. The connector writes it once, together with the new boot ID.
-4. The kubelet can publish the new boot ID shortly after the monitors connect. So for one minute after a monitor connects, the connector reads the boot ID again with each report from that monitor. The DaemonSet connector can read its own node's boot ID locally instead.
+2. With each batch of events that repeats an open fatal fault, the connector reads the Node's boot ID by name, without a cache. The Node-condition path already makes this read for such batches today. The DaemonSet connector can read its own node's boot ID locally instead.
+3. If that boot ID differs from `bootID`, the repeat is the first event of the fault after a reboot. The connector writes it once, together with the new boot ID.
+4. The kubelet publishes the new boot ID when it starts, normally before the monitors run their first checks.
 
-A finished attempt in fault-remediation's section is not enough on its own: monitors can report again before fault-remediation records the finished attempt, and a reboot by someone else leaves no record at all.
+A finished attempt in fault-remediation's section is not enough on its own: monitors can send the event again before fault-remediation records the finished attempt, and a reboot by someone else leaves no record at all.
 
 The writer handles each event after the connector's metadata and override stages and before the optional deduplication stage of [ADR-039](039-health-event-deduplication.md), which is off by default. That stage never drops an event. It only marks a repeated syslog XID or SXID event `STORE_AND_ANALYSE`, so that the Node conditions ignore it. Because the writer sees each event before any duplicate mark, a stale mark cannot hide a fault that came back, for example when a replica of the deployment platform connector missed the clear. Like fault-quarantine today, the writer uses only `EXECUTE_REMEDIATION` events, healthy or unhealthy. `STORE_ONLY` and `STORE_AND_ANALYSE` events never change a NodeHealth object. Both strategies mean an event must not change the cluster, so it cannot open or clear a fault, or use the node's write limit. Unless `global.nodeHealth.recordInformational` is `true`, the writer also skips informational faults from monitors on the node. An informational fault is not fatal and recommends `NONE`.
 
 ### The write limit
 
-Each node may write only a fixed amount per time period, and the object's `allowance` fields store how much is left. So every connector replica sees the same limit, also after a restart. The urgent part, for new and worse faults and the reports that a consumer waits for, allows 32 KiB at once and refills 32 KiB every 10 minutes. The normal part, for clears and other changes, allows 13 KiB at once and refills 32 KiB every hour. The limits count bytes, because etcd's cost grows with the bytes written. A write bigger than a part's full amount goes through when the part is full, and the part then refills from below zero. A node with one fault can make about 17 urgent writes at once, then one about every 33 seconds (estimate). If a node has used up its write limit, the connector waits until it can write before it replies, so the monitor waits too. If the monitor stops waiting, the connector drops the write. All central sections in the cluster also share one limit of 64 MiB at once, refilled every 10 minutes, split between the connectors that receive cross-node events. Each keeps its share in memory and starts with an empty share after a restart, so restarts never add writes.
+Each node may write only a fixed amount per time period, and the object's `allowance` fields store how much is left. So every connector replica sees the same limit, also after a restart. The urgent part, for new and worse faults and the reports that a consumer waits for, allows 32 KiB at once and refills 32 KiB every 10 minutes. The normal part, for clears and other changes, allows 13 KiB at once and refills 32 KiB every hour. The limits count bytes, because etcd's cost grows with the bytes written. A write bigger than a part's full amount goes through when the part is full, and the part then refills from below zero. A node with one fault can make about 18 urgent writes at once, then one about every 32 seconds (estimate). If a node has used up its write limit, the connector waits until it can write before it replies, so the monitor waits too. If the monitor stops waiting, the connector drops the write. All central sections in the cluster also share one limit of 64 MiB at once, refilled every 10 minutes, split between the connectors that receive cross-node events. Each keeps its share in memory and starts with an empty share after a restart, so restarts never add writes.
 
 ### Clearing faults and handling flapping devices
 
 A healthy event clears the matching faults. Each clear then waits a short **clear delay** before fault-quarantine acts on it. The delay starts at 30 seconds and doubles each time the fault comes back, up to 30 minutes, so a device that keeps flapping keeps its node quarantined.
 
-The connector removes a cleared device from the fault list at once and records it in `recentlyClosed`. Then fault-quarantine keeps the node quarantined for the clear delay, which it times with its own clock from when it sees the removal. So a difference between the clocks of two hosts cannot shorten the delay. A fault that comes back within 60 minutes of its clear neither waits for the write limit nor uses it, so fault-quarantine always sees a return before the delay ends. It opens again with one more flap, so a device that flaps slowly also gets longer and longer delays. Monitors need no flap logic of their own.
+The connector removes a cleared device from the fault list at once and records it in `recentlyClosed`. Then fault-quarantine keeps the node quarantined for the clear delay, which it times with its own clock from when it sees the removal. So a difference between the clocks of two hosts cannot shorten the delay. A fault that comes back within 60 minutes of its clear neither waits for the write limit nor uses it. So a return during the clear delay reaches fault-quarantine before the delay ends, and the node stays quarantined. A later return quarantines the node again. In both cases the fault opens with one more flap, so its next clear delay is longer, and a device that flaps slowly gets longer and longer delays. Monitors need no flap logic of their own.
 
 ```mermaid
 flowchart LR
@@ -293,7 +292,8 @@ Two fault-quarantine features decide when a node's cordon and taints come off. B
 
 The event that fault-quarantine gives its rules has the same 18 fields as today ([How the consumers get today's events](#how-the-consumers-get-todays-events)), and all 8 shipped rulesets keep matching. But rules can no longer select on:
 
-- the message text and detail entities of later occurrences, because the object keeps those of the first occurrence, and message text after the first 128 bytes,
+- the event message, because the object keeps none,
+- detail entities of later events, because the object keeps those of each device's first event,
 - event metadata outside an allow-list,
 - informational faults from monitors on the node, unless `global.nodeHealth.recordInformational` is set to `true`,
 - more than 8 entities per device, which affects XID 74 events,
@@ -325,11 +325,11 @@ Larger clusters need a provider that splits etcd storage or replaces etcd.
 
 ### Switching an existing install
 
-A new install sets `global.datastore.provider` to `kubernetes`. NodeHealth mode has no data migration. An existing install that switches starts with no NodeHealth objects:
+A new install sets `global.datastore.provider` to `kubernetes`. NodeHealth mode has no data migration. An existing install that switches starts with no NodeHealth objects. So it switches only after fault-quarantine has handled every open fault, for example while the circuit breaker is not tripped:
 
 - An operator applies the chart's CRDs before the upgrade, because `helm upgrade` does not install them.
 - Nodes that are quarantined at the switch stay quarantined, because a missing object never releases a node. An operator removes their cordon and taints after checking them.
-- A fault that was reported before the switch counts again only when its monitor reports it again. After the switch, csp-health-monitor sees only maintenance notices from about the time of the switch.
+- A fault from before the switch counts only when its monitor sends it again. After the switch, csp-health-monitor sees only maintenance notices from about the time of the switch.
 - A switch back to a database needs an empty database, because the consumers would act on events left from before the switch.
 
 ## Rationale
@@ -354,7 +354,7 @@ A new install sets `global.datastore.provider` to `kubernetes`. NodeHealth mode 
 
 ### Negative
 
-- Quarantine rules can no longer match a few event details, such as the text of later messages or metadata outside an allow-list. Some custom rulesets may need changes.
+- Quarantine rules can no longer match a few event details, such as the event message or metadata outside an allow-list. Templates and the event exporter also get no message. Some custom rulesets and templates may need changes.
 - Every clear waits its clear delay, also after a reboot or a GPU reset that worked. So a repaired node returns to service 30 seconds later, or up to 30 minutes later if its fault flapped in the last hour.
 - There is no event history. A NodeHealth object keeps only open faults, and fault-quarantine deletes it 24 hours after the last fault clears. Investigations must rely on the exported changes or on logs.
 - The health-events-analyzer cannot run, so patterns over time are not detected, such as an XID that keeps coming back or a node that needs remediation again and again. Installs that need it stay in database mode.
@@ -391,7 +391,7 @@ A new install sets `global.datastore.provider` to `kubernetes`. NodeHealth mode 
 ## References
 
 - NVSentinel: [issue #1950](https://github.com/NVIDIA/NVSentinel/issues/1950); [ADR-027](027-kubernetes-data-store.md) (proposed to be superseded by this record) and its series [#640](https://github.com/NVIDIA/NVSentinel/pull/640), [#787](https://github.com/NVIDIA/NVSentinel/pull/787), [#882](https://github.com/NVIDIA/NVSentinel/pull/882), [#970](https://github.com/NVIDIA/NVSentinel/pull/970); issues [#798](https://github.com/NVIDIA/NVSentinel/issues/798), [#1705](https://github.com/NVIDIA/NVSentinel/issues/1705); the `HealthEvent` prototype [#795](https://github.com/NVIDIA/NVSentinel/pull/795)
-- Related records: [ADR-012](012-health-events-exporter.md), [ADR-022](022-circuit-breaker-reset-mechanism.md), [ADR-039](039-health-event-deduplication.md), [ADR-041](041-node-drainer-priority-queue.md), [ADR-049](049-node-validation.md), [ADR-051](051-maintenance-request.md), [ADR-052](052-deployment-platform-connector.md), [ADR-062](062-fault-quarantine-release-at-session-end.md)
+- Related records: [ADR-012](012-health-events-exporter.md), [ADR-022](022-circuit-breaker-reset-mechanism.md), [ADR-039](039-health-event-deduplication.md), [ADR-040](040-external-remediation-request.md), [ADR-041](041-node-drainer-priority-queue.md), [ADR-049](049-node-validation.md), [ADR-051](051-maintenance-request.md), [ADR-052](052-deployment-platform-connector.md), [ADR-062](062-fault-quarantine-release-at-session-end.md)
 - Kubernetes: [custom resources](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/); [KEP-2527](https://github.com/kubernetes/enhancements/tree/master/keps/sig-architecture/2527-clarify-status-observations-vs-rbac); [event spam filter #47367](https://github.com/kubernetes/kubernetes/pull/47367); stalled node-health proposals [KEP-4212](https://github.com/kubernetes/enhancements/issues/4212), [KEP-5233](https://github.com/kubernetes/enhancements/issues/5233), [KEP-5283](https://github.com/kubernetes/enhancements/issues/5283), [KEP-5770](https://github.com/kubernetes/enhancements/issues/5770)
 - Lessons from other projects: [Kyverno #8974](https://github.com/kyverno/kyverno/issues/8974) and [reports-server](https://github.com/kyverno/reports-server); [Crossplane #2649](https://github.com/crossplane/crossplane/issues/2649) and [#5458](https://github.com/crossplane/crossplane/issues/5458); [Dex #1292](https://github.com/dexidp/dex/issues/1292); [Rancher Fleet #3482](https://github.com/rancher/fleet/issues/3482), [#5406](https://github.com/rancher/fleet/issues/5406) and [#5585](https://github.com/rancher/fleet/pull/5585); [Sieve](https://www.usenix.org/system/files/osdi22-sun.pdf); [Velero restore reference](https://velero.io/docs/main/restore-reference/)
 - Storage and scale: [EKS Provisioned Control Plane](https://docs.aws.amazon.com/eks/latest/userguide/eks-provisioned-control-plane.html); [EKS ultra-scale](https://aws.amazon.com/blogs/containers/under-the-hood-amazon-eks-ultra-scale-clusters/); [AKS etcd limit](https://learn.microsoft.com/en-us/troubleshoot/azure/azure-kubernetes/create-upgrade-delete/troubleshoot-apiserver-etcd)
