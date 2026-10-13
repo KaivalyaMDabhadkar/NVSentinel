@@ -38,7 +38,7 @@ Other projects that kept a lot of state in custom resources hit etcd and API ser
 | Dex | It created more than 500,000 objects in under 24 hours, and its cleanup, which listed them all, timed out ([dex#1292](https://github.com/dexidp/dex/issues/1292)) | Each idle object is deleted by name, without listing |
 | Rancher Fleet | A status list with an entry for every resource on about 70 clusters went over etcd's request size limit ([fleet#3482](https://github.com/rancher/fleet/issues/3482)). An empty cache read as "not found" and uninstalled workloads ([fleet#5406](https://github.com/rancher/fleet/issues/5406), fixed in [fleet#5585](https://github.com/rancher/fleet/pull/5585)) | No list of nodes inside one shared object. An empty or unsynced cache never releases a node |
 
-The Kubernetes documentation describes the best fit for custom resources as a relatively small number of relatively small objects that change relatively infrequently ([Declarative APIs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/#declarative-apis)). So this design stores one small object per node with faults, writes it only when something changes, and never stores one object per event.
+The Kubernetes documentation describes the best fit for custom resources as a relatively small number of relatively small objects that change relatively infrequently ([Declarative APIs](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/#declarative-apis)). So this design stores one small object per node with faults, writes it only when something changes, and never stores one object per health event.
 
 ## Decision
 
@@ -84,7 +84,7 @@ The object stores nothing that can be derived from other data. There is no summa
 | `entities` | The entities of the device's first report, at most 8. Only identifying entities, such as `GPU_UUID` or `PCI`, name the device. So a report that differs only in other entities, such as XID 74's register values, is a repeat |
 | `flaps`, `recentlyClosed` | `flaps` counts how often the fault came back after a clear. `recentlyClosed` keeps each cleared device's clear time and flap count for 60 minutes |
 | `sessionID` | Names the current quarantine session ([ADR-062](062-fault-quarantine-release-at-session-end.md)). A new one starts when fault-quarantine quarantines the node. The other two consumers copy it, so their records from an earlier session no longer count |
-| `faultRemediation.remediations` | One entry per remediation target, with the attempt number, the generation at which it started, and whether it finished. The name of the maintenance request is derived from the session, the target and the attempt, so fault-remediation can always find the request again |
+| `faultRemediation.remediations` | One entry per remediation target, with the attempt number, the generation at which it started, and whether it finished. The name of the maintenance request is derived from the session, the target and the attempt, so fault-remediation can find the request again after a restart |
 
 **Example.** Node `gpu-node-17` has two open faults:
 
@@ -189,12 +189,12 @@ The code around those decisions changes. The consumers watch the NodeHealth obje
 | csp-health-monitor | Keeps its maintenance events in a new `CSPMaintenanceEvent` custom resource instead of the database |
 | Platform connector, both roles | A new writer replaces the database writer. It writes only changes, and in both roles it replies to the monitor only after the write ([Handling repeated errors](#handling-repeated-errors)). Node conditions and Events stay as today, because other tools read them |
 | fault-quarantine | Reads the NodeHealth objects instead of the database and builds today's events from them for its existing rules. It records each quarantine in its own section, times the clear delays, and deletes idle objects |
-| node-drainer | Drains for the devices that fault-quarantine holds, using the action of each matching fault, and records each drain in its own section. Its work is keyed by node instead of the event priority queue of [ADR-041](041-node-drainer-priority-queue.md) |
+| node-drainer | Drains for the devices in fault-quarantine's Node annotation, using the action of each matching fault, and records each drain in its own section. Its work is keyed by node instead of the event priority queue of [ADR-041](041-node-drainer-priority-queue.md) |
 | fault-remediation | Starts a remediation only after the drain finished, and records each maintenance request, and when it finished, in its own section |
 | janitor | No change. It still carries out the maintenance requests |
 | Event exporter | Watches the NodeHealth objects and sends each change, instead of reading the database |
 | health-events-analyzer | Not supported in this mode |
-| Helm chart | Adds `kubernetes` as a value of `global.datastore.provider`, the `global.nodeHealth.shadow` (migration) and `global.nodeHealth.recordInformational` keys, the NodeHealth and CSPMaintenanceEvent CRDs, RBAC and admission policies. In NodeHealth mode it runs no database and does not install the analyzer |
+| Helm chart | Adds `kubernetes` as a value of `global.datastore.provider`, the `global.nodeHealth.recordInformational` key, the NodeHealth and CSPMaintenanceEvent CRDs, RBAC and admission policies. In NodeHealth mode it runs no database and does not install the analyzer |
 
 ### Example: one GPU fault from detection to recovery
 
@@ -237,7 +237,7 @@ For each event, the connector looks for a matching open fault in its copy of the
 - **A new or worse fault**, one that is newly fatal or needs a more severe action, is written to the object before the connector replies to the monitor.
 - **A repeat of an open fault** causes no write. The one exception is a report that a consumer waits for: the first report of an open fault after a reboot, after a remediation attempt for it finished, or after someone uncordoned the node. The connector writes that report once, as a new `generation` on the device, so fault-remediation can try again or escalate, and fault-quarantine can quarantine the node again, as today. The connector knows of a reboot from the node's boot ID, and of the other two from the consumer sections. Database mode needs no boot ID, because it stores every report. Here the connector must know which boot the open faults were last written in, also after a restart or on another replica, so the object stores it. A finished attempt in fault-remediation's section is not enough: after a reboot, monitors can report again before fault-remediation records the finished attempt, and a reboot by someone else leaves no record at all.
 
-For example, a node that floods XID 137 and 145 at 120 to 600 events per second costs 1 or 2 writes when the flood starts and none after that. That is about 4.7 KB of etcd history in total (estimate).
+For example, a node that floods XID 137 and 145 at 120 to 600 events per second costs at most 2 writes when the flood starts and none after that. That is at most about 4.7 KB of etcd history in total (estimate).
 
 The connector's own writes keep its copy current. It reads the object and the Node's boot ID again when a monitor connects, because the monitor's earlier events may have gone through another connector. It also reads them when a repeat finds the copy more than a minute old, so it sees the consumers' records and reboots without one read per event. Neither read comes from a cache, because a cache can miss a clear that another connector wrote.
 
@@ -251,14 +251,14 @@ Each node may write only a fixed amount per time period, and the object's `allow
 
 A healthy event clears the matching faults. Each clear then waits a short **clear delay** before fault-quarantine acts on it. The delay starts at 30 seconds and doubles each time the fault comes back, up to 30 minutes, so a device that keeps flapping keeps its node quarantined.
 
-The connector removes a cleared device from the fault list at once and records it in `recentlyClosed`. Then fault-quarantine keeps the node quarantined for the clear delay, which it times with its own clock from when it sees the removal. So a difference between the clocks of two hosts cannot shorten the delay. It releases the device when the delay ends with no return. A fault that comes back within 60 minutes of its clear neither waits for the write limit nor uses it, so fault-quarantine always sees a return before the delay ends. It opens again with one more flap, so a device that flaps slowly also gets longer and longer delays. Monitors need no flap logic of their own.
+The connector removes a cleared device from the fault list at once and records it in `recentlyClosed`. Then fault-quarantine keeps the node quarantined for the clear delay, which it times with its own clock from when it sees the removal. So a difference between the clocks of two hosts cannot shorten the delay. A fault that comes back within 60 minutes of its clear neither waits for the write limit nor uses it, so fault-quarantine always sees a return before the delay ends. It opens again with one more flap, so a device that flaps slowly also gets longer and longer delays. Monitors need no flap logic of their own.
 
 ```mermaid
 flowchart LR
   report(["A monitor reports the fault"]) --> open["Open<br/>The fault is in the list<br/>and keeps the node quarantined"]
   open -->|"A healthy event arrives"| delay["Removed, clear delay runs<br/>fault-quarantine keeps the node quarantined:<br/>30 s at first, doubling on each return, up to 30 min"]
   delay -->|"The fault comes back before the delay ends"| open
-  delay -->|"The delay ends with no return"| released["Released<br/>fault-quarantine can release the node"]
+  delay -->|"The delay ends with no return"| released["Done<br/>The fault no longer keeps the node quarantined"]
   released -.->|"The fault comes back within 60 minutes:<br/>it keeps the longer delay"| open
 ```
 
@@ -267,7 +267,7 @@ The connector applies each monitor's events in the order they arrive, not by the
 ### Safety rules
 
 - **Release only on evidence.** Before fault-quarantine releases a node, a newer write must no longer contain its faults, and their clear delays must have passed with no return. A missing, unsynced or re-created object releases nothing. A lost `status`, for example after a restore, releases nothing either, because the faults in `spec` still hold the node.
-- **Re-check before acting.** Each consumer reads the object and the Node again from the API server, not from its cache, before it acts. A remediation starts only after the drain finished, only for a fault that is still open, and never while another maintenance request for the node still runs. So a lost `status` cannot cause a second reboot or reset. A remediation is never retried on a timer, only when the fault is reported again after the last attempt.
+- **Re-check before acting.** Each consumer reads the object and the Node again from the API server, not from its cache, before it acts. A remediation starts only after the drain finished, only for a fault that is still open, and never while another maintenance request for the node still runs. A remediation is never retried on a timer, only when the fault is reported again after the last attempt.
 - **Circuit breaker.** The circuit breaker of [ADR-022](022-circuit-breaker-reset-mechanism.md) and its settings decide how many nodes fault-quarantine quarantines, as today. NodeHealth mode adds no limits of its own on quarantines, drains or remediations. The breaker's standing limit, `fault-quarantine.circuitBreaker.maxCordonedPercentage`, is off by default. Large clusters should set it, as [Scale and etcd usage](#scale-and-etcd-usage) shows. A breaker reset cannot skip open faults: fault-quarantine evaluates every open fault, whichever cursor (`RESUME` or `CREATE`) the reset names.
 - **Uncordons by someone else.** If an operator or another controller uncordons a node while its fault is open, fault-quarantine records this in its section. As today, it detects the uncordon from its own cordon annotation on the Node, so a crash before its cordon is not taken for an uncordon. It quarantines the node again when the fault is reported again. Until then, that fault does not count in a later quarantine.
 - **Safe restarts.** Every step is safe to repeat, and each consumer records what it will do before it does it. A crash test restarts each component after each write and checks the result.
@@ -278,7 +278,7 @@ The connector applies each monitor's events in the order they arrive, not by the
 Two fault-quarantine features decide when a node's cordon and taints come off. Both keep working in NodeHealth mode:
 
 - **Release at session end ([ADR-062](062-fault-quarantine-release-at-session-end.md)).** When a fault opens, fault-quarantine applies the taints and the cordon that its rules require, also when the node is already quarantined. It removes them only when the session ends: every fault in the session has cleared and its clear delay has passed.
-- **Post-remediation validation ([ADR-049](049-node-validation.md)).** A NodeHealth object drops a fault once it clears, so fault-quarantine keeps recording which faults need validation in its Node annotation, as today. When the last fault clears, it checks the drain in `status.nodeDrainer` instead of the database, creates the `ValidationRequest`, and leaves the cordon and taints for lifecycle-manager, which removes them after validation passes, as today.
+- **Post-remediation validation ([ADR-049](049-node-validation.md)).** A NodeHealth object drops a fault once it clears, so fault-quarantine keeps recording which faults need validation in its Node annotation, as today. When the session ends, it checks the drain in `status.nodeDrainer` instead of the database, creates the `ValidationRequest`, and leaves the cordon and taints for lifecycle-manager, which removes them after validation passes, as today.
 
 ### Changes for fault-quarantine rules
 
@@ -290,8 +290,6 @@ The event that fault-quarantine gives its rules has the same 18 fields as today 
 - more than 8 entities per device, which affects XID 74 events,
 - faults beyond the size limit, which merge into one overflow entry,
 - two error codes of one event together, because each code becomes its own fault. No shipped monitor or ruleset does this.
-
-A validator reports the affected rules in each ruleset, including custom rulesets. Their owners must accept each loss before they turn on NodeHealth mode.
 
 ### Other components that use the database
 
@@ -316,11 +314,14 @@ Each row of the table gives the largest cluster whose worst case fits in half of
 
 Larger clusters need a provider that splits etcd storage or replaces etcd.
 
-### Turning the mode on and off
+### Switching an existing install
 
-- **A new install without a database** sets `global.datastore.provider` to `kubernetes` directly.
-- **An existing install with a database** applies the chart's CRDs before it upgrades, because `helm upgrade` does not install or update CRDs. Then it moves in two steps. With `global.nodeHealth.shadow: true`, the connectors write NodeHealth objects next to the database, which stays the source of truth. In this step the NodeHealth writes never delay the reply to the monitor. A Job copies today's open faults, and fault-quarantine reports where its decisions would differ. When the differences are explained and the rule owners signed off, the consumers stop. A Job then copies every open fault, with the progress that the consumers recorded, into the NodeHealth objects. It also copies csp-health-monitor's open maintenance events into `CSPMaintenanceEvent` objects and each cloud provider's polling position into its ConfigMap. Then `global.datastore.provider: kubernetes` starts the consumers on the NodeHealth objects. Quarantined nodes stay quarantined, and no step runs twice. After the switch nothing reads the database, so it can be removed.
-- **Rollback** needs a database again. The consumers stop, and a Job copies every open fault, with the progress that the consumers recorded, and the maintenance events into the database. Then the provider switches back, and the Job runs once more to copy what changed during the switch. Quarantined nodes stay quarantined, and no step runs twice.
+A new install sets `global.datastore.provider` to `kubernetes`. NodeHealth mode has no data migration. An existing install that switches starts with no NodeHealth objects:
+
+- An operator applies the chart's CRDs before the upgrade, because `helm upgrade` does not install them.
+- Nodes that are quarantined at the switch stay quarantined, because a missing object never releases a node. An operator removes their cordon and taints after checking them.
+- A fault that was reported before the switch counts again only when its monitor reports it again. After the switch, csp-health-monitor sees only maintenance notices from about the time of the switch.
+- A switch back to a database needs an empty database, because the consumers would act on events left from before the switch.
 
 ## Rationale
 
@@ -340,7 +341,7 @@ Larger clusters need a provider that splits etcd storage or replaces etcd.
 - The same design works with the DaemonSet connector, the deployment platform connector or both, so customers can turn the DaemonSet off.
 - A connector crash can no longer lose a fault or a clear, because both roles write them before they reply. Today the DaemonSet connector replies before it writes.
 - The consumers act on the faults that are open now. After a restart they read the current NodeHealth objects instead of replaying old events, so a missed event no longer means a missed fault.
-- Operators can list the nodes with open faults with `kubectl get nh` and see their faults with `kubectl describe nh`.
+- Operators can list the nodes that had faults in the last 24 hours with `kubectl get nh` and see their open faults with `kubectl describe nh`.
 
 ### Negative
 
@@ -351,6 +352,7 @@ Larger clusters need a provider that splits etcd storage or replaces etcd.
 - The event exporter and csp-health-monitor need code changes before they can run in this mode.
 - A node that has many faults and has used its write limit must wait before it writes again. In the worst case a clear waits up to about 35 minutes, so the node stays quarantined longer. A new fatal fault waits up to about 6 minutes before fault-quarantine sees it (estimate). Meanwhile the monitor waits for its reply. Monitors retry for up to 5 minutes, so in that worst case a change can be dropped until the monitor reports it again. A monitor sends one batch at a time, so a cross-node monitor that waits for one node also delays its reports about every other node.
 - One etcd cannot hold the worst case for 100,000 nodes, and large clusters need the circuit breaker's standing limit to stay within the support table. The memory use of the API server and the consumers is unknown until the scale test.
+- There is no data migration from or to a database ([Switching an existing install](#switching-an-existing-install)).
 - The NodeHealth and CSPMaintenanceEvent types become public interfaces that must stay backwards compatible.
 - The consumers must support both the database and the NodeHealth objects, because database mode stays.
 - When the DaemonSet is off, every write goes through the deployment platform connector, which ADR-052 still marks experimental.
