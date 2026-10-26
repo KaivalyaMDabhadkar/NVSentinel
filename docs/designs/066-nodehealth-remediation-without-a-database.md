@@ -76,7 +76,7 @@ A NodeHealth object is named after its Node and owned by it, so there is at most
 - **Open faults in `spec`, written by the connector.** `spec.checks` has one entry for each check of a monitor that has open faults, with those faults. Faults from monitors on the node and from cross-node monitors, such as csp-health-monitor or lifecycle-manager ([ADR-051](051-maintenance-request.md)), are kept the same way. The connector knows which callers run on the node from ADR-052's node binding ([Who writes each section](#who-writes-each-section)).
 - **Consumer sections in `status`.** Each of the three consumers writes only its own section, to record what it did.
 
-An object with one fault is about 1.6 KB. An object holds at most 16 faults, and each fault at most 8 entities. A fault that does not fit merges into one whole-check fault for its check, with no error code and no entities, which still keeps the node quarantined. Because it names no GPU, a GPU reset that it calls for becomes a VM restart. Only a healthy event for the whole check removes it. Whole-check faults do not count toward the 16.
+An object with one fault is about 1.6 KB. An object holds at most 16 faults, and each fault at most 8 entities. A fault that does not fit merges into one whole-check fault for its check. It has no error code and no entities, and it keeps the most severe `isFatal` and action of the faults in it, so it still keeps the node quarantined. Because it names no GPU, a GPU reset that it calls for becomes a VM restart. Only a healthy event for the whole check removes it. Whole-check faults do not count toward the 16.
 
 The object stores nothing that can be derived from other data. There is no summary of the faults, no history of remediations and no count of repeats. Most fields explain themselves or have a comment in the example. These need more explanation:
 
@@ -95,7 +95,7 @@ The object stores nothing that can be derived from other data. There is no summa
 1. GPU 3 logged XID 48, a fatal memory error that calls for a GPU reset. The node is quarantined, the pods that use GPU 3 are evicted, and the GPU reset is running.
 2. GPU 5 logged XID 48 too. That is a second fault in the same check entry.
 3. GPU 6 fell off the bus. That is another check of syslog-health-monitor, so it has its own entry with the same `agent`.
-4. The cross-node monitor lifecycle-manager reported planned host maintenance for the node.
+4. The cross-node monitor lifecycle-manager reported planned host maintenance for the node, from a MaintenanceRequest that asks for an external repair ([ADR-051](051-maintenance-request.md)).
 
 Faults 2 to 4 are new, and fault-quarantine has not handled them yet. The consumers get four events, one for each fault. The example leaves out fields that exist only when an event sets them, such as override flags. It assumes that partial drains and GPU resets are turned on. Both are off by default.
 
@@ -144,8 +144,9 @@ spec:
     componentClass: Node
     version: 1
     faults:
-    - isFatal: true                           # fault 4: no error code and no entities, so the whole node
-      recommendedAction: RESTART_VM
+    - isFatal: false                          # fault 4: the whole node; not fatal, as MaintenanceRequests usually are
+      recommendedAction: CUSTOM
+      customRecommendedAction: external-remediation
       attributes: {maintenanceRequestName: mr-gpu-node-17-7f3a}   # allow-listed metadata only
       reportedAt: "2026-09-16T13:10:00.000000Z"
 status:
@@ -198,7 +199,7 @@ Each consumer acts on the faults in `spec` and on live state: the Node, its pods
 
 | Component | Change for Kubernetes mode |
 |---|---|
-| Health monitors | Their events do not change. They keep sending every event in today's format |
+| Health monitors | They keep sending every event in today's format. Their publishers add the node's boot ID in a new optional `bootID` field, which custom monitors may leave out ([how](#handling-repeated-errors)) |
 | csp-health-monitor | Keeps its maintenance events in a new `CSPMaintenanceEvent` custom resource instead of the database, through a Kubernetes implementation of its own store |
 | store-client | Adds the `kubernetes` provider. It holds all code that reads or writes NodeHealth objects, such as the connector's writer and the consumers' informers, queues and event rebuild |
 | Platform connector, both roles | The provider's writer replaces the database writer. It writes only changes, and in both roles it replies to the monitor only after the write ([Handling repeated errors](#handling-repeated-errors)). Node conditions and Events stay as today, because other tools read them |
@@ -264,7 +265,7 @@ For example, a node that floods XID 137 and 145 at 120 to 600 events per second 
 
 The connector's own writes keep its copy current. It reads the object again when a monitor connects, because the monitor's earlier events may have gone through another connector. It also reads it when a repeat finds the copy more than a minute old, so it sees the consumers' records without one read per event. These reads do not come from a cache, because a cache can miss a clear that another connector wrote. They are reads by name: the connector never lists or watches NodeHealth objects or Nodes.
 
-**How the connector detects a reboot.** Database mode needs no boot ID, because it stores every event. Here a repeat causes no write, so the connector must know whether a repeat comes from a new boot. When fault-remediation starts an attempt, it records the node's boot ID (`status.nodeInfo.bootID`) in its entry. While an attempt that covers an open fault runs, the connector reads the Node's boot ID by name, without a cache, with each batch that repeats that fault. The Node-condition path already makes this read for such batches today, and the DaemonSet connector can read its own node's boot ID locally. If the boot ID differs from the recorded one, the repeat is the first report after the reboot. A finished attempt alone is not enough: gpu-health-monitor sends a fault that is still there once after a reboot, often before fault-remediation records that the attempt finished. Monitors could mark such an event themselves, but then every monitor would need a change, including custom monitors.
+**How the connector detects a reboot.** Database mode needs no boot ID, because it stores every event. Here a repeat causes no write, so the connector must know whether a repeat comes from a new boot. Each event carries the boot ID of the node where its monitor runs, in a new optional `bootID` field of `HealthEvent`. The shared publisher of the Go monitors and the publisher of gpu-health-monitor read it from `/proc/sys/kernel/random/boot_id` when they start. When fault-remediation starts an attempt, it records the node's boot ID (`status.nodeInfo.bootID`, the same value) in its entry. If a repeat from a monitor on the node carries a different boot ID, it is the first report after the reboot. So the connector reads no Node, and it does not depend on when the kubelet publishes the new boot ID. A finished attempt alone is not enough: gpu-health-monitor sends a fault that is still there once after a reboot, often before fault-remediation records that the attempt finished. An event without a boot ID, from an older or a custom monitor, counts only after a finished attempt. If such a monitor sends a fault only once after a reboot, fault-remediation does not retry, and the node stays quarantined until an operator acts.
 
 The connector writes such a report only if the fault's `reportedAt` is earlier than the `startedAt` of the newest attempt that covers it, or, after an uncordon or untaint, earlier than fault-quarantine's `endedAt`. Stored times are ordered, so the new `reportedAt` is later than both, and each such report is written once.
 
@@ -336,7 +337,7 @@ Three components use the database today for more than remediation.
 
 - **health-events-analyzer: not supported.** It finds patterns over time, such as an XID that repeats many times in a day, and 15 of its 22 default rules need past events. A NodeHealth object keeps only the faults that are open now, so the analyzer cannot run in Kubernetes mode, and the chart does not install it. Installs that need the analyzer stay in database mode.
 - **Event exporter: needs a change.** It reads new events from the database and sends them to an HTTP endpoint ([ADR-012](012-health-events-exporter.md)). To run in Kubernetes mode, it must be changed to watch the NodeHealth objects instead, and to send each change, such as a new fault, a changed fault or a clear. It then sends changes, not every repeated event, and no `STORE_ONLY` or `STORE_AND_ANALYSE` events.
-- **csp-health-monitor: moves its store to a custom resource.** It polls the cloud provider for planned maintenance, and it keeps each maintenance event and its status in the database. In Kubernetes mode it keeps them in a new `CSPMaintenanceEvent` custom resource instead: one object per maintenance event, with the same fields as the database record. It uses them through its existing store interface, which gets a Kubernetes implementation in csp-health-monitor, so neither its logic nor its maintenance-notifier sidecar changes. A ConfigMap keeps how far it has read each cloud provider's events, and each object is deleted 7 days after its maintenance finished. So there are only about as many objects as nodes with planned or recent maintenance.
+- **csp-health-monitor: moves its store to a custom resource.** It polls the cloud provider for planned maintenance, and it keeps each maintenance event and its status in the database. In Kubernetes mode it keeps them in a new `CSPMaintenanceEvent` custom resource instead: one object per maintenance event, with the same fields as the database record. It uses them through its existing store interface, which gets a Kubernetes implementation in csp-health-monitor, so neither its logic nor its maintenance-notifier sidecar changes. A ConfigMap keeps how far it has read each cloud provider's events, and each object is deleted 7 days after its maintenance ended or its last update, whichever is later. So there are only about as many objects as nodes with planned or recent maintenance.
 
 ### Scale and etcd usage
 
@@ -386,7 +387,7 @@ A new install sets `global.datastore.provider` to `kubernetes`. Kubernetes mode 
 
 - Remediation works without MongoDB or PostgreSQL. A plain Helm install can remediate, and a database outage can no longer stop remediation.
 - During XID floods, the connector writes only changes, instead of one database write per event.
-- The events that monitors send, including custom monitors, do not change.
+- Monitors, including custom monitors, keep sending today's events. The only addition is an optional boot ID that the shared publishers set.
 - The same design works with the DaemonSet connector, the deployment platform connector or both, so customers can turn the DaemonSet off.
 - A connector crash can no longer lose a fault or a clear, because both roles write them before they reply. Today the DaemonSet connector replies before it writes.
 - The consumers act on the faults that are open now. After a restart they read the current NodeHealth objects instead of replaying old events, so a missed event no longer means a missed fault.
