@@ -74,4 +74,4 @@ Each record states one decision: the context that forced it, what was decided, w
 | 059 | [Health Events Analyzer — Operator Recovery of Derived Conditions (proposed)](059-derived-condition-recovery.md) |
 | 062 | [Fault Quarantine — Release Quarantine Actions Only at Session End (proposed)](062-fault-quarantine-release-at-session-end.md) |
 | 063 | [Node Drainer — Owner Kinds in Pod Drain Policies (proposed)](063-pod-drain-policies-owner-kinds.md) |
-| 063 | [Kubernetes-Native Remediation Without a Database (proposed)](063-nodehealth-remediation-without-a-database.md) |
+| 066 | [Kubernetes-Native Remediation Without a Database (proposed)](066-nodehealth-remediation-without-a-database.md) |
