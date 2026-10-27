@@ -1,6 +1,6 @@
 # ADR-027: Kubernetes Data Store (CRD) for HealthEvent
 
-Status: Superseded by [ADR-066](066-nodehealth-remediation-without-a-database.md).
+Status: Proposed to be superseded by [ADR-067](067-nodehealth-remediation-without-a-database.md).
 
 Author: Avinash Reddy Yeddula, Igor Velichkovich
 
